@@ -1,0 +1,13 @@
+data/raw/
+data/*.parquet
+data/*.pkl
+logs/
+*.pyc
+__pycache__/
+.env
+credentials.json
+token.json
+*.egg-info/
+dist/
+build/
+.DS_Store
