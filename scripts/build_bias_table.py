@@ -119,15 +119,30 @@ def build_bias_table() -> None:
     group_cols = ["station", "month", "season", "cluster_id", "model_bin"]
     logger.info("Grouping by %s...", group_cols)
 
+    def _bias_mean(x):
+        return float(x.mean())
+
+    def _bias_std(x):
+        d = x.dropna()
+        return float(d.std(ddof=1)) if len(d) >= 2 else float("nan")
+
+    def _bias_skew(x):
+        d = x.dropna()
+        return float(stats.skew(d, bias=False)) if len(d) >= 3 else float("nan")
+
+    def _n_obs(x):
+        return int(len(x.dropna()))
+
     bias_table = (
         merged.groupby(group_cols)["bias"]
-        .apply(compute_bias_stats)
+        .agg(
+            bias_mean=_bias_mean,
+            bias_std=_bias_std,
+            bias_skew=_bias_skew,
+            n_obs=_n_obs,
+        )
         .reset_index()
     )
-
-    # Flatten multi-level columns if needed
-    if isinstance(bias_table.columns, pd.MultiIndex):
-        bias_table.columns = ["_".join(c).strip("_") for c in bias_table.columns]
 
     # Cast types
     bias_table["n_obs"]      = bias_table["n_obs"].astype("int16")
