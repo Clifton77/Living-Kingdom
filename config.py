@@ -23,6 +23,18 @@ GHCND_IDS = {
     "KHOU": "USW00012918",
 }
 
+# Station coordinates (lat, lon) for Open-Meteo and other coordinate-based APIs
+STATION_COORDS = {
+    "KJFK": (40.6413, -73.7781),
+    "KORD": (41.9742, -87.9073),
+    "KMIA": (25.7959, -80.2870),
+    "KDFW": (32.8998, -97.0403),
+    "KLAX": (33.9425, -118.4081),
+    "KATL": (33.6407, -84.4277),
+    "KDEN": (39.8561, -104.6737),
+    "KHOU": (29.6454, -95.2789),
+}
+
 # Station timezones (for display conversion from UTC)
 STATION_TIMEZONES = {
     "KJFK": "America/New_York",

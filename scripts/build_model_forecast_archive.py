@@ -1,12 +1,12 @@
 """
-Script 4: Build IEM archived NWS point forecast database.
+Script 4: Build NWS forecast archive.
 
-Primary source: IEM AFOS AFM text archive (Area Forecast Matrix)
-Fallback: IEM climodat_dd.py JSON
+Primary source: IEM AFM (Area Forecast Matrix) text archive
+  - Correct params: sdate/edate (NOT sts/ets — those return 422)
 
-The AFM is a structured NWS product containing Day-1 high temperature
-forecasts issued by local WFOs. These represent the forecaster-adjusted
-forecast — the closest proxy to what Kalshi market participants see.
+Fallback: Open-Meteo ERA5 archive
+  - Free, no API key, covers 2010–present
+  - ERA5 reanalysis max temp is a valid model-output proxy for bias correction
 
 Output: data/model_fcst.parquet
   {station, date, forecast_tmax_f, source}
@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    STATIONS, WFO_MAP, START_DATE, END_DATE,
+    STATIONS, WFO_MAP, STATION_COORDS, START_DATE, END_DATE,
     FCST_PARQUET, LOGS_DIR, RAW_DIR,
 )
 from utils.retry import retry_request
@@ -32,8 +32,8 @@ from utils.logging_config import setup_logging
 
 logger = setup_logging("build_model_forecast_archive")
 
-AFOS_URL    = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-CLIMODAT_URL = "https://mesonet.agron.iastate.edu/json/climodat_dd.py"
+AFOS_URL      = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+OPENMETEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Station names as they appear in AFM text (partial match sufficient)
 STATION_AFM_NAMES = {
@@ -49,20 +49,20 @@ STATION_AFM_NAMES = {
 
 
 # ---------------------------------------------------------------------------
-# AFM fetch and parse
+# IEM AFM fetch — fixed parameters (sdate/edate not sts/ets)
 # ---------------------------------------------------------------------------
 @retry_request(max_attempts=3, backoff_base=2.0)
-def _fetch_afm_products(wfo: str, start_dt: str, end_dt: str) -> list[dict]:
+def _fetch_afm_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     """
-    Fetch AFM text products from IEM AFOS archive for a WFO.
-    Returns list of {valid_time, text_content} dicts.
+    Fetch AFM text products from IEM AFOS archive.
+    IMPORTANT: IEM requires sdate/edate — sts/ets return 422.
     """
     pil = f"AFM{wfo}"
     params = {
-        "pil": pil,
-        "fmt": "json",
-        "sts": f"{start_dt}T00:00Z",
-        "ets": f"{end_dt}T23:59Z",
+        "pil":   pil,
+        "fmt":   "json",
+        "sdate": f"{start_str}T00:00Z",
+        "edate": f"{end_str}T23:59Z",
         "limit": 500,
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
@@ -74,23 +74,15 @@ def _fetch_afm_products(wfo: str, start_dt: str, end_dt: str) -> list[dict]:
 def _parse_afm_max_temp(text: str, station: str) -> float | None:
     """
     Parse Day-1 max temperature from AFM fixed-width text.
-
-    AFM format example:
-      CITY/AREA          12HR  MAX  MIN  ...
-      NEW YORK (JFK)      ..    72   55  ...
-
-    Returns Day-1 MAX in °F, or None if not parseable.
+    Returns °F or None if not parseable.
     """
     search_names = STATION_AFM_NAMES.get(station, [])
-
     lines = text.upper().split("\n")
 
-    # Find the MAX row header to determine column position
     max_col = None
     header_line_idx = None
     for i, line in enumerate(lines):
         if re.search(r"\bMAX\b", line) and re.search(r"\bMIN\b", line):
-            # Identify column position of MAX
             match = re.search(r"\bMAX\b", line)
             if match:
                 max_col = match.start()
@@ -100,34 +92,27 @@ def _parse_afm_max_temp(text: str, station: str) -> float | None:
     if max_col is None:
         return None
 
-    # Search for the station row after the header
     for i in range(header_line_idx + 1, min(header_line_idx + 30, len(lines))):
-        line = lines[i]
-        line_upper = line.upper()
-        if any(name in line_upper for name in search_names):
-            # Extract number near max_col position
-            # Scan a window of ±8 chars around max_col
+        line = lines[i].upper()
+        if any(name in line for name in search_names):
             window_start = max(0, max_col - 4)
             window_end   = min(len(line), max_col + 10)
-            window = line[window_start:window_end]
+            window = lines[i][window_start:window_end]
             nums = re.findall(r"\d{2,3}", window)
             if nums:
                 try:
                     val = float(nums[0])
-                    # Sanity check: temp should be between -20 and 130°F
                     if -20 <= val <= 130:
                         return val
                 except ValueError:
                     pass
-
     return None
 
 
 def _issue_time_to_valid_date(issue_time_str: str) -> date | None:
     """
-    Convert AFM issue time string to the valid forecast date.
-    AFMs issued before ~12Z refer to same-day high.
-    AFMs issued after ~12Z refer to next-day high.
+    AFMs issued before 12Z → same-day high.
+    AFMs issued after 12Z → next-day high.
     """
     try:
         dt = datetime.fromisoformat(issue_time_str.replace("Z", "+00:00"))
@@ -141,7 +126,7 @@ def _issue_time_to_valid_date(issue_time_str: str) -> date | None:
 
 def fetch_afm_forecasts(station: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch and parse AFM archive for a station over the date range.
+    Fetch and parse AFM archive for a station.
     Returns DataFrame: [station, date, forecast_tmax_f, source]
     """
     wfo = WFO_MAP.get(station)
@@ -149,11 +134,10 @@ def fetch_afm_forecasts(station: str, start_date: str, end_date: str) -> pd.Data
         logger.warning("No WFO mapping for %s", station)
         return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "source"])
 
-    # Chunk into 6-month windows to avoid IEM timeouts
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
 
-    records = {}  # date → forecast_tmax_f (keep latest issuance per date)
+    records = {}
     current = start_dt
 
     while current < end_dt:
@@ -175,19 +159,12 @@ def fetch_afm_forecasts(station: str, start_date: str, end_date: str) -> pd.Data
             text = product.get("data", "")
             if not text:
                 continue
-
             valid_date = _issue_time_to_valid_date(issue_time)
             if valid_date is None:
                 continue
-
             tmax = _parse_afm_max_temp(text, station)
             if tmax is None:
                 continue
-
-            # Keep latest successfully parsed issuance per day
-            if valid_date not in records:
-                records[valid_date] = tmax
-            # (products are returned in chronological order; later ones overwrite)
             records[valid_date] = tmax
 
         current = chunk_end + timedelta(days=1)
@@ -197,61 +174,83 @@ def fetch_afm_forecasts(station: str, start_date: str, end_date: str) -> pd.Data
         return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "source"])
 
     df = pd.DataFrame([
-        {"station": station, "date": d, "forecast_tmax_f": v, "source": "AFM"}
+        {"station": station, "date": pd.Timestamp(d),
+         "forecast_tmax_f": v, "source": "AFM"}
         for d, v in records.items()
     ])
-    df["date"] = pd.to_datetime(df["date"])
     logger.info("AFM %s: %d forecasts parsed", station, len(df))
     return df
 
 
 # ---------------------------------------------------------------------------
-# Climodat fallback
+# Open-Meteo ERA5 fallback
 # ---------------------------------------------------------------------------
 @retry_request(max_attempts=3, backoff_base=2.0)
-def _fetch_climodat_year(station: str, year: int) -> dict:
-    params = {"station": station, "year": year}
-    resp = requests.get(CLIMODAT_URL, params=params, timeout=60)
+def _fetch_openmeteo_era5(lat: float, lon: float,
+                          start_date: str, end_date: str) -> dict:
+    params = {
+        "latitude":         lat,
+        "longitude":        lon,
+        "start_date":       start_date,
+        "end_date":         end_date,
+        "daily":            "temperature_2m_max",
+        "temperature_unit": "fahrenheit",
+        "timezone":         "UTC",
+    }
+    resp = requests.get(OPENMETEO_URL, params=params, timeout=120)
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_climodat_fallback(station: str, start_year: int, end_year: int) -> pd.DataFrame:
+def fetch_era5_fallback(station: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch NWS forecast vs observed data from IEM climodat as fallback.
+    Fetch ERA5 daily max temp from Open-Meteo as model forecast proxy.
     Returns DataFrame: [station, date, forecast_tmax_f, source]
     """
-    rows = []
-    for year in range(start_year, end_year + 1):
-        try:
-            data = _fetch_climodat_year(station, year)
-        except Exception as e:
-            logger.warning("climodat %s year %d failed: %s", station, year, e)
-            continue
-
-        for rec in data.get("climatology", []):
-            fcst = rec.get("high", None)
-            if fcst is None:
-                continue
-            try:
-                tmax_f = float(fcst)
-                rows.append({
-                    "station": station,
-                    "date": rec.get("valid", ""),
-                    "forecast_tmax_f": tmax_f,
-                    "source": "CLIMODAT",
-                })
-            except (ValueError, TypeError):
-                continue
-        time.sleep(0.3)
-
-    if not rows:
+    coords = STATION_COORDS.get(station)
+    if not coords:
+        logger.warning("No coordinates for %s — skipping ERA5 fallback", station)
         return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "source"])
 
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"])
-    logger.info("climodat %s: %d forecasts", station, len(df))
+    lat, lon = coords
+    logger.info("Fetching ERA5 for %s (%s → %s)...", station, start_date, end_date)
+
+    # Open-Meteo archive has a max range — chunk by year to be safe
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt   = datetime.strptime(end_date, "%Y-%m-%d")
+
+    all_rows = []
+    current = start_dt
+    while current <= end_dt:
+        chunk_end = min(datetime(current.year, 12, 31), end_dt)
+        try:
+            data = _fetch_openmeteo_era5(
+                lat, lon,
+                current.strftime("%Y-%m-%d"),
+                chunk_end.strftime("%Y-%m-%d"),
+            )
+            dates  = data.get("daily", {}).get("time", [])
+            temps  = data.get("daily", {}).get("temperature_2m_max", [])
+            for d, t in zip(dates, temps):
+                if t is not None:
+                    all_rows.append({
+                        "station": station,
+                        "date": pd.Timestamp(d),
+                        "forecast_tmax_f": float(t),
+                        "source": "ERA5",
+                    })
+        except Exception as e:
+            logger.warning("ERA5 fetch failed %s year %d: %s",
+                           station, current.year, e)
+
+        current = datetime(current.year + 1, 1, 1)
+        time.sleep(0.5)
+
+    if not all_rows:
+        return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "source"])
+
+    df = pd.DataFrame(all_rows)
+    logger.info("ERA5 %s: %d records", station, len(df))
     return df
 
 
@@ -264,54 +263,80 @@ def build_model_forecast_archive() -> None:
 
     start_year = int(START_DATE[:4])
     end_year   = int(END_DATE[:4])
+    all_dates  = pd.date_range(START_DATE, END_DATE, freq="D")
 
-    all_dfs = []
+    all_dfs    = []
     missing_log = []
 
     for station in tqdm(STATIONS, desc="Building forecast archive"):
         logger.info("Processing forecast archive: %s", station)
 
-        # Primary: AFM
+        # --- Primary: IEM AFM ---
         afm_df = fetch_afm_forecasts(station, START_DATE, END_DATE)
 
-        # Fill gaps with climodat fallback
-        afm_dates = set(afm_df["date"].dt.date.tolist()) if len(afm_df) > 0 else set()
+        # Determine AFM coverage
+        if len(afm_df) > 0:
+            afm_df["date"] = pd.to_datetime(afm_df["date"])
+            afm_dates = set(afm_df["date"].dt.date.tolist())
+        else:
+            afm_dates = set()
 
-        # Build expected date range
-        all_dates = pd.date_range(START_DATE, END_DATE, freq="D")
-        missing_dates = [d for d in all_dates if d.date() not in afm_dates]
-        gap_pct = len(missing_dates) / len(all_dates) * 100
-        logger.info("%s: AFM coverage %.1f%% (%d gaps)", station, 100 - gap_pct, len(missing_dates))
+        gap_pct = (1 - len(afm_dates) / len(all_dates)) * 100
+        logger.info("%s: AFM coverage %.1f%% (%d gaps)",
+                    station, 100 - gap_pct, len(all_dates) - len(afm_dates))
 
-        if gap_pct > 5:
-            logger.info("%s: fetching climodat fallback for gaps...", station)
-            climo_df = fetch_climodat_fallback(station, start_year, end_year)
-            # Only use climodat where AFM is missing
-            climo_df = climo_df[~climo_df["date"].dt.date.isin(afm_dates)]
-            combined = pd.concat([afm_df, climo_df], ignore_index=True)
+        # --- Fallback: ERA5 for gaps ---
+        if gap_pct > 2:
+            logger.info("%s: fetching ERA5 fallback for gaps...", station)
+            era5_df = fetch_era5_fallback(station, START_DATE, END_DATE)
+
+            if len(era5_df) > 0:
+                era5_df["date"] = pd.to_datetime(era5_df["date"])
+                # Only use ERA5 where AFM is missing
+                era5_df = era5_df[~era5_df["date"].dt.date.isin(afm_dates)]
+                combined = pd.concat([afm_df, era5_df], ignore_index=True)
+            else:
+                combined = afm_df
         else:
             combined = afm_df
 
-        combined = combined.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        combined = combined.sort_values("date").drop_duplicates(
+            subset=["date"], keep="last"
+        )
         all_dfs.append(combined)
 
         # Log remaining gaps
-        final_dates = set(combined["date"].dt.date.tolist())
+        if len(combined) > 0:
+            combined["date"] = pd.to_datetime(combined["date"])
+            final_dates = set(combined["date"].dt.date.tolist())
+        else:
+            final_dates = set()
+
         still_missing = [d for d in all_dates if d.date() not in final_dates]
         for d in still_missing:
             missing_log.append({"station": station, "date": d.date()})
 
-        logger.info("%s: final coverage %d/%d days", station, len(combined), len(all_dates))
+        logger.info("%s: final coverage %d/%d days",
+                    station, len(combined), len(all_dates))
 
     result = pd.concat(all_dfs, ignore_index=True)
+    result["date"] = pd.to_datetime(result["date"])
     result.to_parquet(FCST_PARQUET, index=False)
     logger.info("Saved model_fcst.parquet: %d rows", len(result))
+
+    # Source breakdown
+    if len(result) > 0:
+        src_counts = result["source"].value_counts()
+        for src, cnt in src_counts.items():
+            logger.info("  Source %-10s: %d rows (%.1f%%)",
+                        src, cnt, cnt / len(result) * 100)
 
     if missing_log:
         missing_df = pd.DataFrame(missing_log)
         missing_path = os.path.join(LOGS_DIR, "fcst_missing.csv")
         missing_df.to_csv(missing_path, index=False)
-        logger.warning("Missing forecasts logged: %d rows → %s", len(missing_df), missing_path)
+        logger.warning("Missing forecasts: %d rows → %s",
+                       len(missing_df), missing_path)
 
 
 if __name__ == "__main__":
