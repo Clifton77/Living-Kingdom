@@ -82,6 +82,8 @@ class RiskState:
     trade_count_today:  int            = 0
     wins_today:         int            = 0
     losses_today:       int            = 0
+    # Stations blocked from re-entry today (reversal stop fired)
+    reversal_blocked:   list[str]      = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +226,26 @@ class RiskManager:
         today = date.today().isoformat()
         if self.state.session_date != today:
             logger.info("New trading day — resetting daily counters")
-            self.state.daily_pnl       = 0.0
+            self.state.daily_pnl         = 0.0
             self.state.trade_count_today = 0
-            self.state.wins_today      = 0
-            self.state.losses_today    = 0
-            self.state.session_date    = today
+            self.state.wins_today        = 0
+            self.state.losses_today      = 0
+            self.state.reversal_blocked  = []   # clear reversal blocks each day
+            self.state.session_date      = today
             self._save_state()
+
+    def is_reversal_blocked(self, station: str) -> bool:
+        """True if a reversal stop fired for this station today — no re-entry allowed."""
+        return station in self.state.reversal_blocked
+
+    def _block_station(self, station: str):
+        """Mark station as blocked from re-entry for the rest of today."""
+        if station not in self.state.reversal_blocked:
+            self.state.reversal_blocked.append(station)
+            self._save_state()
+            logger.warning(
+                "%s blocked from re-entry today (reversal stop fired)", station
+            )
 
     # ── Kill switch ───────────────────────────────────────────────────────
 
@@ -263,10 +279,13 @@ class RiskManager:
         """Total USD currently at risk across all open positions."""
         return sum(p.entry_usd for p in self.state.positions.values())
 
-    def can_open_position(self, stake_usd: float) -> tuple[bool, str]:
+    def can_open_position(self, stake_usd: float, station: str = "") -> tuple[bool, str]:
         """Check if opening a new position of stake_usd is within risk limits."""
         if self.is_halted:
             return False, "Trading halted (kill switch or daily loss limit)"
+
+        if station and self.is_reversal_blocked(station):
+            return False, f"{station} blocked from re-entry today (reversal stop fired earlier)"
 
         max_exposure = self.state.bankroll * MAX_EXPOSURE_PCT
         if self.total_exposure() + stake_usd > max_exposure:
@@ -378,6 +397,10 @@ class RiskManager:
             self.state.wins_today += 1
         else:
             self.state.losses_today += 1
+
+        # Block re-entry if exit was triggered by a reversal stop
+        if "reversal" in reason.lower():
+            self._block_station(pos.station)
 
         self._save_state()
 

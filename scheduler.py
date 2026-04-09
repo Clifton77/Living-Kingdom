@@ -251,8 +251,8 @@ def tier3_full_signal_pass():
             logger.info("[Tier3] Already have position in %s — skipping", market_id)
             continue
 
-        # Risk check
-        ok, reason = rm.can_open_position(sig.kelly_stake_usd)
+        # Risk check (includes reversal block)
+        ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
         if not ok:
             logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
             continue

@@ -181,9 +181,8 @@ DAILY_LOSS_LIMIT_PCT     = 0.10    # halt bot if daily loss exceeds 10%
 MAX_STAKE_PCT            = 0.02    # max 2% of bankroll per trade (fractional Kelly)
 MAX_EXPOSURE_PCT         = 0.50    # max 50% of bankroll in open positions
 STOP_LOSS_PCT            = 0.40    # close position if value falls to 40% of entry
-REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop threshold
+REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-enter
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
-REPOSITION_CONFIDENCE_THRESHOLD = 2.0  # multiplier on normal entry threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 
 # ---------------------------------------------------------------------------
