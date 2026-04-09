@@ -39,6 +39,7 @@ from config import (
     OVERSHOOT_EXIT_BUFFER_F,
     UNDERSHOOT_EXIT_BUFFER_F,
     UNDERSHOOT_WARNING_LEAD_HOURS,
+    MAX_STATION_POSITIONS,
 )
 
 logger = setup_logging("risk")
@@ -90,6 +91,8 @@ class RiskState:
     losses_today:       int            = 0
     # Stations blocked from re-entry today (reversal stop fired)
     reversal_blocked:   list[str]      = field(default_factory=list)
+    # Stations that have already used their one adjacent-bucket expansion today
+    expansion_used:     list[str]      = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +312,7 @@ class RiskManager:
             self.state.wins_today        = 0
             self.state.losses_today      = 0
             self.state.reversal_blocked  = []   # clear reversal blocks each day
+            self.state.expansion_used    = []   # clear expansion flags each day
             self.state.session_date      = today
             self._save_state()
 
@@ -324,6 +328,38 @@ class RiskManager:
             logger.warning(
                 "%s blocked from re-entry today (reversal stop fired)", station
             )
+
+    # ── Station position helpers ──────────────────────────────────────────
+
+    def station_positions(self, station: str) -> list[OpenPosition]:
+        """All open positions for a given station."""
+        return [p for p in self.state.positions.values() if p.station == station]
+
+    def station_position_count(self, station: str) -> int:
+        return len(self.station_positions(station))
+
+    def can_expand_station(self, station: str) -> tuple[bool, str]:
+        """
+        Check whether an adjacent-bucket expansion is allowed for this station.
+        Returns (allowed, reason).
+        """
+        if self.is_reversal_blocked(station):
+            return False, f"{station} is reversal-blocked — no expansion allowed today"
+        if station in self.state.expansion_used:
+            return False, f"{station} has already expanded once today"
+        if self.station_position_count(station) >= MAX_STATION_POSITIONS:
+            return False, (
+                f"{station} already has {MAX_STATION_POSITIONS} open positions "
+                f"(max {MAX_STATION_POSITIONS})"
+            )
+        return True, "OK"
+
+    def record_expansion(self, station: str):
+        """Mark that this station has used its one expansion for today."""
+        if station not in self.state.expansion_used:
+            self.state.expansion_used.append(station)
+            self._save_state()
+            logger.info("%s expansion recorded — no further expansions today", station)
 
     # ── Kill switch ───────────────────────────────────────────────────────
 
@@ -525,4 +561,5 @@ class RiskManager:
             "kill_switch":          self.state.kill_switch_active,
             "is_halted":            self.is_halted,
             "reversal_blocked":     list(self.state.reversal_blocked),
+            "expansion_used":       list(self.state.expansion_used),
         }

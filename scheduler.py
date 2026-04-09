@@ -39,6 +39,11 @@ from config import (
     STATIONS,
     STATION_TIMEZONES,
     STATION_PEAK_HOURS,
+    KALSHI_BUCKET_LOWER_TAIL,
+    KALSHI_BUCKET_UPPER_TAIL,
+    KALSHI_BUCKET_STARTS,
+    EXPANSION_EDGE_MIN,
+    EXPANSION_CURRENT_EDGE_MAX,
     TIER1_INTERVAL_SECONDS,
     TIER2_INTERVAL_SECONDS,
     USE_DEMO,
@@ -290,15 +295,46 @@ def tier3_full_signal_pass():
         station   = sig.station
         market_id = build_market_id(station, event_date, sig.top_bucket)
 
-        # Skip if already have a position for this market
+        # Skip if already have a position in this exact market
         if market_id in rm.state.positions:
-            logger.info("[Tier3] Already have position in %s — skipping", station)
+            logger.info("[Tier3] Already in %s — skipping", market_id)
             continue
 
-        # Risk check (includes reversal block and exposure limit)
+        # ── Adjacent bucket expansion check ──────────────────────────────
+        # If we hold a DIFFERENT bucket at this station, check whether this
+        # signal qualifies as an adjacent-bucket expansion rather than a
+        # brand-new trade. Expansion keeps the existing position open and
+        # adds the new one — the loser cleans itself up via undershoot exit
+        # or stop-loss as the event day temperature confirms.
+        existing = rm.station_positions(station)
+        if existing:
+            existing_pos = existing[0]
+            expansion_decision = _evaluate_expansion(
+                existing_pos=existing_pos,
+                new_sig=sig,
+                rm=rm,
+                event_date=event_date,
+            )
+            if expansion_decision["eligible"]:
+                _execute_expansion(
+                    existing_pos=existing_pos,
+                    sig=sig,
+                    market_id=market_id,
+                    event_date=event_date,
+                    expansion_decision=expansion_decision,
+                    kalshi=kalshi,
+                    rm=rm,
+                )
+            else:
+                logger.info(
+                    "[Tier3] %s expansion ineligible: %s",
+                    station, expansion_decision["reason"],
+                )
+            continue   # whether expansion fired or not, don't also run normal entry
+
+        # ── Normal new-position entry ─────────────────────────────────────
         ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
         if not ok:
-            # Flag as CONSTRAINED if the only reason is capital — valid signal, no room
             if "exposure" in reason.lower() or "insufficient" in reason.lower():
                 sig.decision = "CONSTRAINED"
                 logger.warning(
@@ -307,12 +343,10 @@ def tier3_full_signal_pass():
                 )
             else:
                 logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
-            # Update shared store with new decision
             with _latest_signals_lock:
                 _latest_signals[station] = sig
             continue
 
-        # Place order
         result = kalshi.place_order(
             market_id=market_id,
             contracts=sig.kelly_contracts,
@@ -341,6 +375,142 @@ def tier3_full_signal_pass():
         "[Tier3] Cycle complete | bankroll=$%.2f | open=%d | daily P/L=$%+.2f",
         summary["bankroll"], summary["open_positions"], summary["daily_pnl"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Adjacent bucket expansion helpers
+# ---------------------------------------------------------------------------
+
+# Ordered bucket list — adjacency is determined by index distance of 1
+_ALL_BUCKETS = [
+    KALSHI_BUCKET_LOWER_TAIL,
+    *KALSHI_BUCKET_STARTS,
+    KALSHI_BUCKET_UPPER_TAIL,
+]
+
+
+def _buckets_adjacent(a: int, b: int) -> bool:
+    """True if buckets a and b are exactly one step apart in the Kalshi ladder."""
+    try:
+        return abs(_ALL_BUCKETS.index(a) - _ALL_BUCKETS.index(b)) == 1
+    except ValueError:
+        return False
+
+
+def _evaluate_expansion(
+    existing_pos,
+    new_sig,
+    rm: RiskManager,
+    event_date: date,
+) -> dict:
+    """
+    Evaluate whether the new signal qualifies as an adjacent-bucket expansion.
+
+    Returns a dict with:
+        eligible  : bool
+        reason    : human-readable explanation (always populated for the card)
+        guardrails: dict of each check and its result (for dashboard card)
+    """
+    station     = existing_pos.station
+    old_bucket  = existing_pos.bucket_lower
+    new_bucket  = new_sig.top_bucket
+    new_edge    = new_sig.top_edge
+    old_edge    = existing_pos.last_edge   # last edge stored on position
+
+    # Current local time and event-day awareness
+    tz          = ZoneInfo(STATION_TIMEZONES[station])
+    local_now   = datetime.now(tz)
+    local_hour  = local_now.hour
+    is_event_day = (date.today() == event_date)
+    event_month  = event_date.month
+    peak_hour    = STATION_PEAK_HOURS.get(station, {}).get(event_month, 15)
+
+    # Before peak hour: always true on Day -1; time-checked on event day
+    before_peak = (not is_event_day) or (local_hour < peak_hour)
+
+    checks = {
+        "adjacent_bucket":    _buckets_adjacent(old_bucket, new_bucket),
+        "new_edge_sufficient": new_edge >= EXPANSION_EDGE_MIN,
+        "old_edge_degraded":   old_edge <= EXPANSION_CURRENT_EDGE_MAX,
+        "before_peak_hour":    before_peak,
+        "expansion_allowed":   rm.can_expand_station(station)[0],
+    }
+
+    ok, expand_reason = rm.can_expand_station(station)
+    checks["expansion_allowed"] = ok
+
+    eligible = all(checks.values())
+
+    if eligible:
+        reason = (
+            f"Adjacent expansion: {old_bucket}°F edge degraded to {old_edge:+.3f} "
+            f"(≤ {EXPANSION_CURRENT_EDGE_MAX}). New bucket {new_bucket}°F edge "
+            f"{new_edge:+.3f} (≥ {EXPANSION_EDGE_MIN}). "
+            f"{'Day-1 window' if not is_event_day else f'Event day, {local_hour:02d}h < peak {peak_hour:02d}h'}. "
+            f"Holding {old_bucket}°F — both positions open, loser exits automatically."
+        )
+    else:
+        failed = [k for k, v in checks.items() if not v]
+        reason = f"Expansion blocked — failed: {', '.join(failed)}"
+        if not ok:
+            reason += f" ({expand_reason})"
+
+    return {"eligible": eligible, "reason": reason, "guardrails": checks}
+
+
+def _execute_expansion(
+    existing_pos,
+    sig,
+    market_id: str,
+    event_date: date,
+    expansion_decision: dict,
+    kalshi: KalshiClient,
+    rm: RiskManager,
+):
+    """Place order for the new adjacent bucket and record the expansion."""
+    station = sig.station
+    logger.info(
+        "[Tier3] EXPANSION %s → bucket %d°F | edge=%+.3f | %s",
+        station, sig.top_bucket, sig.top_edge, expansion_decision["reason"],
+    )
+
+    ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    if not ok:
+        logger.warning("[Tier3] Expansion exposure check failed for %s: %s", station, reason)
+        return
+
+    result = kalshi.place_order(
+        market_id=market_id,
+        contracts=sig.kelly_contracts,
+        limit_price=sig.top_yes_ask,
+        side="yes",
+    )
+
+    if result.success:
+        rm.open_position(
+            station=station,
+            market_id=market_id,
+            bucket_lower=sig.top_bucket,
+            contracts=sig.kelly_contracts,
+            entry_price=sig.top_yes_ask,
+            event_date=event_date,
+        )
+        rm.record_expansion(station)
+
+        logger.info(
+            "[Tier3] Expansion complete: %s | new=%s @ $%.2f | "
+            "holding %s @ $%.2f | combined exposure $%.2f",
+            station, market_id, sig.top_yes_ask,
+            existing_pos.market_id, existing_pos.entry_price,
+            rm.total_exposure(),
+        )
+
+        # Store full expansion reasoning in shared signal store for dashboard card
+        sig.expansion_note = expansion_decision["reason"]
+        with _latest_signals_lock:
+            _latest_signals[station] = sig
+    else:
+        logger.error("[Tier3] Expansion order failed for %s: %s", market_id, result.error)
 
 
 # ---------------------------------------------------------------------------

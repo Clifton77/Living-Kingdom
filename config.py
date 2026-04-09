@@ -186,9 +186,14 @@ PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 
 # Intraday temperature exit guards (uses IEM 1-min running max)
-OVERSHOOT_EXIT_BUFFER_F      = 0.5   # exit if running_max >= bucket_upper − 0.5°F (before peak hour)
-UNDERSHOOT_EXIT_BUFFER_F     = 2.0   # exit if running_max < bucket_lower − 2°F (after peak hour)
+OVERSHOOT_EXIT_BUFFER_F       = 0.5  # exit if running_max >= bucket_upper − 0.5°F (before peak hour)
+UNDERSHOOT_EXIT_BUFFER_F      = 2.0  # exit if running_max < bucket_lower − 2°F (after peak hour)
 UNDERSHOOT_WARNING_LEAD_HOURS = 1    # warn this many hours before peak hour if tracking low
+
+# Adjacent bucket expansion (auto-entry when forecast shifts one bucket)
+EXPANSION_EDGE_MIN          = 0.18   # new bucket must clear this edge to trigger expansion
+EXPANSION_CURRENT_EDGE_MAX  = 0.05   # expand only when current bucket edge has degraded to this
+MAX_STATION_POSITIONS       = 2      # max simultaneous positions per station
 
 # ---------------------------------------------------------------------------
 # Station peak heating hours — 90th percentile by station and month
