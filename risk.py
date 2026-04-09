@@ -431,6 +431,7 @@ class RiskManager:
                       (self.state.wins_today + self.state.losses_today) * 100, 1)
                 if (self.state.wins_today + self.state.losses_today) > 0 else 0.0
             ),
-            "kill_switch":       self.state.kill_switch_active,
-            "is_halted":         self.is_halted,
+            "kill_switch":          self.state.kill_switch_active,
+            "is_halted":            self.is_halted,
+            "reversal_blocked":     list(self.state.reversal_blocked),
         }

@@ -69,7 +69,7 @@ class TradeSignal:
     station:            str
     event_date:         date
     local_time:         str            # human-readable local time
-    decision:           str            # "TRADE" | "WATCH" | "SKIP" | "HARD_SKIP"
+    decision:           str            # "TRADE" | "WATCH" | "SKIP" | "HARD_SKIP" | "CONSTRAINED"
 
     # Forecast
     forecast_raw:       float          # ERA5/model raw forecast

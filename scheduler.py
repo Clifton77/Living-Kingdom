@@ -239,22 +239,37 @@ def tier3_full_signal_pass():
     with _latest_signals_lock:
         _latest_signals.update(signals)
 
-    # Execute trades
-    for station, sig in signals.items():
-        if sig.decision != "TRADE":
-            continue
+    # ── Priority queue: rank TRADE signals by edge, best first ───────────
+    trade_signals = [
+        sig for sig in signals.values()
+        if sig.decision == "TRADE"
+    ]
+    trade_signals.sort(key=lambda s: s.top_edge, reverse=True)
 
+    for sig in trade_signals:
+        station   = sig.station
         market_id = build_market_id(station, event_date, sig.top_bucket)
 
         # Skip if already have a position for this market
         if market_id in rm.state.positions:
-            logger.info("[Tier3] Already have position in %s — skipping", market_id)
+            logger.info("[Tier3] Already have position in %s — skipping", station)
             continue
 
-        # Risk check (includes reversal block)
+        # Risk check (includes reversal block and exposure limit)
         ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
         if not ok:
-            logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
+            # Flag as CONSTRAINED if the only reason is capital — valid signal, no room
+            if "exposure" in reason.lower() or "insufficient" in reason.lower():
+                sig.decision = "CONSTRAINED"
+                logger.warning(
+                    "[Tier3] %s CONSTRAINED (edge=%+.3f stake=$%.2f) — %s",
+                    station, sig.top_edge, sig.kelly_stake_usd, reason,
+                )
+            else:
+                logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
+            # Update shared store with new decision
+            with _latest_signals_lock:
+                _latest_signals[station] = sig
             continue
 
         # Place order
