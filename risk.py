@@ -6,6 +6,9 @@ Responsibilities:
   - Enforce stop-loss (static: 40% of entry value)
   - Detect signal reversal stop (edge flips negative past threshold)
   - Early profit exit (bid reaches 85¢ and high is locked in bucket)
+  - Overshoot exit (running max ≥ bucket_upper − buffer, before peak hour)
+  - Undershoot warning (running max below bucket, approaching peak hour)
+  - Undershoot exit (running max below bucket, past peak hour — definitive miss)
   - Daily loss limit halt
   - Position sizing guard (max 50% exposure)
   - Per-position exit decision on each Tier 2 (30-min) cycle
@@ -33,6 +36,9 @@ from config import (
     EARLY_EXIT_BID_THRESHOLD,
     LOGS_DIR,
     MIN_KELLY_STAKE,
+    OVERSHOOT_EXIT_BUFFER_F,
+    UNDERSHOOT_EXIT_BUFFER_F,
+    UNDERSHOOT_WARNING_LEAD_HOURS,
 )
 
 logger = setup_logging("risk")
@@ -94,7 +100,7 @@ class RiskState:
 class ExitDecision:
     should_exit:    bool
     reason:         str
-    urgency:        str        # "immediate" | "recommended" | "none"
+    urgency:        str        # "immediate" | "recommended" | "warning" | "none"
 
 
 def evaluate_exit(
@@ -102,24 +108,35 @@ def evaluate_exit(
     current_bid: float,
     current_edge: float,
     current_obs_temp: float | None = None,
+    running_max: float | None = None,
+    local_hour: int | None = None,
+    peak_heating_hour: int | None = None,
 ) -> ExitDecision:
     """
     Evaluate whether an open position should be exited.
 
     Checks in priority order:
-    1. Static stop-loss     — bid fell to ≤ STOP_LOSS_PCT of entry
-    2. Signal reversal stop — edge reversed past REVERSAL_EDGE_THRESHOLD
-    3. Early profit exit    — bid ≥ EARLY_EXIT_BID_THRESHOLD (85¢) AND
-                               current observed temp is in or above bucket
-    4. Hold                 — no exit condition met
+    1. Static stop-loss      — bid fell to ≤ STOP_LOSS_PCT of entry
+    2. Signal reversal stop  — edge reversed past REVERSAL_EDGE_THRESHOLD
+    3. Undershoot exit       — past peak hour, running max below bucket (definitive miss)
+    4. Undershoot warning    — approaching peak hour, running max below bucket (alert only)
+    5. Overshoot exit        — before peak hour, running max ≥ bucket_upper (lock profit)
+    6. Early profit exit     — bid ≥ EARLY_EXIT_BID_THRESHOLD (85¢), temp in bucket
+    7. Hold                  — no exit condition met
 
     Parameters
     ----------
-    pos              : open position being evaluated
-    current_bid      : current Yes bid price (0–1)
-    current_edge     : most recent edge from signal engine (can be negative)
-    current_obs_temp : current METAR observed temperature in °F (optional)
+    pos               : open position being evaluated
+    current_bid       : current Yes bid price (0–1)
+    current_edge      : most recent edge from signal engine (can be negative)
+    current_obs_temp  : current METAR observed temperature in °F (optional)
+    running_max       : highest observed temp today from IEM 1-min data (optional)
+    local_hour        : current local hour at the station (0–23, optional)
+    peak_heating_hour : station/month 90th-pct peak hour from STATION_PEAK_HOURS (optional)
     """
+    bucket_lo = pos.bucket_lower
+    bucket_hi = bucket_lo + 2    # 2°F wide bin
+
     # ── 1. Static stop-loss ───────────────────────────────────────────────
     stop_trigger = pos.entry_price * STOP_LOSS_PCT
     if current_bid <= stop_trigger:
@@ -143,15 +160,58 @@ def evaluate_exit(
             urgency="immediate",
         )
 
-    # ── 3. Early profit exit ──────────────────────────────────────────────
-    if current_bid >= EARLY_EXIT_BID_THRESHOLD:
-        # Only exit early if current temp is already in or above the bucket
-        if current_obs_temp is not None:
-            bucket_lo = pos.bucket_lower
-            bucket_hi = bucket_lo + 2          # 2°F wide bin
-            temp_in_or_above_bucket = current_obs_temp >= bucket_lo
+    # ── 3 & 4. Undershoot protection (requires intraday running max) ──────
+    if running_max is not None and local_hour is not None and peak_heating_hour is not None:
+        undershoot_trigger = bucket_lo - UNDERSHOOT_EXIT_BUFFER_F
 
-            if temp_in_or_above_bucket:
+        if running_max < undershoot_trigger:
+            if local_hour >= peak_heating_hour:
+                # Hard exit — peak hour passed, temperature can't recover
+                return ExitDecision(
+                    should_exit=True,
+                    reason=(
+                        f"Undershoot exit: running max {running_max:.1f}°F is "
+                        f"{undershoot_trigger - running_max:.1f}°F below trigger "
+                        f"({undershoot_trigger:.1f}°F) and peak hour has passed "
+                        f"(local {local_hour:02d}h ≥ peak {peak_heating_hour:02d}h). "
+                        f"Bucket {bucket_lo}–{bucket_hi}°F not reachable."
+                    ),
+                    urgency="immediate",
+                )
+
+            elif local_hour >= peak_heating_hour - UNDERSHOOT_WARNING_LEAD_HOURS:
+                # Warning — approaching peak hour, tracking low, manual close available
+                hours_left = peak_heating_hour - local_hour
+                return ExitDecision(
+                    should_exit=False,
+                    reason=(
+                        f"Undershoot warning: running max {running_max:.1f}°F is "
+                        f"{undershoot_trigger - running_max:.1f}°F below trigger "
+                        f"({undershoot_trigger:.1f}°F) with ~{hours_left}h until peak. "
+                        f"Bucket {bucket_lo}–{bucket_hi}°F at risk — review position."
+                    ),
+                    urgency="warning",
+                )
+
+    # ── 5. Overshoot exit (lock profit before temp retreats) ─────────────
+    if running_max is not None and local_hour is not None and peak_heating_hour is not None:
+        overshoot_trigger = bucket_hi - OVERSHOOT_EXIT_BUFFER_F
+        if running_max >= overshoot_trigger and local_hour < peak_heating_hour:
+            return ExitDecision(
+                should_exit=True,
+                reason=(
+                    f"Overshoot exit: running max {running_max:.1f}°F ≥ "
+                    f"{overshoot_trigger:.1f}°F ({bucket_hi}°F upper − {OVERSHOOT_EXIT_BUFFER_F}°F buffer) "
+                    f"before peak hour ({local_hour:02d}h < {peak_heating_hour:02d}h). "
+                    f"Locking in profit before potential retreat."
+                ),
+                urgency="recommended",
+            )
+
+    # ── 6. Early profit exit ──────────────────────────────────────────────
+    if current_bid >= EARLY_EXIT_BID_THRESHOLD:
+        if current_obs_temp is not None:
+            if current_obs_temp >= bucket_lo:
                 return ExitDecision(
                     should_exit=True,
                     reason=(
@@ -354,10 +414,17 @@ class RiskManager:
         current_ask: float,
         current_edge: float,
         current_obs_temp: float | None = None,
+        running_max: float | None = None,
+        local_hour: int | None = None,
+        peak_heating_hour: int | None = None,
     ) -> ExitDecision:
         """
         Update position market data and evaluate exit conditions.
         Returns ExitDecision for the scheduler to act on.
+
+        running_max, local_hour, peak_heating_hour are used by the intraday
+        undershoot/overshoot guards. All are optional — guards are skipped if
+        any are None (e.g. IEM data unavailable).
         """
         pos = self.state.positions.get(market_id)
         if pos is None:
@@ -372,7 +439,13 @@ class RiskManager:
 
         self._save_state()
 
-        return evaluate_exit(pos, current_bid, current_edge, current_obs_temp)
+        return evaluate_exit(
+            pos, current_bid, current_edge,
+            current_obs_temp=current_obs_temp,
+            running_max=running_max,
+            local_hour=local_hour,
+            peak_heating_hour=peak_heating_hour,
+        )
 
     def close_position(
         self,

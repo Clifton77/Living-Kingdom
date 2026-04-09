@@ -23,18 +23,22 @@ from __future__ import annotations
 import threading
 from datetime import date, datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from utils.logging_config import setup_logging
+from utils.asos_live import running_max_with_confluence
 from scripts.signal_engine import run_signal_pass, TradeSignal
 from scripts.taf_interpreter import interpret_taf, get_metar
 from kalshi_client import KalshiClient, build_market_id
 from risk import RiskManager
 from config import (
     STATIONS,
+    STATION_TIMEZONES,
+    STATION_PEAK_HOURS,
     TIER1_INTERVAL_SECONDS,
     TIER2_INTERVAL_SECONDS,
     USE_DEMO,
@@ -143,9 +147,13 @@ def _single_station_signal_pass(station: str):
 
 def tier2_metar_and_positions():
     """
-    Fetch current METAR obs for all stations.
-    Update open position P/L and evaluate exit conditions.
-    Execute exits if triggered.
+    Fetch current METAR obs and IEM 1-min running max for all stations.
+    Update open position P/L and evaluate exit conditions including:
+      - undershoot warning (approaching peak hour, tracking low)
+      - undershoot hard exit (past peak hour, definitive miss)
+      - overshoot exit (before peak hour, running max near bucket upper)
+      - early profit exit (bid ≥ 85¢)
+    Execute exits if triggered. Log warnings for manual review.
     """
     logger.info("[Tier2] METAR + position update cycle")
     rm     = get_risk_manager()
@@ -166,6 +174,19 @@ def tier2_metar_and_positions():
                 if pos.station == station
             }
 
+            if not station_positions:
+                continue
+
+            # Current local hour at this station
+            local_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+            local_hour = local_now.hour
+
+            # IEM 1-min running max + METAR confluence
+            rm_data     = running_max_with_confluence(station, date.today())
+            running_max = rm_data["running_max_f"]
+            if not rm_data["in_confluence"]:
+                logger.warning("[Tier2] %s temp confluence issue: %s", station, rm_data["note"])
+
             for market_id, pos in station_positions.items():
                 # Fetch current market bid/ask
                 snap = kalshi.get_market_snapshot(
@@ -180,6 +201,10 @@ def tier2_metar_and_positions():
                     sig = _latest_signals.get(station)
                 current_edge = sig.top_edge if sig and sig.top_bucket == pos.bucket_lower else 0.0
 
+                # Peak heating hour for this station and event month
+                event_month       = date.fromisoformat(pos.event_date).month
+                peak_heating_hour = STATION_PEAK_HOURS.get(station, {}).get(event_month, 15)
+
                 # Update position and evaluate exit
                 exit_decision = rm.update_position(
                     market_id=market_id,
@@ -187,17 +212,32 @@ def tier2_metar_and_positions():
                     current_ask=snap.yes_ask,
                     current_edge=current_edge,
                     current_obs_temp=obs_temp,
+                    running_max=running_max,
+                    local_hour=local_hour,
+                    peak_heating_hour=peak_heating_hour,
                 )
 
-                logger.info(
-                    "[Tier2] %s bid=%.2f P/L=$%+.4f (%.1f%%) | %s",
+                log_level = (
+                    logger.warning if exit_decision.urgency in ("immediate", "warning")
+                    else logger.info
+                )
+                log_level(
+                    "[Tier2] %s bid=%.2f P/L=$%+.4f (%.1f%%) | [%s] %s",
                     market_id, snap.yes_bid,
                     pos.unrealized_pnl, pos.pnl_pct,
+                    exit_decision.urgency.upper(),
                     exit_decision.reason,
                 )
 
                 if exit_decision.should_exit:
                     _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
+                elif exit_decision.urgency == "warning":
+                    # Warning surfaced in logs and dashboard — no auto-exit yet.
+                    # Dashboard will show a manual close button on the position card.
+                    logger.warning(
+                        "[Tier2] UNDERSHOOT WARNING on %s — manual close available on dashboard",
+                        market_id,
+                    )
 
         except Exception as exc:
             logger.error("[Tier2] Error processing %s: %s", station, exc)

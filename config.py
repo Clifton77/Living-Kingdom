@@ -185,6 +185,27 @@ REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-en
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 
+# Intraday temperature exit guards (uses IEM 1-min running max)
+OVERSHOOT_EXIT_BUFFER_F      = 0.5   # exit if running_max >= bucket_upper − 0.5°F (before peak hour)
+UNDERSHOOT_EXIT_BUFFER_F     = 2.0   # exit if running_max < bucket_lower − 2°F (after peak hour)
+UNDERSHOOT_WARNING_LEAD_HOURS = 1    # warn this many hours before peak hour if tracking low
+
+# ---------------------------------------------------------------------------
+# Station peak heating hours — 90th percentile by station and month
+# Source: run python scripts/build_peak_hours.py and paste output here
+# Default: 15 (3 PM local) — safe placeholder until real data is available
+# ---------------------------------------------------------------------------
+STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
+    "KJFK": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KORD": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KMIA": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KDFW": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KLAX": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KATL": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KDEN": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+    "KHOU": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
+}
+
 # ---------------------------------------------------------------------------
 # Trading mode
 # ---------------------------------------------------------------------------
