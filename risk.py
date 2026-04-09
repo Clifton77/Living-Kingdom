@@ -210,6 +210,24 @@ def evaluate_exit(
 
     # ── 6. Early profit exit ──────────────────────────────────────────────
     if current_bid >= EARLY_EXIT_BID_THRESHOLD:
+        past_peak          = (local_hour is not None and peak_heating_hour is not None
+                              and local_hour >= peak_heating_hour)
+        confirmed_in_bucket = (running_max is not None and running_max >= bucket_lo)
+
+        if past_peak and confirmed_in_bucket:
+            # Peak window closed, temp confirmed in our bucket — hold to settlement
+            # for full $1.00 rather than exiting at 85¢+
+            return ExitDecision(
+                should_exit=False,
+                reason=(
+                    f"Hold to settlement: bid {current_bid:.2f} but peak hour passed "
+                    f"({local_hour:02d}h ≥ {peak_heating_hour:02d}h) and running max "
+                    f"{running_max:.1f}°F confirmed in bucket {bucket_lo}–{bucket_hi}°F. "
+                    f"Maximizing profit to $1.00."
+                ),
+                urgency="none",
+            )
+
         if current_obs_temp is not None:
             if current_obs_temp >= bucket_lo:
                 return ExitDecision(
@@ -222,7 +240,7 @@ def evaluate_exit(
                     urgency="recommended",
                 )
         else:
-            # No METAR data — take profit at high bid anyway
+            # No METAR data and before peak — take profit at high bid conservatively
             return ExitDecision(
                 should_exit=True,
                 reason=(
