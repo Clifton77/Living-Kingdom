@@ -44,6 +44,7 @@ from config import (
     MAX_STAKE_PCT,
     MIN_N_OBS,
     EDGE_THRESHOLD_BASE,
+    CONFIDENCE_KELLY_SCALE,
 )
 
 logger = setup_logging("signal_engine")
@@ -62,6 +63,38 @@ class BucketAnalysis:
     edge:           float          # model_prob - kalshi_prob
     yes_ask:        float          # raw Kalshi ask price
     yes_bid:        float
+
+
+@dataclass
+class SignalReasoning:
+    """
+    Structured reasoning for the dashboard signal card.
+    All text fields are plain English — readable by anyone, not just meteorologists.
+    """
+    # ── Four plain-English sections (rendered as card body) ───────────────
+    current_conditions: str    # What the weather looks like right now at the station
+    synoptic_pattern:   str    # What the upper-level pattern means for today
+    forecast_and_bias:  str    # What the model says and how history adjusts it
+    market_analysis:    str    # Where Kalshi is mispriced and why we have edge
+
+    # ── Decision summary (one sentence at bottom of card) ─────────────────
+    decision_rationale: str    # Why TRADE / WATCH / SKIP in plain terms
+
+    # ── Bucket comparison table (for the visual table on the card) ────────
+    # Each entry: {label, model_pct, kalshi_pct, edge, is_top, yes_ask}
+    bucket_table:       list[dict]
+
+    # ── Checklist (threshold guardrails, shown as pass/fail on card) ──────
+    # Each entry: {name, passed, detail}
+    threshold_checks:   list[dict]
+
+    # ── Data provenance ───────────────────────────────────────────────────
+    data_sources:       dict           # where each data piece came from
+    generated_at:       datetime       # when this signal was computed
+
+    # ── Expansion note (populated when adjacent bucket expansion fires) ───
+    expansion_note:       str  = ""
+    expansion_guardrails: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -101,8 +134,11 @@ class TradeSignal:
     # Full distribution
     buckets:            list[BucketAnalysis] = field(default_factory=list)
 
-    # Reasoning narrative
-    reasoning:          str = ""
+    # Structured reasoning for dashboard card
+    reasoning:          Optional[SignalReasoning] = None
+
+    # Timestamp — used by stale signal guard in Tier 2
+    signal_generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +372,27 @@ def kelly_stake(
 
 
 # ---------------------------------------------------------------------------
-# Reasoning narrative builder
+# Plain-English reasoning builder
 # ---------------------------------------------------------------------------
+
+_SEASON_NAMES = {"DJF": "Winter", "MAM": "Spring", "JJA": "Summer", "SON": "Fall"}
+
+_CONFIDENCE_PLAIN = {
+    "high":   "HIGH — today closely matches historical examples of this regime",
+    "medium": "MODERATE — a reasonable but not textbook match to the historical pattern",
+    "low":    "LOW — unusual synoptic setup; historical bias estimates are less reliable",
+}
+
+_CONDITION_PLAIN = {
+    "clear":      "Clear skies",
+    "scattered":  "Scattered clouds",
+    "broken":     "Mostly cloudy",
+    "marine_fog": "Marine layer / coastal fog risk",
+    "convective": "Thunderstorm activity in the TAF",
+    "precip":     "Active precipitation in the TAF",
+    "hard_skip":  "Dangerous conditions (freezing rain / heavy snow / ice)",
+}
+
 
 def _build_reasoning(
     station: str,
@@ -346,42 +401,217 @@ def _build_reasoning(
     forecast_raw: float,
     forecast_adjusted: float,
     taf: TafResult,
+    metar: MetarResult,
     threshold_result: ThresholdResult | None,
     top_bucket: BucketAnalysis,
+    bucket_analyses: list[BucketAnalysis],
     decision: str,
-) -> str:
-    lines = []
+    kelly_stake_usd: float,
+    kelly_contracts: int,
+    confidence_scale: float,
+) -> SignalReasoning:
+    """Build fully structured plain-English reasoning for the dashboard card."""
 
-    lines.append(
-        f"Synoptic pattern: Cluster {pattern['cluster_id']} ({pattern['season']}) — "
-        f"pattern confidence {pattern['confidence']} "
-        f"(distance {pattern['distance']:.2f} from centroid). "
-        f"Data source: {pattern['data_source']}."
+    now = datetime.now(timezone.utc)
+    season_name = _SEASON_NAMES.get(pattern.get("season", ""), pattern.get("season", ""))
+    confidence  = pattern.get("confidence", "low")
+
+    # ── Current conditions ────────────────────────────────────────────────
+    cond_parts = []
+    if metar.temp_f is not None:
+        cond_parts.append(f"{metar.temp_f:.0f}°F")
+    if metar.dewpoint_f is not None:
+        cond_parts.append(f"dew point {metar.dewpoint_f:.0f}°F")
+    if metar.wind_kt is not None:
+        if metar.wind_kt == 0:
+            cond_parts.append("calm winds")
+        else:
+            gust = f", gusting {metar.wind_gust_kt} kt" if metar.wind_gust_kt else ""
+            cond_parts.append(f"winds at {metar.wind_kt} kt{gust}")
+    if metar.sky_cover:
+        cond_parts.append(metar.sky_cover)
+    if metar.visibility_sm is not None and metar.visibility_sm < 10:
+        cond_parts.append(f"visibility {metar.visibility_sm:.0f} miles")
+
+    current_conditions = (
+        f"{', '.join(cond_parts)} at {station}."
+        if cond_parts else f"No current observation available for {station}."
     )
 
-    lines.append(
-        f"Bias correction: ERA5 raw forecast {forecast_raw:.1f}°F. "
-        f"Bias mean {bias_info['bias_mean']:+.1f}°F → adjusted {forecast_adjusted:.1f}°F "
-        f"(σ={bias_info['bias_std']:.1f}°F, n={bias_info['n_obs']}, "
-        f"source={bias_info['source']})."
-    )
+    # ── Synoptic pattern ──────────────────────────────────────────────────
+    cluster_id   = pattern.get("cluster_id", "?")
+    distance     = pattern.get("distance", 0.0)
+    data_source  = pattern.get("data_source", "unknown")
+    conf_plain   = _CONFIDENCE_PLAIN.get(confidence, confidence)
 
-    lines.append(
-        f"TAF: {taf.summary}. Penalty category: {taf.condition}."
-    )
-
-    if threshold_result is None:
-        lines.append("Threshold: HARD SKIP — dangerous weather condition.")
+    if confidence == "high":
+        regime_desc = "Today closely matches the historical norm for this pattern — the bias correction is well-supported."
+    elif confidence == "medium":
+        regime_desc = "Today is a reasonable match. Bias correction applies but with slightly more uncertainty."
     else:
-        lines.append(f"Threshold: {threshold_result.reason}.")
+        regime_desc = "Today is in unusual synoptic territory. We're applying a reduced Kelly stake to account for higher uncertainty."
 
-    lines.append(
-        f"Top bucket: {top_bucket.bucket_label} | "
-        f"Model {top_bucket.model_prob:.0%} vs Kalshi {top_bucket.kalshi_prob:.0%} | "
-        f"Edge {top_bucket.edge:+.3f}. Decision: {decision}."
+    synoptic_pattern = (
+        f"The upper-level (500mb) pattern is classified as Cluster {cluster_id} "
+        f"for {season_name}, identified from {'live GFS data' if 'gfs' in data_source.lower() else 'recent reanalysis'}. "
+        f"Pattern confidence: {conf_plain}. {regime_desc}"
     )
 
-    return "\n\n".join(lines)
+    # ── Forecast and bias ─────────────────────────────────────────────────
+    bias_mean  = bias_info["bias_mean"]
+    bias_std   = bias_info["bias_std"]
+    n_obs      = bias_info["n_obs"]
+    bias_src   = bias_info.get("source", "unknown")
+    direction  = "warmer" if bias_mean > 0 else "cooler"
+    abs_bias   = abs(bias_mean)
+
+    lo1 = forecast_adjusted - bias_std
+    hi1 = forecast_adjusted + bias_std
+
+    if bias_src == "cluster_match":
+        obs_desc = f"Based on {n_obs} similar days in this exact pattern during the same month"
+    elif bias_src == "station_month_fallback":
+        obs_desc = f"Cluster data was sparse — using {n_obs} days across all patterns for this station and month"
+    else:
+        obs_desc = "No historical bias data found — using zero correction"
+
+    forecast_and_bias = (
+        f"The model (Open-Meteo / ERA5) is forecasting a high of {forecast_raw:.0f}°F. "
+        f"{obs_desc}, {station} has historically run "
+        f"{abs_bias:.1f}°F {direction} than the model in conditions like today. "
+        f"Our adjusted forecast is {forecast_adjusted:.1f}°F, with a typical spread of "
+        f"±{bias_std:.1f}°F (roughly 68% of similar days land between "
+        f"{lo1:.0f}°F and {hi1:.0f}°F)."
+    )
+
+    # ── Market analysis ───────────────────────────────────────────────────
+    edge_pct   = top_bucket.edge * 100
+    our_pct    = top_bucket.model_prob * 100
+    kalshi_pct = top_bucket.kalshi_prob * 100
+    ask_cents  = round(top_bucket.yes_ask * 100)
+
+    if threshold_result is not None:
+        thr_pct   = threshold_result.threshold * 100
+        cond_desc = _CONDITION_PLAIN.get(taf.condition, taf.condition)
+        penalty_note = (
+            f"Our edge threshold today is {thr_pct:.0f}% ({cond_desc} — "
+            f"{'no penalty applied' if taf.condition == 'clear' else 'penalty applied to require higher confidence'})."
+        )
+    else:
+        penalty_note = "Weather conditions require skipping this station entirely."
+
+    market_analysis = (
+        f"Kalshi is pricing the {top_bucket.bucket_label} bucket at {kalshi_pct:.0f}% "
+        f"(you can buy Yes for {ask_cents}¢). "
+        f"Our model puts this bucket at {our_pct:.0f}% — a gap of {edge_pct:+.0f}%. "
+        f"{penalty_note}"
+    )
+
+    # ── Decision rationale ────────────────────────────────────────────────
+    if decision == "TRADE":
+        scale_note = (
+            "" if confidence_scale == 1.0
+            else f" Pattern confidence is {confidence.upper()}, so Kelly stake is scaled to {confidence_scale:.0%}."
+        )
+        decision_rationale = (
+            f"Trading {kelly_contracts} contract{'s' if kelly_contracts != 1 else ''} on "
+            f"the {top_bucket.bucket_label} bucket at {ask_cents}¢ each "
+            f"(${kelly_stake_usd:.2f} total).{scale_note} "
+            f"Edge of {top_bucket.edge:+.3f} clears our required threshold."
+        )
+    elif decision == "WATCH":
+        if threshold_result:
+            decision_rationale = (
+                f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
+                f"our {threshold_result.threshold:.3f} threshold. Not enough margin to trade today."
+            )
+        else:
+            decision_rationale = "Watching — edge present but threshold check failed."
+    elif decision == "HARD_SKIP":
+        decision_rationale = (
+            f"Hard skip — {taf.summary}. "
+            "Weather conditions make a reliable temperature forecast impossible today."
+        )
+    elif decision == "CONSTRAINED":
+        decision_rationale = (
+            f"Signal is valid (edge {top_bucket.edge:+.3f}) but no capital is available. "
+            "Another trade is using the available exposure limit."
+        )
+    else:
+        decision_rationale = (
+            "Skipping — no bucket shows enough positive edge to justify a trade today."
+        )
+
+    # ── Bucket comparison table ───────────────────────────────────────────
+    bucket_table = [
+        {
+            "label":      b.bucket_label,
+            "model_pct":  round(b.model_prob * 100, 1),
+            "kalshi_pct": round(b.kalshi_prob * 100, 1),
+            "edge":       round(b.edge, 3),
+            "yes_ask":    round(b.yes_ask, 2),
+            "is_top":     b.bucket_lower == top_bucket.bucket_lower,
+        }
+        for b in bucket_analyses
+    ]
+
+    # ── Threshold checklist ───────────────────────────────────────────────
+    threshold_checks = []
+
+    if threshold_result is not None:
+        threshold_checks.append({
+            "name":   "Weather condition",
+            "passed": taf.condition != "hard_skip",
+            "detail": f"{_CONDITION_PLAIN.get(taf.condition, taf.condition)} — {taf.summary}",
+        })
+        threshold_checks.append({
+            "name":   "Edge vs threshold",
+            "passed": top_bucket.edge >= threshold_result.threshold,
+            "detail": f"Edge {top_bucket.edge:+.3f} vs required {threshold_result.threshold:.3f}",
+        })
+        threshold_checks.append({
+            "name":   "Bias uncertainty gate",
+            "passed": not threshold_result.std_gate_fired,
+            "detail": (
+                f"Bias spread {bias_std:.1f}°F — gate {'fired, floor applied' if threshold_result.std_gate_fired else 'clear'}"
+            ),
+        })
+    threshold_checks.append({
+        "name":   "Minimum stake",
+        "passed": kelly_stake_usd >= 1.0,
+        "detail": f"Kelly stake ${kelly_stake_usd:.2f} vs $1.00 minimum",
+    })
+    threshold_checks.append({
+        "name":   "Historical sample size",
+        "passed": n_obs >= 10,
+        "detail": f"{n_obs} similar days in bias table (need ≥ 10)",
+    })
+    threshold_checks.append({
+        "name":   "Pattern confidence",
+        "passed": confidence != "low",
+        "detail": f"{confidence.capitalize()} — Kelly scaled to {confidence_scale:.0%}",
+    })
+
+    # ── Data sources ──────────────────────────────────────────────────────
+    data_sources = {
+        "pattern":  f"{'Live GFS 00Z via NOMADS' if 'gfs' in data_source.lower() else 'Reanalysis fallback'}",
+        "forecast": "Open-Meteo (current forecast API)",
+        "bias":     f"{bias_src} — {n_obs} obs",
+        "taf":      f"aviationweather.gov ({taf.fetched_utc})",
+        "metar":    f"aviationweather.gov ({metar.fetched_utc})",
+    }
+
+    return SignalReasoning(
+        current_conditions=current_conditions,
+        synoptic_pattern=synoptic_pattern,
+        forecast_and_bias=forecast_and_bias,
+        market_analysis=market_analysis,
+        decision_rationale=decision_rationale,
+        bucket_table=bucket_table,
+        threshold_checks=threshold_checks,
+        data_sources=data_sources,
+        generated_at=now,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -486,10 +716,18 @@ def generate_signal(
         else:
             decision = "WATCH"
 
-    # ── 8. Kelly sizing ──────────────────────────────────────────────────
+    # ── 8. Kelly sizing with confidence scaling ──────────────────────────
     kelly_frac, kelly_usd, kelly_contracts = kelly_stake(
         top.edge, top.yes_ask, bankroll
     )
+
+    # Scale Kelly fraction by pattern confidence — unusual regimes get reduced sizing
+    confidence_scale = CONFIDENCE_KELLY_SCALE.get(pattern.get("confidence", "low"), 0.5)
+    if confidence_scale < 1.0:
+        kelly_frac      = round(kelly_frac * confidence_scale, 6)
+        kelly_usd       = round(bankroll * kelly_frac, 2)
+        kelly_contracts = int(math.floor(kelly_usd / top.yes_ask)) if top.yes_ask > 0 else 0
+        kelly_usd       = round(kelly_contracts * top.yes_ask, 2)
 
     # Enforce minimum stake
     if decision == "TRADE" and kelly_usd < MIN_KELLY_STAKE:
@@ -499,11 +737,22 @@ def generate_signal(
             station, kelly_usd, MIN_KELLY_STAKE,
         )
 
-    # ── 9. Reasoning ─────────────────────────────────────────────────────
+    # ── 9. Structured plain-English reasoning ────────────────────────────
     reasoning = _build_reasoning(
-        station, pattern, bias_info,
-        forecast_raw, forecast_adjusted,
-        taf, threshold_result, top, decision,
+        station=station,
+        pattern=pattern,
+        bias_info=bias_info,
+        forecast_raw=forecast_raw,
+        forecast_adjusted=forecast_adjusted,
+        taf=taf,
+        metar=metar,
+        threshold_result=threshold_result,
+        top_bucket=top,
+        bucket_analyses=bucket_analyses,
+        decision=decision,
+        kelly_stake_usd=kelly_usd,
+        kelly_contracts=kelly_contracts,
+        confidence_scale=confidence_scale,
     )
 
     logger.info(
@@ -578,6 +827,64 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
         buckets=[],
         reasoning=f"HARD SKIP: {taf.summary} — weather penalty forces skip.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Forecast data availability probe
+# ---------------------------------------------------------------------------
+
+def check_forecast_availability(event_date: date, probe_station: str = "KJFK") -> dict:
+    """
+    Quick probe to confirm live forecast data is available for the target date.
+    Used by the scheduler before running a full Tier 3 pass — if data is missing,
+    the scheduler will retry rather than proceed with stale fallback numbers.
+
+    Returns:
+        available : bool   — True if Open-Meteo has fresh data for event_date
+        source    : str    — "live" | "fallback" | "none"
+        details   : str    — human-readable status for logging
+    """
+    import requests as req
+    lat, lon = STATION_COORDS[probe_station]
+    try:
+        resp = req.get(
+            OPEN_METEO_FORECAST_URL,
+            params={
+                "latitude":         lat,
+                "longitude":        lon,
+                "daily":            "temperature_2m_max",
+                "temperature_unit": "fahrenheit",
+                "forecast_days":    3,
+                "timezone":         "UTC",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data     = resp.json()
+        dates    = data.get("daily", {}).get("time", [])
+        temps    = data.get("daily", {}).get("temperature_2m_max", [])
+        date_str = event_date.isoformat()
+
+        if date_str in dates:
+            idx = dates.index(date_str)
+            if temps[idx] is not None:
+                return {
+                    "available": True,
+                    "source":    "live",
+                    "details":   f"Open-Meteo has fresh data for {event_date} at {probe_station}",
+                }
+        return {
+            "available": False,
+            "source":    "fallback",
+            "details":   f"Open-Meteo response did not include {event_date} — model run may be delayed",
+        }
+
+    except Exception as exc:
+        return {
+            "available": False,
+            "source":    "none",
+            "details":   f"Open-Meteo unreachable: {exc}",
+        }
 
 
 # ---------------------------------------------------------------------------

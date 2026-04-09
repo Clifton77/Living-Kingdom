@@ -537,6 +537,68 @@ class RiskManager:
         )
         return realized
 
+    # ── Startup reconciliation ────────────────────────────────────────────
+
+    def reconcile_with_kalshi(self, kalshi) -> list[str]:
+        """
+        On startup: sync local risk state against live Kalshi portfolio.
+
+        Actions taken:
+          1. Update bankroll from live Kalshi balance
+          2. Find positions in local state that no longer exist on Kalshi
+             (settled overnight or manually closed) → close them in state
+          3. Find positions on Kalshi not in local state (manual trades) → warn
+
+        Returns list of human-readable reconciliation notes for alerting.
+        """
+        notes = []
+
+        # ── 1. Sync bankroll ──────────────────────────────────────────────
+        live_balance = kalshi.get_balance()
+        if live_balance > 0:
+            old = self.state.bankroll
+            self.state.bankroll = live_balance
+            if abs(old - live_balance) > 0.01:
+                note = f"Bankroll updated: ${old:.2f} → ${live_balance:.2f} (live Kalshi balance)"
+                notes.append(note)
+                logger.info(note)
+        else:
+            logger.warning("Could not fetch live Kalshi balance — keeping stored value")
+
+        # ── 2. Find locally-open positions that Kalshi doesn't know about ─
+        kalshi_positions = kalshi.get_positions()
+        kalshi_tickers   = {p.get("market_ticker", p.get("ticker", "")) for p in kalshi_positions}
+
+        for market_id in list(self.state.positions.keys()):
+            if market_id not in kalshi_tickers:
+                pos     = self.state.positions[market_id]
+                # Best guess at settlement: if market is expired, treat as $0 (loss)
+                # The settlement sweep will correct this with actual values later
+                realized = self.close_position(market_id, exit_price=0.0,
+                                               reason="reconciliation — not found on Kalshi")
+                note = (
+                    f"Reconciliation: {market_id} missing from Kalshi — "
+                    f"removed from state (P/L ${realized:+.4f}). "
+                    f"Settlement sweep will correct if this was a win."
+                )
+                notes.append(note)
+                logger.warning(note)
+
+        # ── 3. Positions on Kalshi not in local state ─────────────────────
+        local_ids = set(self.state.positions.keys())
+        for kp in kalshi_positions:
+            ticker = kp.get("market_ticker", kp.get("ticker", ""))
+            if ticker and ticker not in local_ids:
+                note = (
+                    f"Reconciliation: {ticker} found on Kalshi but not in local state — "
+                    f"possible manual trade. Review dashboard."
+                )
+                notes.append(note)
+                logger.warning(note)
+
+        self._save_state()
+        return notes
+
     # ── Summary ───────────────────────────────────────────────────────────
 
     def summary(self) -> dict:

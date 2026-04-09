@@ -370,6 +370,95 @@ class KalshiClient:
                 error=str(exc),
             )
 
+    # ── Order status & fill confirmation ─────────────────────────────────
+
+    def get_order_status(self, order_id: str) -> dict | None:
+        """Fetch current status of an order. Returns None on failure."""
+        try:
+            data = self._get(f"/portfolio/orders/{order_id}")
+            return data.get("order", data)
+        except Exception as exc:
+            logger.warning("get_order_status failed for %s: %s", order_id, exc)
+            return None
+
+    def wait_for_fill(
+        self,
+        order_id: str,
+        timeout_seconds: int = 30,
+        poll_interval: int = 3,
+    ) -> tuple[bool, int]:
+        """
+        Poll until order is filled or timeout expires.
+
+        Returns (filled: bool, filled_contracts: int).
+        A limit order at the ask should fill near-instantly in a liquid market.
+        If it doesn't fill within timeout, the order likely needs to be cancelled
+        and the price re-evaluated.
+        """
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            status = self.get_order_status(order_id)
+            if status is None:
+                break
+
+            order_status    = status.get("status", "")
+            filled_count    = status.get("contracts_count", 0) - status.get("remaining_count", 0)
+
+            if order_status == "executed" or filled_count > 0:
+                logger.info("Order %s filled: %d contracts", order_id, filled_count)
+                return True, filled_count
+
+            if order_status in ("canceled", "expired", "rejected"):
+                logger.warning("Order %s ended with status: %s", order_id, order_status)
+                return False, 0
+
+            time.sleep(poll_interval)
+
+        logger.warning("Order %s did not fill within %ds", order_id, timeout_seconds)
+        return False, 0
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order. Returns True on success."""
+        try:
+            self._post(f"/portfolio/orders/{order_id}/cancel", {})
+            logger.info("Order %s cancelled", order_id)
+            return True
+        except Exception as exc:
+            logger.warning("cancel_order failed for %s: %s", order_id, exc)
+            return False
+
+    def place_order_with_fill_check(
+        self,
+        market_id: str,
+        contracts: int,
+        limit_price: float,
+        side: str = "yes",
+        fill_timeout: int = 30,
+    ) -> OrderResult:
+        """
+        Place a limit order and confirm it actually fills.
+        If not filled within fill_timeout seconds, cancel and return failure.
+        This prevents ghost positions (recorded as open locally but not filled on Kalshi).
+        """
+        result = self.place_order(market_id, contracts, limit_price, side)
+        if not result.success or not result.order_id:
+            return result
+
+        filled, filled_count = self.wait_for_fill(result.order_id, timeout_seconds=fill_timeout)
+        if not filled:
+            cancelled = self.cancel_order(result.order_id)
+            return OrderResult(
+                success=False,
+                order_id=result.order_id,
+                market_id=market_id,
+                side=side,
+                contracts=contracts,
+                price=limit_price,
+                error=f"Order did not fill within {fill_timeout}s — {'cancelled' if cancelled else 'cancel failed'}",
+            )
+
+        return result
+
     # ── Positions ─────────────────────────────────────────────────────────
 
     def get_positions(self) -> list[dict]:
@@ -380,6 +469,44 @@ class KalshiClient:
         except Exception as exc:
             logger.error("get_positions failed: %s", exc)
             return []
+
+    def get_settled_markets(self, event_date) -> dict[str, float]:
+        """
+        Return settled markets for a given event date.
+        Dict maps market_id → settlement_value (1.0 = won, 0.0 = lost).
+
+        Used during the morning settlement sweep to auto-close positions
+        that resolved overnight without explicit bot action.
+        """
+        try:
+            # Fetch settled positions from portfolio history
+            data = self._get(
+                "/portfolio/settlements",
+                params={"limit": 100},
+            )
+            settlements = data.get("settlements", [])
+
+            result = {}
+            event_str = event_date.strftime("%y%b%d").upper() if hasattr(event_date, "strftime") else str(event_date)
+
+            for s in settlements:
+                ticker = s.get("market_ticker", "")
+                if event_str in ticker:
+                    # Settlement value: revenue / (contracts * 100) → fraction
+                    revenue   = s.get("revenue", 0)
+                    contracts = s.get("contracts_count", 1)
+                    value     = (revenue / 100.0 / contracts) if contracts > 0 else 0.0
+                    result[ticker] = round(value, 4)
+
+            logger.info(
+                "get_settled_markets %s: found %d settlements",
+                event_date, len(result),
+            )
+            return result
+
+        except Exception as exc:
+            logger.error("get_settled_markets failed: %s", exc)
+            return {}
 
     def get_position_pnl(
         self,

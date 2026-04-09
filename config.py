@@ -185,6 +185,13 @@ REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-en
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 
+# Confidence-scaled Kelly: scale stake down when pattern match is uncertain
+CONFIDENCE_KELLY_SCALE = {
+    "high":   1.00,   # close to cluster center — full Kelly sizing
+    "medium": 0.75,   # reasonable match — 75% of Kelly
+    "low":    0.50,   # unusual synoptic territory — half Kelly, proceed with caution
+}
+
 # Intraday temperature exit guards (uses IEM 1-min running max)
 OVERSHOOT_EXIT_BUFFER_F       = 0.5  # exit if running_max >= bucket_upper − 0.5°F (before peak hour)
 UNDERSHOOT_EXIT_BUFFER_F      = 2.0  # exit if running_max < bucket_lower − 2°F (after peak hour)
@@ -194,6 +201,27 @@ UNDERSHOOT_WARNING_LEAD_HOURS = 1    # warn this many hours before peak hour if 
 EXPANSION_EDGE_MIN          = 0.18   # new bucket must clear this edge to trigger expansion
 EXPANSION_CURRENT_EDGE_MAX  = 0.05   # expand only when current bucket edge has degraded to this
 MAX_STATION_POSITIONS       = 2      # max simultaneous positions per station
+
+# Signal freshness — re-run calculation if last signal is older than this
+STALE_SIGNAL_HOURS = 4
+
+# Market schedule (UTC)
+MARKET_OPEN_UTC_HOUR   = 14   # Kalshi opens Day-1 markets at 14:00 UTC (10 AM EDT)
+MARKET_OPEN_UTC_MINUTE = 5    # fire 5 min after open to let liquidity settle
+SETTLEMENT_SWEEP_UTC_HOUR = 9 # check for overnight settlements at 09:00 UTC
+
+# Tier 3 model data retry — handles delayed NWS/Open-Meteo updates
+TIER3_RETRY_INTERVAL_MIN = 15   # wait this long between retries
+TIER3_MAX_RETRIES        = 3    # give up after 3 attempts (45 min total window)
+
+# ---------------------------------------------------------------------------
+# Error alerting (optional — configure via .env)
+# ---------------------------------------------------------------------------
+ALERT_EMAIL_TO      = os.getenv("ALERT_EMAIL_TO", "")
+ALERT_EMAIL_FROM    = os.getenv("ALERT_EMAIL_FROM", "")
+ALERT_SMTP_HOST     = os.getenv("ALERT_SMTP_HOST", "smtp.gmail.com")
+ALERT_SMTP_PORT     = int(os.getenv("ALERT_SMTP_PORT", "587"))
+ALERT_SMTP_PASSWORD = os.getenv("ALERT_SMTP_PASSWORD", "")
 
 # ---------------------------------------------------------------------------
 # Station peak heating hours — 90th percentile by station and month
