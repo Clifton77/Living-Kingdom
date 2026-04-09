@@ -202,6 +202,10 @@ EXPANSION_EDGE_MIN          = 0.18   # new bucket must clear this edge to trigge
 EXPANSION_CURRENT_EDGE_MAX  = 0.05   # expand only when current bucket edge has degraded to this
 MAX_STATION_POSITIONS       = 2      # max simultaneous positions per station
 
+# Significant reposition (2-step and 3+ step bucket shifts — close old, open new)
+SIGNIFICANT_REPOSITION_EDGE_MIN = 0.22   # 2-step shift: higher bar than adjacent expansion
+MAJOR_REPOSITION_EDGE_MIN       = 0.25   # 3+ step shift: highest bar, large forecast revision
+
 # Signal freshness — re-run calculation if last signal is older than this
 STALE_SIGNAL_HOURS = 4
 
