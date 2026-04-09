@@ -123,6 +123,57 @@ MODEL_BIN_SIZE = 2    # degrees F
 MIN_N_OBS      = 10   # minimum observations to trust a bias cell
 
 # ---------------------------------------------------------------------------
+# Kalshi market structure
+# ---------------------------------------------------------------------------
+# Markets open the day before at 10:00 AM EDT
+# Last trading time: 11:59 PM ET on the event day
+# Settlement: first 7:00 or 8:00 AM ET after LCD data releases
+
+# Bucket structure: 2°F wide, odd-start (matching confirmed Kalshi format)
+# e.g. "68 or below", "69 to 70", "71 to 72", "73 to 74", "75 to 76", "77 or above"
+# Bucket center naming: B68, B69.5, B71.5, B73.5, B75.5, B77
+KALSHI_BUCKET_LOWER_TAIL = 68        # "68 or below"
+KALSHI_BUCKET_UPPER_TAIL = 77        # "77 or above"
+KALSHI_BUCKET_STARTS     = [69, 71, 73, 75]   # lower bounds of interior buckets
+KALSHI_BUCKET_CENTERS    = {         # bucket_lower → Kalshi center label
+    68: "68",
+    69: "69.5",
+    71: "71.5",
+    73: "73.5",
+    75: "75.5",
+    77: "77",
+}
+
+# Market series format: KXHIGH{4-char-station} e.g. KXHIGHLAX
+# Event format:  KXHIGHLAX-26APR08
+# Market format: KXHIGHLAX-26APR08-B71.5
+KALSHI_SERIES_PREFIX = "KXHIGH"
+
+# Kalshi API base URLs
+KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
+KALSHI_LIVE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+# Coastal stations — eligible for marine fog penalty
+COASTAL_STATIONS = {"KLAX", "KJFK", "KMIA"}
+
+# Early exit: if position bid reaches this level and high is locked in bucket
+EARLY_EXIT_BID_THRESHOLD = 0.85   # exit at 85¢ rather than wait for LCD
+
+# ---------------------------------------------------------------------------
+# Live data sources
+# ---------------------------------------------------------------------------
+# NOMADS GFS OPeNDAP for live 500mb analysis (00Z cycle)
+NOMADS_GFS_URL = (
+    "https://nomads.ncep.noaa.gov/dods/gfs_0p25/gfs{date}/gfs_0p25_00z"
+)
+# Open-Meteo forecast API (current day, not archive)
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# METAR/TAF source
+AVWX_TAF_URL  = "https://aviationweather.gov/api/data/taf"
+AVWX_METAR_URL = "https://aviationweather.gov/api/data/metar"
+
+# ---------------------------------------------------------------------------
 # Risk parameters
 # ---------------------------------------------------------------------------
 STARTING_BANKROLL        = 100.0   # paper trading bankroll in USD
@@ -133,14 +184,32 @@ STOP_LOSS_PCT            = 0.40    # close position if value falls to 40% of ent
 REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop threshold
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 REPOSITION_CONFIDENCE_THRESHOLD = 2.0  # multiplier on normal entry threshold
+MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 
 # ---------------------------------------------------------------------------
 # Trading mode
 # ---------------------------------------------------------------------------
 USE_DEMO = True   # True = paper trading, False = live trading
 
-# Minimum edge required to enter a trade
-MIN_ENTRY_EDGE = 0.12
+# ---------------------------------------------------------------------------
+# Edge threshold — hybrid weather penalty system
+# ---------------------------------------------------------------------------
+EDGE_THRESHOLD_BASE = 0.12   # base edge required with no weather penalty
+
+# TAF weather penalty multipliers (worst condition in 12Z-00Z window)
+WEATHER_PENALTY = {
+    "clear":       1.0,   # SKC / CLR / FEW
+    "scattered":   1.2,   # SCT only, no precip
+    "broken":      1.5,   # BKN / OVC, no precip
+    "marine_fog":  1.8,   # BR / FG at coastal stations
+    "convective":  2.5,   # VCTS / TS in TAF
+    "precip":      3.0,   # RA / SN / FZRA active
+    "hard_skip":   None,  # FZRA+OVC / heavy SN / ICE — never trade
+}
+
+# bias_std gate — independent secondary check
+STD_GATE_VALUE = 4.5    # if bias_std exceeds this, apply floor
+STD_GATE_FLOOR = 0.30   # minimum effective threshold when gate fires
 
 # ---------------------------------------------------------------------------
 # Scheduler tier intervals
@@ -159,3 +228,8 @@ SHEET_TABS = {
     "model_accuracy": "Model Accuracy",
     "eod_summary":    "EOD Summary",
 }
+
+# ---------------------------------------------------------------------------
+# Aliases for backward compatibility
+# ---------------------------------------------------------------------------
+CLUSTER_PKL = CENTROIDS_PKL   # pattern_classifier.py uses this name
