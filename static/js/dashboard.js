@@ -1,0 +1,456 @@
+/* ═══════════════════════════════════════════════════════════════
+   WeatherBot Dashboard — Client-side JS
+   SSE live updates · Controls · Theme toggle
+═══════════════════════════════════════════════════════════════ */
+
+'use strict';
+
+// ── State ────────────────────────────────────────────────────
+let pendingCloseMarketId = null;
+let tradeHistoryOffset   = 0;
+const HISTORY_PAGE_SIZE  = 20;
+const STATION_CITIES = {
+  KJFK: 'New York', KORD: 'Chicago', KMIA: 'Miami',   KDFW: 'Dallas',
+  KLAX: 'Los Angeles', KATL: 'Atlanta', KDEN: 'Denver', KHOU: 'Houston'
+};
+
+// ── Theme ────────────────────────────────────────────────────
+(function initTheme() {
+  const saved = localStorage.getItem('wb-theme') || 'dark';
+  document.documentElement.setAttribute('data-bs-theme', saved);
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = saved === 'dark' ? '☀' : '☾';
+})();
+
+function toggleTheme() {
+  const html    = document.documentElement;
+  const current = html.getAttribute('data-bs-theme');
+  const next    = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-bs-theme', next);
+  localStorage.setItem('wb-theme', next);
+  document.getElementById('btn-theme').textContent = next === 'dark' ? '☀' : '☾';
+}
+
+// ── SSE connection ───────────────────────────────────────────
+function initSSE() {
+  const src = new EventSource('/stream');
+  const indicator = document.getElementById('sse-status');
+
+  src.addEventListener('open', () => {
+    if (indicator) { indicator.textContent = '⬤ Live'; indicator.className = 'text-success'; }
+  });
+
+  src.addEventListener('full_state', e => {
+    const state = JSON.parse(e.data);
+    applyFullState(state);
+  });
+
+  src.addEventListener('state_update', e => {
+    const s = JSON.parse(e.data);
+    updateSummaryStrip(s);
+    updateTimestamp();
+  });
+
+  src.addEventListener('position_opened', e => {
+    const d = JSON.parse(e.data);
+    // Full state will arrive shortly via state_update; refresh carousel
+    fetch('/api/state').then(r => r.json()).then(state => {
+      rebuildCarousel(state.positions);
+      updatePositionCount(Object.keys(state.positions).length);
+    });
+  });
+
+  src.addEventListener('position_closed', e => {
+    const d = JSON.parse(e.data);
+    removeCarouselCard(d.market_id);
+    appendTradeHistoryRow(d);
+    showToast(`Position closed: ${d.market_id}`,
+      `P/L: $${(d.realized_pnl >= 0 ? '+' : '') + d.realized_pnl.toFixed(4)}`,
+      d.realized_pnl >= 0 ? 'success' : 'danger');
+  });
+
+  src.addEventListener('signal_update', e => {
+    const d = JSON.parse(e.data);
+    flashSignalCard(d.station, d.decision);
+    const el = document.querySelector(`[data-station="${d.station}"] .wb-decision-badge`);
+    if (el) {
+      el.textContent = d.decision;
+      el.className = `wb-decision-badge badge wb-badge-${d.decision.toLowerCase()}`;
+    }
+    const signalsUpdated = document.getElementById('signals-updated');
+    if (signalsUpdated) signalsUpdated.textContent = `Updated ${nowStr()}`;
+  });
+
+  src.addEventListener('tier_heartbeat', e => {
+    const tiers = JSON.parse(e.data);
+    ['tier1','tier2','tier3','settlement'].forEach(t => {
+      const el = document.getElementById(`${t}-last`);
+      if (el && tiers[t]) el.textContent = tiers[t];
+    });
+  });
+
+  src.addEventListener('alert', e => {
+    const a = JSON.parse(e.data);
+    showToast(a.title, a.message, alertBootstrapClass(a.level));
+    prependAlert(a);
+  });
+
+  src.addEventListener('heartbeat', () => {
+    updateTimestamp();
+  });
+
+  src.onerror = () => {
+    if (indicator) { indicator.textContent = '⬤ Reconnecting…'; indicator.className = 'text-warning'; }
+    // EventSource auto-reconnects — no manual action needed
+  };
+}
+
+// ── Apply full state snapshot ────────────────────────────────
+function applyFullState(state) {
+  updateSummaryStrip(state.summary);
+  if (state.tier_status) {
+    ['tier1','tier2','tier3','settlement'].forEach(t => {
+      const el = document.getElementById(`${t}-last`);
+      if (el && state.tier_status[t]) el.textContent = state.tier_status[t];
+    });
+  }
+  updateTimestamp();
+}
+
+// ── Summary strip ────────────────────────────────────────────
+function updateSummaryStrip(s) {
+  setText('stat-bankroll',   `$${s.bankroll.toFixed(2)}`);
+  setText('stat-available',  `$${s.available_capital.toFixed(2)}`);
+  setPnl('stat-daily-pnl',   s.daily_pnl);
+  setPnl('stat-total-pnl',   s.realized_pnl);
+  setText('stat-win-rate',   `${s.win_rate}%`);
+  setText('stat-open',       s.open_positions);
+  updatePositionCount(s.open_positions);
+
+  const haltBadge = document.getElementById('halt-badge');
+  if (haltBadge) haltBadge.classList.toggle('d-none', !s.is_halted);
+
+  const ksLabel = document.getElementById('ks-label');
+  if (ksLabel) ksLabel.textContent = s.kill_switch ? 'Full Stop' : 'Active';
+}
+
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function setPnl(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = `$${val >= 0 ? '+' : ''}${val.toFixed(2)}`;
+  el.className = val >= 0 ? 'wb-stat-value text-success' : 'wb-stat-value text-danger';
+}
+
+function updatePositionCount(count) {
+  setText('position-count', count);
+  const placeholder = document.getElementById('no-positions-placeholder');
+  if (placeholder) placeholder.classList.toggle('d-none', count > 0);
+}
+
+// ── Carousel ─────────────────────────────────────────────────
+function rebuildCarousel(positions) {
+  const inner = document.getElementById('carousel-inner');
+  if (!inner) return;
+
+  const entries = Object.entries(positions);
+  if (entries.length === 0) {
+    inner.innerHTML = '';
+    const placeholder = document.getElementById('no-positions-placeholder');
+    if (placeholder) placeholder.classList.remove('d-none');
+    return;
+  }
+
+  // Re-render all cards (simple approach for small N)
+  inner.innerHTML = entries.map(([mid, pos], i) =>
+    buildPositionCardHTML(mid, pos, i === 0)
+  ).join('');
+}
+
+function buildPositionCardHTML(mid, pos, active) {
+  const safeMid = mid.replace(/-/g, '_');
+  const pnlClass = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
+  const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
+  const sign = pos.unrealized_pnl >= 0 ? '+' : '';
+  return `
+<div class="carousel-item ${active ? 'active' : ''}" data-market-id="${mid}">
+  <div class="wb-position-card card mx-auto">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start mb-2">
+        <div>
+          <span class="fw-bold fs-5">${pos.station}</span>
+          <span class="badge bg-primary ms-2">HIGH</span>
+          <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+        </div>
+        <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
+          $${sign}${pos.unrealized_pnl.toFixed(2)}
+        </span>
+      </div>
+      <div class="wb-pnl-row mb-3">
+        <div class="d-flex justify-content-between align-items-center">
+          <div>
+            <span class="text-muted small">Entry</span>
+            <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
+            <span class="mx-2 text-muted">→</span>
+            <span class="text-muted small">Current</span>
+            <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
+          </div>
+          <div class="text-end">
+            <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
+          </div>
+        </div>
+      </div>
+      <div class="row g-1 text-muted small mb-3">
+        <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
+        <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
+        <div class="col-12">Entered: <span class="text-body">${pos.entry_time}</span></div>
+        <div class="col-12">Event: <span class="text-body">${pos.event_date}</span></div>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                onclick="confirmClose('${mid}', '${pos.station}', ${pos.unrealized_pnl})">
+          Close Position
+        </button>
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+function removeCarouselCard(marketId) {
+  const item = document.querySelector(`[data-market-id="${marketId}"]`);
+  if (!item) return;
+  const wasActive = item.classList.contains('active');
+  item.remove();
+  // If removed card was active, activate the first remaining
+  if (wasActive) {
+    const first = document.querySelector('#carousel-inner .carousel-item');
+    if (first) first.classList.add('active');
+  }
+  const remaining = document.querySelectorAll('#carousel-inner .carousel-item').length;
+  updatePositionCount(remaining);
+}
+
+function flashSignalCard(station, decision) {
+  const card = document.querySelector(`[data-station="${station}"].wb-signal-card`);
+  if (!card) return;
+  // Update border class
+  card.className = card.className.replace(/wb-border-\S+/, `wb-border-${decision.toLowerCase()}`);
+  // Brief flash
+  card.style.transition = 'opacity 0.15s';
+  card.style.opacity = '0.5';
+  setTimeout(() => { card.style.opacity = '1'; }, 150);
+}
+
+// ── Trade history ────────────────────────────────────────────
+function appendTradeHistoryRow(d) {
+  const tbody = document.getElementById('trade-history-body');
+  if (!tbody) return;
+
+  // Remove "no trades" placeholder if present
+  const placeholder = tbody.querySelector('td[colspan]');
+  if (placeholder) placeholder.closest('tr').remove();
+
+  const pnlClass = (d.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger';
+  const sign = (d.realized_pnl || 0) >= 0 ? '+' : '';
+  const row = document.createElement('tr');
+  row.innerHTML = `
+    <td>${nowStr()}</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td>—</td>
+    <td class="${pnlClass} fw-bold">$${sign}${(d.realized_pnl || 0).toFixed(4)}</td>
+    <td class="d-none d-md-table-cell text-muted small">${d.reason || '—'}</td>`;
+  tbody.prepend(row);
+}
+
+function loadMoreTrades() {
+  // Future: fetch from server with offset parameter
+  showToast('Load More', 'Historical trade log coming in a future update.', 'secondary');
+}
+
+// ── Alerts ───────────────────────────────────────────────────
+function prependAlert(a) {
+  const container = document.getElementById('alerts-container');
+  if (!container) return;
+
+  const placeholder = document.getElementById('no-alerts-placeholder');
+  if (placeholder) placeholder.remove();
+
+  const div = document.createElement('div');
+  div.className = `wb-alert-row d-flex gap-2 align-items-start py-2 border-bottom wb-alert-${a.level.toLowerCase()}`;
+  div.innerHTML = `
+    <span class="wb-alert-level badge wb-badge-${a.level.toLowerCase()} mt-1">${a.level}</span>
+    <div class="flex-grow-1">
+      <div class="fw-semibold small">${escHtml(a.title)}</div>
+      <div class="text-muted small">${escHtml(a.message)}</div>
+    </div>
+    <span class="text-muted small text-nowrap">${a.timestamp}</span>`;
+  container.prepend(div);
+}
+
+function clearAlerts() {
+  const container = document.getElementById('alerts-container');
+  if (container) {
+    container.innerHTML = '<div class="text-muted text-center py-3" id="no-alerts-placeholder">No alerts.</div>';
+  }
+}
+
+function alertBootstrapClass(level) {
+  const map = { INFO: 'info', WARNING: 'warning', ERROR: 'danger', CRITICAL: 'danger' };
+  return map[level] || 'secondary';
+}
+
+// ── Toast notifications ──────────────────────────────────────
+function showToast(title, message, type = 'secondary') {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const id   = `toast-${Date.now()}`;
+  const html = `
+<div id="${id}" class="toast align-items-center text-bg-${type} border-0" role="alert" aria-live="assertive">
+  <div class="d-flex">
+    <div class="toast-body">
+      <strong>${escHtml(title)}</strong><br>
+      <span class="small">${escHtml(message)}</span>
+    </div>
+    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+  </div>
+</div>`;
+  container.insertAdjacentHTML('beforeend', html);
+  const el    = document.getElementById(id);
+  const toast = new bootstrap.Toast(el, { delay: 6000 });
+  toast.show();
+  el.addEventListener('hidden.bs.toast', () => el.remove());
+}
+
+// ── Controls ─────────────────────────────────────────────────
+async function setKillSwitch(activate) {
+  const endpoint = activate ? '/api/kill-switch/activate' : '/api/kill-switch/deactivate';
+  try {
+    const res  = await fetch(endpoint, { method: 'POST' });
+    const data = await res.json();
+    const label = activate ? 'Full Stop' : 'Active';
+    showToast('Kill Switch', `Bot is now: ${label}`, activate ? 'danger' : 'success');
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  }
+}
+
+async function runSignalPass() {
+  const btn = document.getElementById('btn-signal');
+  if (btn) { btn.disabled = true; btn.textContent = '↻ Running…'; }
+  try {
+    const res  = await fetch('/api/signal-pass', { method: 'POST' });
+    const data = await res.json();
+    showToast('Signal Pass', data.message || 'Running…', 'primary');
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  } finally {
+    setTimeout(() => {
+      if (btn) { btn.disabled = false; btn.textContent = '↻ Run Signal'; }
+    }, 8000);
+  }
+}
+
+// ── Close position ───────────────────────────────────────────
+function confirmClose(marketId, station, pnl) {
+  pendingCloseMarketId = marketId;
+  const stationEl = document.getElementById('close-pos-station');
+  const pnlEl     = document.getElementById('close-pos-pnl');
+  if (stationEl) stationEl.textContent = `${station} — ${marketId}`;
+  if (pnlEl) {
+    pnlEl.textContent = `$${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`;
+    pnlEl.className = pnl >= 0 ? 'text-success' : 'text-danger';
+  }
+  const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('modal-close-pos'));
+  modal.show();
+}
+
+async function executeClose() {
+  if (!pendingCloseMarketId) return;
+  const mid = pendingCloseMarketId;
+  pendingCloseMarketId = null;
+  bootstrap.Modal.getInstance(document.getElementById('modal-close-pos'))?.hide();
+
+  try {
+    const res  = await fetch(`/api/close-position/${encodeURIComponent(mid)}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Position Closed', `P/L: $${data.realized_pnl >= 0 ? '+' : ''}${data.realized_pnl.toFixed(4)}`,
+        data.realized_pnl >= 0 ? 'success' : 'secondary');
+    } else {
+      showToast('Close Failed', data.error || 'Unknown error', 'danger');
+    }
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  }
+}
+
+async function executeCloseAll() {
+  bootstrap.Modal.getInstance(document.getElementById('modal-close-all'))?.hide();
+  try {
+    const res  = await fetch('/api/close-all', { method: 'POST' });
+    const data = await res.json();
+    const wins = data.results?.filter(r => r.ok).length || 0;
+    showToast('Close All', `${wins} position(s) closed.`, 'warning');
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  }
+}
+
+// ── Settings ─────────────────────────────────────────────────
+async function saveSettings() {
+  const inputs  = document.querySelectorAll('.wb-setting-input');
+  const payload = {};
+  inputs.forEach(inp => { payload[inp.name] = parseFloat(inp.value); });
+
+  try {
+    const res  = await fetch('/api/settings', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    const data = await res.json();
+    const fb   = document.getElementById('settings-feedback');
+    if (data.ok) {
+      if (fb) fb.innerHTML = '<div class="text-success small">✓ Settings saved and applied.</div>';
+      showToast('Settings', 'Saved and applied live.', 'success');
+    } else {
+      const errs = (data.errors || []).join('; ');
+      if (fb) fb.innerHTML = `<div class="text-danger small">Errors: ${escHtml(errs)}</div>`;
+      showToast('Settings Error', errs, 'danger');
+    }
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  }
+}
+
+// ── Utilities ────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function nowStr() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function updateTimestamp() {
+  const el = document.getElementById('last-updated');
+  if (el) el.textContent = `Updated: ${nowStr()}`;
+}
+
+// ── Init ─────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  initSSE();
+  updateTimestamp();
+});

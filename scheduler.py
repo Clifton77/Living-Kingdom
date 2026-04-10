@@ -35,6 +35,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from utils.logging_config import setup_logging
 from utils.asos_live import running_max_with_confluence
 from utils.sheets import get_sheets_logger
+from utils.events import push_event, push_alert
 from utils.alerting import (
     alert_order_failure,
     alert_reconciliation_mismatch,
@@ -89,6 +90,14 @@ _tier3_retry_counts: dict[str, int] = {}   # key = event_date ISO string
 # Tracks liquidity retry attempts per market — reset when entry succeeds or gives up
 _liquidity_retry_counts: dict[str, int] = {}   # key = market_id
 
+# Last-run timestamps per tier — read by dashboard
+_tier_last_run: dict[str, str] = {
+    "tier1":      "never",
+    "tier2":      "never",
+    "tier3":      "never",
+    "settlement": "never",
+}
+
 
 # ---------------------------------------------------------------------------
 # Shared state accessors (for dashboard)
@@ -121,6 +130,8 @@ def tier1_taf_monitor():
     If an AMD is detected on a station with an open position,
     re-evaluate whether the position still makes sense.
     """
+    _tier_last_run["tier1"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    push_event("tier_heartbeat", _tier_last_run)
     logger.info("[Tier1] TAF amendment scan")
     rm = get_risk_manager()
 
@@ -189,6 +200,8 @@ def tier2_metar_and_positions():
       - early profit exit (bid ≥ 85¢)
     Execute exits if triggered. Log warnings for manual review.
     """
+    _tier_last_run["tier2"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    push_event("tier_heartbeat", _tier_last_run)
     logger.info("[Tier2] METAR + position update cycle")
     rm     = get_risk_manager()
     kalshi = get_kalshi()
@@ -299,12 +312,14 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     if result.success:
         realized = rm.close_position(market_id, bid_price, reason)
         get_sheets_logger().log_trade_closed(market_id, bid_price, realized, reason)
-        get_sheets_logger().update_dashboard(
-            rm.summary(), mode="DEMO" if USE_DEMO else "LIVE"
-        )
+        mode = "DEMO" if USE_DEMO else "LIVE"
+        get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
+        push_event("position_closed", {"market_id": market_id, "realized_pnl": realized, "reason": reason})
+        push_event("state_update", rm.summary())
         logger.info("[Tier2] Exit complete: %s | realized P/L $%+.4f", market_id, realized)
     else:
         logger.error("[Tier2] Exit order failed for %s: %s", market_id, result.error)
+        push_alert(f"Exit failed — {market_id}", result.error or "unknown", "ERROR")
 
 
 # ---------------------------------------------------------------------------
@@ -368,12 +383,17 @@ def tier3_full_signal_pass(event_date: date | None = None):
 
     # Reset retry counter on successful data availability
     _tier3_retry_counts.pop(event_date.isoformat(), None)
+    _tier_last_run["tier3"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    push_event("tier_heartbeat", _tier_last_run)
 
     signals    = run_signal_pass(event_date=event_date, bankroll=rm.state.bankroll)
 
-    # Update shared signal store
+    # Update shared signal store and push to dashboard
     with _latest_signals_lock:
         _latest_signals.update(signals)
+    for station, sig in signals.items():
+        push_event("signal_update", {"station": station, "decision": sig.decision,
+                                     "top_edge": sig.top_edge, "top_bucket": sig.top_bucket})
 
     # ── Priority queue: rank TRADE signals by edge, best first ───────────
     trade_signals = [
@@ -544,6 +564,10 @@ def tier3_full_signal_pass(event_date: date | None = None):
                 stake_usd=sig.kelly_stake_usd,
                 sig=sig,
             )
+            push_event("position_opened", {"market_id": market_id, "station": station,
+                                           "bucket_lower": sig.top_bucket, "entry_price": max_price,
+                                           "contracts": sig.kelly_contracts, "stake_usd": sig.kelly_stake_usd})
+            push_event("state_update", rm.summary())
             logger.info(
                 "[Tier3] Order filled: %s | %d contracts @ $%.2f | stake $%.2f",
                 market_id, sig.kelly_contracts, max_price, sig.kelly_stake_usd,
@@ -551,6 +575,7 @@ def tier3_full_signal_pass(event_date: date | None = None):
         else:
             logger.error("[Tier3] Order failed for %s: %s", market_id, result.error)
             alert_order_failure(station, market_id, result.error or "unknown error")
+            push_alert(f"Order failed — {station}", result.error or "unknown", "ERROR")
             # TODO (kalshi_client): add fill-retry with fresh edge check
             # retry up to ORDER_FILL_RETRY_MAX times with ORDER_FILL_RETRY_WAIT_SEC gap
 
@@ -1068,6 +1093,8 @@ def tier_settlement_sweep():
       - If found: record close at settlement price and fire alert
       - Positions not yet on Kalshi settlement feed: leave open (may still be pending)
     """
+    _tier_last_run["settlement"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    push_event("tier_heartbeat", _tier_last_run)
     logger.info("[Settlement] Running morning settlement sweep")
     rm     = get_risk_manager()
     kalshi = get_kalshi()
@@ -1128,6 +1155,7 @@ def tier_settlement_sweep():
     mode = "DEMO" if USE_DEMO else "LIVE"
     sheets.update_dashboard(summary, mode=mode)
     sheets.log_eod_summary(summary, session_date=yesterday.isoformat(), mode=mode)
+    push_event("state_update", summary)
     logger.info(
         "[Settlement] Sweep complete | bankroll=$%.2f | daily P/L=$%+.2f | open=%d",
         summary["bankroll"], summary["daily_pnl"], summary["open_positions"],

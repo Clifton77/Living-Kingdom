@@ -296,6 +296,14 @@ SHEET_TABS = {
 }
 
 # ---------------------------------------------------------------------------
+# Web dashboard
+# ---------------------------------------------------------------------------
+DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "0.0.0.0")
+DASHBOARD_PORT     = int(os.getenv("DASHBOARD_PORT", "5000"))
+DASHBOARD_USER     = os.getenv("DASHBOARD_USER", "admin")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")   # required — set in .env
+
+# ---------------------------------------------------------------------------
 # Aliases for backward compatibility
 # ---------------------------------------------------------------------------
 CLUSTER_PKL = CENTROIDS_PKL   # pattern_classifier.py uses this name

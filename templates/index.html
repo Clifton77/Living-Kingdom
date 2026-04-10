@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WeatherBot Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     STICKY NAVBAR
+═══════════════════════════════════════════════════════════════════ -->
+<nav class="navbar navbar-expand sticky-top wb-navbar px-3 py-2">
+  <div class="d-flex align-items-center gap-2 me-auto">
+    <span class="navbar-brand mb-0 fw-bold fs-6">WeatherBot</span>
+    <span id="mode-badge" class="badge {% if initial_state.mode == 'LIVE' %}bg-danger{% else %}bg-secondary{% endif %}">
+      {{ initial_state.mode }}
+    </span>
+    <span id="halt-badge" class="badge bg-warning text-dark {% if not initial_state.is_halted %}d-none{% endif %}">
+      HALTED
+    </span>
+    <span class="text-muted small d-none d-sm-inline" id="last-updated">
+      Updated: —
+    </span>
+  </div>
+
+  <div class="d-flex align-items-center gap-2 flex-wrap justify-content-end">
+    <!-- Kill switch -->
+    <div class="dropdown">
+      <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
+        <span id="ks-label">{% if initial_state.kill_switch %}Full Stop{% else %}Active{% endif %}</span>
+      </button>
+      <ul class="dropdown-menu dropdown-menu-end">
+        <li><button class="dropdown-item text-success" onclick="setKillSwitch(false)">▶ Active</button></li>
+        <li><button class="dropdown-item text-danger"  onclick="setKillSwitch(true)">■ Full Stop</button></li>
+      </ul>
+    </div>
+
+    <!-- Run signal -->
+    <button class="btn btn-sm btn-outline-primary" id="btn-signal" onclick="runSignalPass()">
+      ↻ Run Signal
+    </button>
+
+    <!-- Close all -->
+    <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal-close-all">
+      ✕ Close All
+    </button>
+
+    <!-- Settings -->
+    <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#modal-settings">
+      ⚙
+    </button>
+
+    <!-- Theme toggle -->
+    <button class="btn btn-sm btn-outline-secondary" id="btn-theme" onclick="toggleTheme()" title="Toggle light/dark">
+      ☾
+    </button>
+  </div>
+</nav>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SUMMARY STRIP
+═══════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid px-3 py-2">
+  <div class="row g-2" id="summary-strip">
+    {% set s = initial_state.summary %}
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Bankroll</div>
+        <div class="wb-stat-value" id="stat-bankroll">${{ "%.2f"|format(s.bankroll) }}</div>
+      </div>
+    </div>
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Available</div>
+        <div class="wb-stat-value" id="stat-available">${{ "%.2f"|format(s.available_capital) }}</div>
+      </div>
+    </div>
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Daily P/L</div>
+        <div class="wb-stat-value {% if s.daily_pnl >= 0 %}text-success{% else %}text-danger{% endif %}"
+             id="stat-daily-pnl">${{ "%+.2f"|format(s.daily_pnl) }}</div>
+      </div>
+    </div>
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Total P/L</div>
+        <div class="wb-stat-value {% if s.realized_pnl >= 0 %}text-success{% else %}text-danger{% endif %}"
+             id="stat-total-pnl">${{ "%+.2f"|format(s.realized_pnl) }}</div>
+      </div>
+    </div>
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Win Rate</div>
+        <div class="wb-stat-value" id="stat-win-rate">{{ s.win_rate }}%</div>
+      </div>
+    </div>
+    <div class="col-6 col-sm-4 col-md-2">
+      <div class="wb-stat-card card h-100 p-2 text-center">
+        <div class="wb-stat-label">Open</div>
+        <div class="wb-stat-value" id="stat-open">{{ s.open_positions }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     OPEN TRADES CAROUSEL
+═══════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid px-3 pb-2">
+  <div class="wb-section-header d-flex align-items-center justify-content-between mb-2">
+    <span class="fw-semibold">Open Trades</span>
+    <span class="badge bg-secondary" id="position-count">{{ initial_state.summary.open_positions }}</span>
+  </div>
+
+  {% if initial_state.positions %}
+  <div id="positions-carousel" class="carousel slide wb-carousel" data-bs-ride="false" data-bs-interval="false">
+    <div class="carousel-inner" id="carousel-inner">
+      {% for market_id, pos in initial_state.positions.items() %}
+      <div class="carousel-item {% if loop.first %}active{% endif %}" data-market-id="{{ market_id }}">
+        <div class="wb-position-card card mx-auto">
+          <div class="card-body">
+            <!-- Header -->
+            <div class="d-flex justify-content-between align-items-start mb-2">
+              <div>
+                <span class="fw-bold fs-5">{{ pos.station }}</span>
+                <span class="badge bg-primary ms-2">HIGH</span>
+                <span class="ms-2 text-muted">{{ pos.bucket_lower }}–{{ pos.bucket_lower + 2 }}°F</span>
+              </div>
+              <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
+                    id="pos-badge-{{ market_id|replace('-','_') }}">
+                ${{ "%+.2f"|format(pos.unrealized_pnl) }}
+              </span>
+            </div>
+            <!-- P/L row (prominent) -->
+            <div class="wb-pnl-row mb-3">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <span class="text-muted small">Entry</span>
+                  <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
+                  <span class="mx-2 text-muted">→</span>
+                  <span class="text-muted small">Current</span>
+                  <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
+                    ${{ "%.2f"|format(pos.current_bid) }}
+                  </span>
+                </div>
+                <div class="text-end">
+                  <span class="{% if pos.pnl_pct >= 0 %}text-success{% else %}text-danger{% endif %} fw-bold"
+                        id="pos-pct-{{ market_id|replace('-','_') }}">
+                    {{ "%+.1f"|format(pos.pnl_pct) }}%
+                  </span>
+                </div>
+              </div>
+            </div>
+            <!-- Details -->
+            <div class="row g-1 text-muted small mb-3">
+              <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
+              <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
+              <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
+              <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
+            </div>
+            <!-- Actions -->
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                      onclick="confirmClose('{{ market_id }}', '{{ pos.station }}', {{ pos.unrealized_pnl }})">
+                Close Position
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% if initial_state.positions|length > 1 %}
+    <button class="carousel-control-prev wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="prev">
+      <span class="carousel-control-prev-icon"></span>
+    </button>
+    <button class="carousel-control-next wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="next">
+      <span class="carousel-control-next-icon"></span>
+    </button>
+    <div class="carousel-indicators wb-carousel-dots" style="position:static;margin-top:8px;">
+      {% for market_id in initial_state.positions %}
+      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="{{ loop.index0 }}"
+              {% if loop.first %}class="active"{% endif %}></button>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="wb-empty-state card p-3 text-center text-muted" id="no-positions-placeholder">
+    No open positions
+  </div>
+  {% endif %}
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     TODAY'S SIGNALS
+═══════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid px-3 pb-2">
+  <div class="wb-section-header d-flex align-items-center mb-2">
+    <span class="fw-semibold">Today's Signals</span>
+    <span class="text-muted small ms-2" id="signals-updated"></span>
+  </div>
+
+  <div class="row g-2" id="signal-cards">
+    {% for station, sig in initial_state.signals.items() %}
+    {% set decision = sig.decision if sig else 'PENDING' %}
+    <div class="col-12 col-lg-6" id="signal-col-{{ station }}">
+      <div class="wb-signal-card card wb-border-{{ decision|lower }}" data-station="{{ station }}" data-decision="{{ decision }}">
+        <div class="card-body pb-2">
+
+          <!-- ── Header row ── -->
+          <div class="d-flex justify-content-between align-items-start mb-1">
+            <div>
+              <span class="fw-bold fs-5">{{ station }}</span>
+              <span class="text-muted ms-2">
+                {{ {'KJFK':'New York','KORD':'Chicago','KMIA':'Miami','KDFW':'Dallas',
+                    'KLAX':'Los Angeles','KATL':'Atlanta','KDEN':'Denver','KHOU':'Houston'}[station] }}
+              </span>
+            </div>
+            <div class="text-end">
+              <div class="wb-decision-badge badge wb-badge-{{ decision|lower }}">{{ decision }}</div>
+              {% if sig %}
+              <div class="text-muted small mt-1">{{ sig.local_time if sig.local_time else '—' }}</div>
+              {% endif %}
+            </div>
+          </div>
+
+          <div class="text-muted small mb-2">High Temperature Market</div>
+
+          {% if sig %}
+          <!-- ── Forecast + cluster ── -->
+          <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+            <span class="text-muted small">Bias-adj. forecast</span>
+            <span class="fw-bold fs-5">{{ "%.0f"|format(sig.forecast_adjusted) }}°F</span>
+            <span class="text-muted">±{{ "%.1f"|format(sig.bias_std) }}°F</span>
+            <span class="text-muted small ms-auto">
+              Cluster {{ sig.cluster_id }} · {{ sig.season }} · n={{ sig.n_obs }}
+            </span>
+          </div>
+
+          <!-- ── Top bucket row ── -->
+          <div class="wb-bucket-highlight rounded p-2 mb-2">
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+              <span class="text-muted small">Top bucket</span>
+              <span class="fw-semibold">{{ sig.top_bucket }}–{{ sig.top_bucket + 2 }}°F</span>
+              <span class="ms-auto d-flex gap-3">
+                <span class="text-muted small">Model <span class="text-body">{{ "%.0f"|format(sig.top_model_prob * 100) }}%</span></span>
+                <span class="text-muted small">Kalshi <span class="text-body">{{ "%.0f"|format(sig.top_kalshi_prob * 100) }}%</span></span>
+                <span class="text-muted small">Edge
+                  <span class="{% if sig.top_edge > 0 %}text-success fw-bold{% else %}text-danger{% endif %}">
+                    {{ "%+.2f"|format(sig.top_edge) }}
+                  </span>
+                  {% if sig.top_edge >= 0.12 %}<span class="text-success">✓</span>{% endif %}
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <!-- ── Kelly row ── -->
+          <div class="text-muted small mb-2">
+            Kelly stake
+            <span class="text-body fw-semibold ms-1">${{ "%.2f"|format(sig.kelly_stake_usd) }}</span>
+            <span class="ms-1">({{ sig.kelly_contracts }} contracts @ ${{ "%.2f"|format(sig.top_yes_ask) }})</span>
+          </div>
+
+          <!-- ── Expand buttons ── -->
+          <div class="d-flex gap-2 flex-wrap">
+            <button class="btn btn-sm wb-btn-expand" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#reasoning-{{ station }}"
+                    aria-expanded="false">
+              ▼ Full Reasoning
+            </button>
+            <button class="btn btn-sm wb-btn-expand" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#buckets-{{ station }}"
+                    aria-expanded="false">
+              Bucket Table
+            </button>
+            <button class="btn btn-sm wb-btn-expand" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#weather-{{ station }}"
+                    aria-expanded="false">
+              Weather Summary
+            </button>
+          </div>
+
+          <!-- ── Full Reasoning ── -->
+          <div class="collapse mt-3" id="reasoning-{{ station }}">
+            <div class="wb-expand-section p-3 rounded">
+              {% if sig.reasoning %}
+              <div class="wb-reasoning-block mb-3">
+                <div class="wb-reasoning-label">Current Conditions</div>
+                <div class="wb-reasoning-text">{{ sig.reasoning.current_conditions }}</div>
+              </div>
+              <div class="wb-reasoning-block mb-3">
+                <div class="wb-reasoning-label">Synoptic Pattern</div>
+                <div class="wb-reasoning-text">{{ sig.reasoning.synoptic_pattern }}</div>
+              </div>
+              <div class="wb-reasoning-block mb-3">
+                <div class="wb-reasoning-label">Forecast &amp; Bias</div>
+                <div class="wb-reasoning-text">{{ sig.reasoning.forecast_and_bias }}</div>
+              </div>
+              <div class="wb-reasoning-block mb-3">
+                <div class="wb-reasoning-label">Market Analysis</div>
+                <div class="wb-reasoning-text">{{ sig.reasoning.market_analysis }}</div>
+              </div>
+              <div class="wb-reasoning-decision">{{ sig.reasoning.decision_rationale }}</div>
+              {% if sig.reasoning.expansion_note %}
+              <div class="alert alert-info mt-2 py-2 small mb-0">
+                <strong>Expansion note:</strong> {{ sig.reasoning.expansion_note }}
+              </div>
+              {% endif %}
+              {% else %}
+              <span class="text-muted">Reasoning not available.</span>
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- ── Bucket Table ── -->
+          <div class="collapse mt-3" id="buckets-{{ station }}">
+            <div class="wb-expand-section rounded overflow-hidden">
+              <table class="table table-sm wb-bucket-table mb-0">
+                <thead>
+                  <tr>
+                    <th>Bucket</th>
+                    <th class="text-center">Model</th>
+                    <th class="text-center">Kalshi</th>
+                    <th class="text-center">Edge</th>
+                    <th class="d-none d-sm-table-cell">Bar</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for b in sig.buckets %}
+                  <tr class="{% if b.bucket_lower == sig.top_bucket %}wb-bucket-top-row{% endif %}">
+                    <td class="fw-semibold">
+                      {% if b.bucket_lower == sig.top_bucket %}★ {% endif %}
+                      {{ b.bucket_label }}
+                    </td>
+                    <td class="text-center">{{ "%.0f"|format(b.model_prob * 100) }}%</td>
+                    <td class="text-center text-muted">{{ "%.0f"|format(b.kalshi_prob * 100) }}%</td>
+                    <td class="text-center {% if b.edge > 0 %}text-success{% else %}text-danger{% endif %} fw-bold">
+                      {{ "%+.2f"|format(b.edge) }}
+                    </td>
+                    <td class="d-none d-sm-table-cell" style="min-width:80px;">
+                      <div class="wb-edge-bar-wrap">
+                        <div class="wb-edge-bar {% if b.edge > 0 %}wb-edge-pos{% else %}wb-edge-neg{% endif %}"
+                             style="width:{{ [([b.edge|abs * 200, 100]|min), 4]|max }}%">
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- ── Weather Summary ── -->
+          <div class="collapse mt-3" id="weather-{{ station }}">
+            <div class="wb-expand-section p-3 rounded">
+              {% if sig.metar %}
+              <div class="wb-reasoning-block mb-2">
+                <div class="wb-reasoning-label">METAR — Current Obs</div>
+                <div class="text-muted small">
+                  Temp {{ sig.metar.temp_f }}°F &nbsp;·&nbsp;
+                  Dewpoint {{ sig.metar.dewpoint_f }}°F &nbsp;·&nbsp;
+                  Wind {{ sig.metar.wind_dir }}° @ {{ sig.metar.wind_speed_kt }}kt &nbsp;·&nbsp;
+                  Sky {{ sig.metar.sky_condition }}
+                  {% if sig.metar.raw %}<br><span class="font-monospace opacity-50 small">{{ sig.metar.raw }}</span>{% endif %}
+                </div>
+              </div>
+              {% endif %}
+              {% if sig.taf %}
+              <div class="wb-reasoning-block">
+                <div class="wb-reasoning-label">TAF Highlights</div>
+                <div class="text-muted small">
+                  Ceiling: {{ sig.taf.ceiling_category }} &nbsp;·&nbsp;
+                  Condition: {{ sig.taf.weather_condition }}
+                  {% if sig.taf.has_amd %}<span class="badge bg-warning text-dark ms-1">AMD</span>{% endif %}
+                  {% if sig.taf.hard_skip %}<span class="badge bg-danger ms-1">HARD SKIP</span>{% endif %}
+                  {% if sig.taf.summary %}<br><span class="opacity-75">{{ sig.taf.summary }}</span>{% endif %}
+                </div>
+              </div>
+              {% endif %}
+              {% if sig.threshold_result %}
+              <div class="wb-reasoning-block mt-2">
+                <div class="wb-reasoning-label">Threshold Checks</div>
+                <div class="d-flex flex-wrap gap-1 mt-1">
+                  <span class="badge {% if sig.threshold_result.weather_condition == 'clear' %}bg-success{% elif sig.threshold_result.weather_condition in ['precip','hard_skip'] %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+                    {{ sig.threshold_result.weather_condition }}
+                  </span>
+                  <span class="badge bg-secondary">
+                    threshold {{ "%.2f"|format(sig.threshold_result.effective_threshold) }}
+                  </span>
+                  <span class="badge {% if sig.top_edge >= sig.threshold_result.effective_threshold %}bg-success{% else %}bg-secondary{% endif %}">
+                    edge {{ "%+.2f"|format(sig.top_edge) }}
+                    {% if sig.top_edge >= sig.threshold_result.effective_threshold %}✓{% else %}✗{% endif %}
+                  </span>
+                </div>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+
+          {% else %}
+          <div class="text-muted small">Signal not yet computed — waiting for next Tier 3 cycle.</div>
+          {% endif %}
+
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="col-12 text-muted text-center py-3">No signals yet — bot initializing.</div>
+    {% endfor %}
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     TRADE HISTORY
+═══════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid px-3 pb-2">
+  <div class="wb-section-header d-flex align-items-center justify-content-between mb-2">
+    <span class="fw-semibold">Trade History</span>
+    <span class="text-muted small">Today</span>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+      <table class="table table-sm wb-history-table mb-0" id="trade-history-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Station</th>
+            <th>Bucket</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>P/L</th>
+            <th class="d-none d-md-table-cell">Reason</th>
+          </tr>
+        </thead>
+        <tbody id="trade-history-body">
+          <tr><td colspan="7" class="text-muted text-center py-3">No closed trades today.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer text-center py-2">
+      <button class="btn btn-sm btn-outline-secondary" id="btn-load-more" onclick="loadMoreTrades()">
+        Load More
+      </button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     RECENT ALERTS
+═══════════════════════════════════════════════════════════════════ -->
+<div class="container-fluid px-3 pb-3">
+  <div class="wb-section-header d-flex align-items-center justify-content-between mb-2">
+    <span class="fw-semibold">Recent Alerts</span>
+    <button class="btn btn-sm btn-link text-muted p-0" onclick="clearAlerts()">Clear</button>
+  </div>
+  <div id="alerts-container">
+    {% if initial_state.alerts %}
+      {% for alert in initial_state.alerts|reverse %}
+      <div class="wb-alert-row d-flex gap-2 align-items-start py-2 border-bottom wb-alert-{{ alert.level|lower }}">
+        <span class="wb-alert-level badge wb-badge-{{ alert.level|lower }} mt-1">{{ alert.level }}</span>
+        <div class="flex-grow-1">
+          <div class="fw-semibold small">{{ alert.title }}</div>
+          <div class="text-muted small">{{ alert.message }}</div>
+        </div>
+        <span class="text-muted small text-nowrap">{{ alert.timestamp }}</span>
+      </div>
+      {% endfor %}
+    {% else %}
+    <div class="text-muted text-center py-3" id="no-alerts-placeholder">No alerts.</div>
+    {% endif %}
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     TIER STATUS FOOTER
+═══════════════════════════════════════════════════════════════════ -->
+<footer class="wb-footer px-3 py-2">
+  <div class="d-flex flex-wrap gap-3 text-muted small">
+    <span>Tier 1 (TAF): <span id="tier1-last" class="text-body">{{ initial_state.tier_status.tier1 }}</span></span>
+    <span>Tier 2 (METAR): <span id="tier2-last" class="text-body">{{ initial_state.tier_status.tier2 }}</span></span>
+    <span>Tier 3 (Signal): <span id="tier3-last" class="text-body">{{ initial_state.tier_status.tier3 }}</span></span>
+    <span>Settlement: <span id="settlement-last" class="text-body">{{ initial_state.tier_status.settlement }}</span></span>
+    <span class="ms-auto">
+      <span id="sse-status" class="text-warning">⬤ Connecting…</span>
+    </span>
+  </div>
+</footer>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     TOAST CONTAINER
+═══════════════════════════════════════════════════════════════════ -->
+<div class="toast-container position-fixed top-0 end-0 p-3" id="toast-container" style="z-index:9999"></div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     MODALS
+═══════════════════════════════════════════════════════════════════ -->
+
+<!-- Close single position confirm -->
+<div class="modal fade" id="modal-close-pos" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h6 class="modal-title">Close Position</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Close position on <strong id="close-pos-station"></strong>?</p>
+        <p class="text-muted small">Current P/L: <span id="close-pos-pnl"></span></p>
+      </div>
+      <div class="modal-footer border-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm" id="btn-confirm-close" onclick="executeClose()">
+          Close Position
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Close all confirm -->
+<div class="modal fade" id="modal-close-all" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h6 class="modal-title text-danger">Close All Positions</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>This will close <strong>all open positions</strong> at current market prices.</p>
+        <p class="text-muted small">This action cannot be undone.</p>
+      </div>
+      <div class="modal-footer border-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm" onclick="executeCloseAll()">Close All</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="modal fade" id="modal-settings" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h6 class="modal-title">⚙ Live Settings</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="settings-body">
+        <div class="row g-3">
+          {% for key, meta in initial_state.adjustable_settings.items() %}
+          <div class="col-12 col-sm-6">
+            <label class="form-label small text-muted">{{ meta.label }}</label>
+            <input type="number" class="form-control form-control-sm wb-setting-input"
+                   id="setting-{{ key }}" name="{{ key }}"
+                   value="{{ meta.value }}" min="{{ meta.min }}" max="{{ meta.max }}" step="0.01">
+            <div class="form-text">{{ meta.min }} – {{ meta.max }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        <div id="settings-feedback" class="mt-2"></div>
+      </div>
+      <div class="modal-footer border-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="saveSettings()">Save &amp; Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPTS
+═══════════════════════════════════════════════════════════════════ -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  // Inject server state for JS use
+  const INITIAL_STATE = {{ initial_state | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+
+</body>
+</html>

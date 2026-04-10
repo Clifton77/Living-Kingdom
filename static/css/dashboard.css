@@ -1,0 +1,272 @@
+/* ═══════════════════════════════════════════════════════════════
+   WeatherBot Dashboard — Custom Styles
+   Dark theme default · Bootstrap 5 data-bs-theme integration
+═══════════════════════════════════════════════════════════════ */
+
+/* ── CSS variables ──────────────────────────────────────────── */
+:root[data-bs-theme="dark"] {
+  --wb-bg:           #1a1d23;
+  --wb-card-bg:      #242830;
+  --wb-card-border:  #2e3340;
+  --wb-card-shadow:  0 2px 8px rgba(0,0,0,0.4);
+  --wb-section-hdr:  #8892a4;
+  --wb-expand-bg:    #1e2128;
+  --wb-bucket-hl:    rgba(255,255,255,0.05);
+  --wb-footer-bg:    #1a1d23;
+  --wb-footer-bdr:   #2e3340;
+  --wb-navbar-bg:    #141720;
+  --wb-text-dim:     #8892a4;
+  --wb-border-trade: #28a745;
+  --wb-border-watch: #ffc107;
+  --wb-border-skip:  #dc3545;
+  --wb-border-hard:  #6c757d;
+  --wb-border-pending: #4a5568;
+}
+
+:root[data-bs-theme="light"] {
+  --wb-bg:           #f0f2f5;
+  --wb-card-bg:      #ffffff;
+  --wb-card-border:  #dee2e6;
+  --wb-card-shadow:  0 2px 8px rgba(0,0,0,0.08);
+  --wb-section-hdr:  #6c757d;
+  --wb-expand-bg:    #f8f9fa;
+  --wb-bucket-hl:    rgba(0,0,0,0.04);
+  --wb-footer-bg:    #ffffff;
+  --wb-footer-bdr:   #dee2e6;
+  --wb-navbar-bg:    #ffffff;
+  --wb-text-dim:     #6c757d;
+  --wb-border-trade: #198754;
+  --wb-border-watch: #ffc107;
+  --wb-border-skip:  #dc3545;
+  --wb-border-hard:  #adb5bd;
+  --wb-border-pending: #adb5bd;
+}
+
+/* ── Base ───────────────────────────────────────────────────── */
+body {
+  background-color: var(--wb-bg);
+  font-size: 0.875rem;
+}
+
+/* ── Navbar ─────────────────────────────────────────────────── */
+.wb-navbar {
+  background-color: var(--wb-navbar-bg) !important;
+  border-bottom: 1px solid var(--wb-card-border);
+  z-index: 1030;
+}
+
+/* ── Stat cards ─────────────────────────────────────────────── */
+.wb-stat-card {
+  background-color: var(--wb-card-bg);
+  border: 1px solid var(--wb-card-border) !important;
+  box-shadow: var(--wb-card-shadow);
+  border-radius: 8px;
+}
+.wb-stat-label {
+  font-size: 0.7rem;
+  color: var(--wb-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.wb-stat-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+/* ── Section headers ────────────────────────────────────────── */
+.wb-section-header {
+  color: var(--wb-section-hdr);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--wb-card-border);
+  margin-bottom: 0.5rem;
+}
+
+/* ── Signal cards ───────────────────────────────────────────── */
+.wb-signal-card {
+  background-color: var(--wb-card-bg);
+  border: 1px solid var(--wb-card-border) !important;
+  border-left-width: 5px !important;
+  box-shadow: var(--wb-card-shadow);
+  border-radius: 8px;
+  transition: border-left-color 0.3s ease;
+}
+
+.wb-border-trade     { border-left-color: var(--wb-border-trade) !important; }
+.wb-border-watch     { border-left-color: var(--wb-border-watch) !important; }
+.wb-border-skip      { border-left-color: var(--wb-border-skip)  !important; }
+.wb-border-hard_skip { border-left-color: var(--wb-border-hard)  !important; }
+.wb-border-constrained { border-left-color: var(--wb-border-watch) !important; }
+.wb-border-pending   { border-left-color: var(--wb-border-pending) !important; }
+
+/* ── Decision badges ────────────────────────────────────────── */
+.wb-badge-trade      { background-color: var(--wb-border-trade) !important; color: #fff; }
+.wb-badge-watch      { background-color: var(--wb-border-watch) !important; color: #000; }
+.wb-badge-skip       { background-color: var(--wb-border-skip)  !important; color: #fff; }
+.wb-badge-hard_skip  { background-color: var(--wb-border-hard)  !important; color: #fff; }
+.wb-badge-constrained{ background-color: #6f42c1 !important; color: #fff; }
+.wb-badge-pending    { background-color: var(--wb-border-pending) !important; color: #fff; }
+.wb-badge-info       { background-color: #0dcaf0 !important; color: #000; }
+.wb-badge-warning    { background-color: #ffc107 !important; color: #000; }
+.wb-badge-error      { background-color: #dc3545 !important; color: #fff; }
+.wb-badge-critical   { background-color: #dc3545 !important; color: #fff; }
+
+/* ── Bucket highlight row ───────────────────────────────────── */
+.wb-bucket-highlight {
+  background-color: var(--wb-bucket-hl);
+}
+
+/* ── Expand buttons ─────────────────────────────────────────── */
+.wb-btn-expand {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-color: var(--wb-card-border);
+  color: var(--wb-text-dim);
+}
+.wb-btn-expand:hover {
+  background-color: var(--wb-bucket-hl);
+  color: inherit;
+}
+
+/* ── Expandable sections ────────────────────────────────────── */
+.wb-expand-section {
+  background-color: var(--wb-expand-bg);
+  border: 1px solid var(--wb-card-border);
+}
+.wb-reasoning-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--wb-text-dim);
+  margin-bottom: 4px;
+}
+.wb-reasoning-text {
+  font-size: 0.825rem;
+  line-height: 1.5;
+}
+.wb-reasoning-decision {
+  font-size: 0.85rem;
+  font-style: italic;
+  border-top: 1px solid var(--wb-card-border);
+  padding-top: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* ── Bucket table ───────────────────────────────────────────── */
+.wb-bucket-table {
+  font-size: 0.8rem;
+}
+.wb-bucket-table th {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--wb-text-dim);
+  border-bottom: 1px solid var(--wb-card-border);
+}
+.wb-bucket-top-row {
+  background-color: rgba(40, 167, 69, 0.08);
+}
+[data-bs-theme="light"] .wb-bucket-top-row {
+  background-color: rgba(25, 135, 84, 0.06);
+}
+
+/* Edge bar */
+.wb-edge-bar-wrap {
+  background-color: var(--wb-card-border);
+  border-radius: 3px;
+  height: 6px;
+  overflow: hidden;
+}
+.wb-edge-bar {
+  height: 100%;
+  border-radius: 3px;
+  min-width: 4px;
+  transition: width 0.4s ease;
+}
+.wb-edge-pos { background: linear-gradient(to right, #28a745, #5fcf80); }
+.wb-edge-neg { background: linear-gradient(to right, #dc3545, #e87d88); }
+
+/* ── Open position carousel ─────────────────────────────────── */
+.wb-carousel {
+  position: relative;
+}
+.wb-position-card {
+  background-color: var(--wb-card-bg);
+  border: 1px solid var(--wb-card-border) !important;
+  box-shadow: var(--wb-card-shadow);
+  border-radius: 10px;
+  max-width: 480px;
+}
+.wb-pnl-row {
+  background-color: var(--wb-bucket-hl);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+.wb-carousel-ctrl {
+  width: 32px;
+  background-color: var(--wb-card-bg);
+  border-radius: 50%;
+  opacity: 0.7;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.wb-carousel-dots button {
+  background-color: var(--wb-text-dim);
+  border-radius: 50%;
+  width: 8px;
+  height: 8px;
+}
+.wb-carousel-dots button.active {
+  background-color: var(--bs-primary);
+}
+.wb-empty-state {
+  background-color: var(--wb-card-bg);
+  border: 1px solid var(--wb-card-border) !important;
+  border-radius: 8px;
+  color: var(--wb-text-dim);
+}
+
+/* ── Trade history table ────────────────────────────────────── */
+.wb-history-table {
+  font-size: 0.8rem;
+}
+.wb-history-table th {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--wb-text-dim);
+}
+
+/* ── Alerts ─────────────────────────────────────────────────── */
+.wb-alert-row {
+  border-color: var(--wb-card-border) !important;
+  font-size: 0.82rem;
+}
+.wb-alert-level {
+  flex-shrink: 0;
+}
+
+/* ── Footer ─────────────────────────────────────────────────── */
+.wb-footer {
+  background-color: var(--wb-footer-bg);
+  border-top: 1px solid var(--wb-footer-bdr);
+  font-size: 0.75rem;
+  margin-top: 1rem;
+}
+
+/* ── Card base override ─────────────────────────────────────── */
+.card {
+  background-color: var(--wb-card-bg);
+  border-color: var(--wb-card-border);
+}
+
+/* ── Responsive tweaks ──────────────────────────────────────── */
+@media (max-width: 576px) {
+  .wb-navbar .navbar-brand { font-size: 0.9rem; }
+  .wb-stat-value { font-size: 0.95rem; }
+  .wb-position-card { max-width: 100%; }
+  .wb-signal-card .card-body { padding: 0.75rem; }
+}
