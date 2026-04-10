@@ -86,6 +86,7 @@ BIAS_PARQUET     = os.path.join(DATA_DIR, "bias_table.parquet")
 NOAA_CDO_TOKEN = os.getenv("NOAA_CDO_TOKEN", "")
 KALSHI_API_KEY = os.getenv("KALSHI_API_KEY", "")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")  # path to service account JSON
 
 # ---------------------------------------------------------------------------
 # NCEP/NCAR Reanalysis OPeNDAP
@@ -205,6 +206,10 @@ MAX_STATION_POSITIONS       = 2      # max simultaneous positions per station
 # Significant reposition (2-step and 3+ step bucket shifts — close old, open new)
 SIGNIFICANT_REPOSITION_EDGE_MIN = 0.22   # 2-step shift: higher bar than adjacent expansion
 MAJOR_REPOSITION_EDGE_MIN       = 0.25   # 3+ step shift: highest bar, large forecast revision
+
+# Liquidity guards — applied before every order
+MIN_MARKET_VOLUME  = 50    # minimum contracts traded in this market before we enter
+MAX_BID_ASK_SPREAD = 0.20  # max acceptable bid-ask spread (20¢); wider = illiquid, skip
 
 # Signal freshness — re-run calculation if last signal is older than this
 STALE_SIGNAL_HOURS = 4

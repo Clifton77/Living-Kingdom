@@ -20,6 +20,8 @@ Kill switch halts all tiers immediately. Bot can resume from dashboard.
 
 from __future__ import annotations
 
+import signal
+import sys
 import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -32,6 +34,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from utils.logging_config import setup_logging
 from utils.asos_live import running_max_with_confluence
+from utils.sheets import get_sheets_logger
 from utils.alerting import (
     alert_order_failure,
     alert_reconciliation_mismatch,
@@ -53,6 +56,8 @@ from config import (
     EXPANSION_CURRENT_EDGE_MAX,
     SIGNIFICANT_REPOSITION_EDGE_MIN,
     MAJOR_REPOSITION_EDGE_MIN,
+    MIN_MARKET_VOLUME,
+    MAX_BID_ASK_SPREAD,
     TIER1_INTERVAL_SECONDS,
     TIER2_INTERVAL_SECONDS,
     STALE_SIGNAL_HOURS,
@@ -288,6 +293,10 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     result = kalshi.close_position(market_id, pos.contracts, bid_price)
     if result.success:
         realized = rm.close_position(market_id, bid_price, reason)
+        get_sheets_logger().log_trade_closed(market_id, bid_price, realized, reason)
+        get_sheets_logger().update_dashboard(
+            rm.summary(), mode="DEMO" if USE_DEMO else "LIVE"
+        )
         logger.info("[Tier2] Exit complete: %s | realized P/L $%+.4f", market_id, realized)
     else:
         logger.error("[Tier2] Exit order failed for %s: %s", market_id, result.error)
@@ -297,10 +306,21 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
 # Tier 3 — Full signal pass + order execution (every 6 hours)
 # ---------------------------------------------------------------------------
 
-def tier3_full_signal_pass():
+def _tier3_day1_market_open():
+    """
+    Wrapper for the 14:05 UTC Day-1 market-open trigger.
+    Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC).
+    event_date must be tomorrow — computed at job runtime, not at scheduler init.
+    """
+    tier3_full_signal_pass(event_date=date.today() + timedelta(days=1))
+
+
+def tier3_full_signal_pass(event_date: date | None = None):
     """
     Full signal generation for all stations.
     Places orders for TRADE decisions that pass risk checks.
+
+    event_date defaults to today. The Day-1 market-open trigger passes tomorrow.
 
     Before running:
       1. Probe forecast availability (NWS/Open-Meteo). If unavailable,
@@ -319,7 +339,8 @@ def tier3_full_signal_pass():
             alert_daily_loss_limit(rm.state.daily_pnl, limit)
         return
 
-    event_date = date.today()
+    if event_date is None:
+        event_date = date.today()
 
     # ── Forecast availability probe ───────────────────────────────────────
     avail = check_forecast_availability(event_date)
@@ -365,10 +386,36 @@ def tier3_full_signal_pass():
             logger.info("[Tier3] Already in %s — skipping", market_id)
             continue
 
-        # ── Market open guard ─────────────────────────────────────────────
+        # ── Market open + liquidity guards ────────────────────────────────
         snap_check = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
         if snap_check is None or not snap_check.is_open:
             logger.info("[Tier3] Market not open for %s bucket %d — skipping", station, sig.top_bucket)
+            continue
+
+        spread = snap_check.yes_ask - snap_check.yes_bid
+        if spread > MAX_BID_ASK_SPREAD:
+            skip_reason = (
+                f"Bid-ask spread too wide: {spread:.2f} > {MAX_BID_ASK_SPREAD:.2f} — "
+                f"illiquid market (bid={snap_check.yes_bid:.2f}, ask={snap_check.yes_ask:.2f}). "
+                f"Entry skipped to protect against unfavorable exit pricing."
+            )
+            logger.info("[Tier3] %s bucket %d: %s", station, sig.top_bucket, skip_reason)
+            sig.decision = "SKIP"
+            get_sheets_logger().log_skipped_signal(sig, skip_reason)
+            with _latest_signals_lock:
+                _latest_signals[station] = sig
+            continue
+
+        if snap_check.volume < MIN_MARKET_VOLUME:
+            skip_reason = (
+                f"Insufficient volume: {snap_check.volume} < {MIN_MARKET_VOLUME} contracts — "
+                f"market too thin. Entry skipped to avoid moving the book."
+            )
+            logger.info("[Tier3] %s bucket %d: %s", station, sig.top_bucket, skip_reason)
+            sig.decision = "SKIP"
+            get_sheets_logger().log_skipped_signal(sig, skip_reason)
+            with _latest_signals_lock:
+                _latest_signals[station] = sig
             continue
 
         # ── Existing position routing — expansion or reposition ───────────
@@ -449,6 +496,7 @@ def tier3_full_signal_pass():
                 )
             else:
                 logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
+            get_sheets_logger().log_skipped_signal(sig, reason)
             with _latest_signals_lock:
                 _latest_signals[station] = sig
             continue
@@ -479,9 +527,19 @@ def tier3_full_signal_pass():
                 entry_price=max_price,
                 event_date=event_date,
             )
+            get_sheets_logger().log_trade_opened(
+                station=station,
+                event_date=event_date,
+                market_id=market_id,
+                bucket_lower=sig.top_bucket,
+                entry_price=max_price,
+                contracts=sig.kelly_contracts,
+                stake_usd=sig.kelly_stake_usd,
+                sig=sig,
+            )
             logger.info(
-                "[Tier3] Order filled: %s | %d contracts @ $%.2f (max $%.2f) | stake $%.2f",
-                market_id, sig.kelly_contracts, max_price, max_price, sig.kelly_stake_usd,
+                "[Tier3] Order filled: %s | %d contracts @ $%.2f | stake $%.2f",
+                market_id, sig.kelly_contracts, max_price, sig.kelly_stake_usd,
             )
         else:
             logger.error("[Tier3] Order failed for %s: %s", market_id, result.error)
@@ -489,7 +547,14 @@ def tier3_full_signal_pass():
             # TODO (kalshi_client): add fill-retry with fresh edge check
             # retry up to ORDER_FILL_RETRY_MAX times with ORDER_FILL_RETRY_WAIT_SEC gap
 
+    # Log all WATCH/SKIP decisions that made it through the loop without trading
+    sheets = get_sheets_logger()
+    for sig in signals.values():
+        if sig.decision in ("WATCH", "SKIP", "HARD_SKIP"):
+            sheets.log_skipped_signal(sig, sig.decision)
+
     summary = rm.summary()
+    sheets.update_dashboard(summary, mode="DEMO" if USE_DEMO else "LIVE")
     logger.info(
         "[Tier3] Cycle complete | bankroll=$%.2f | open=%d | daily P/L=$%+.2f",
         summary["bankroll"], summary["open_positions"], summary["daily_pnl"],
@@ -692,6 +757,7 @@ def _execute_reposition(
         f"({old_bucket}°F → {new_bucket}°F). Closing old position to open new."
     )
     realized = rm.close_position(existing_pos.market_id, old_snap.yes_bid, close_reason)
+    get_sheets_logger().log_trade_closed(existing_pos.market_id, old_snap.yes_bid, realized, close_reason)
     logger.info(
         "[Tier3] Old position closed | %s | realized P/L $%+.4f",
         existing_pos.market_id, realized,
@@ -834,15 +900,35 @@ def tier_settlement_sweep():
         logger.info("[Settlement] No settlements returned from Kalshi yet — will retry next cycle")
         return
 
+    sheets = get_sheets_logger()
     for market_id, pos in positions_to_check.items():
         if market_id in settlements:
             settlement_value = settlements[market_id]
-            realized = rm.close_position(
-                market_id,
-                exit_price=settlement_value,
-                reason=f"Settlement sweep — LCD verified at ${settlement_value:.2f}",
-            )
+            close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
+            realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
+            sheets.log_trade_closed(market_id, settlement_value, realized, close_reason)
             alert_settlement_detected(pos.station, market_id, realized)
+
+            # Log model accuracy row — observed high comes from settlement bucket inference
+            # 1.0 = won (bucket correct), 0.0 = lost. Full observed temp requires IEM fetch.
+            bucket_hit = settlement_value >= 0.95   # settlement ≈ 1.0 means we won
+            with _latest_signals_lock:
+                prior_sig = _latest_signals.get(pos.station)
+            if prior_sig:
+                sheets.log_model_accuracy(
+                    station=pos.station,
+                    event_date=yesterday,
+                    cluster_id=prior_sig.cluster_id,
+                    season=prior_sig.season,
+                    forecast_raw=prior_sig.forecast_raw,
+                    forecast_adjusted=prior_sig.forecast_adjusted,
+                    bias_mean=prior_sig.bias_mean,
+                    bias_std=prior_sig.bias_std,
+                    n_obs=prior_sig.n_obs,
+                    observed_high=None,   # IEM fetch not yet implemented — shows blank
+                    bucket_hit=bucket_hit,
+                )
+
             logger.info(
                 "[Settlement] %s settled | value=%.2f | P/L $%+.4f",
                 market_id, settlement_value, realized,
@@ -851,6 +937,9 @@ def tier_settlement_sweep():
             logger.info("[Settlement] %s not yet in settlements feed — leaving open", market_id)
 
     summary = rm.summary()
+    mode = "DEMO" if USE_DEMO else "LIVE"
+    sheets.update_dashboard(summary, mode=mode)
+    sheets.log_eod_summary(summary, session_date=yesterday.isoformat(), mode=mode)
     logger.info(
         "[Settlement] Sweep complete | bankroll=$%.2f | daily P/L=$%+.2f | open=%d",
         summary["bankroll"], summary["daily_pnl"], summary["open_positions"],
@@ -897,6 +986,47 @@ def _schedule_tier3_retry(delay_min: int, event_date: date):
 # Startup reconciliation — syncs local state with live Kalshi on launch
 # ---------------------------------------------------------------------------
 
+def _graceful_shutdown(signum, frame):
+    """
+    Handle SIGINT (Ctrl+C) and SIGTERM (system shutdown / VPS stop).
+    Logs all open positions clearly, saves state, and exits cleanly.
+    The bot never mid-exit — positions remain open on Kalshi and are
+    reconciled on the next startup.
+    """
+    sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    logger.warning("Shutdown signal received (%s) — stopping bot", sig_name)
+
+    rm = get_risk_manager()
+    open_positions = rm.state.positions
+
+    if open_positions:
+        lines = [
+            f"\n{'='*60}",
+            f"  BOT SHUTTING DOWN WITH {len(open_positions)} OPEN POSITION(S)",
+            f"{'='*60}",
+        ]
+        for mid, pos in open_positions.items():
+            lines.append(
+                f"  {pos.station:6s} | {mid} | "
+                f"{pos.contracts} contracts | entry ${pos.entry_price:.2f} | "
+                f"P/L ${pos.unrealized_pnl:+.4f}"
+            )
+        lines += [
+            f"{'='*60}",
+            "  These positions remain open on Kalshi.",
+            "  Close manually at kalshi.com or restart bot to resume monitoring.",
+            f"{'='*60}\n",
+        ]
+        msg = "\n".join(lines)
+        print(msg)
+        logger.warning(msg)
+    else:
+        logger.info("No open positions at shutdown — clean exit")
+
+    stop_scheduler()
+    sys.exit(0)
+
+
 def _run_startup_reconciliation():
     """
     Run in a background thread on scheduler start.
@@ -938,6 +1068,10 @@ def start_scheduler() -> BackgroundScheduler:
     _risk_manager = RiskManager()
     _kalshi       = KalshiClient(demo=USE_DEMO)
 
+    # Register shutdown handlers — fire on Ctrl+C or system SIGTERM (VPS stop/reboot)
+    signal.signal(signal.SIGINT,  _graceful_shutdown)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+
     scheduler = BackgroundScheduler(timezone="UTC")
 
     # Tier 1 — every 5 minutes
@@ -977,8 +1111,9 @@ def start_scheduler() -> BackgroundScheduler:
     # Tier 3 — Kalshi Day-1 market open: fires at 14:05 UTC every day
     # Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC).
     # We wait 5 minutes to let the book settle before scanning.
+    # Uses _tier3_day1_market_open() wrapper so event_date = tomorrow at runtime.
     scheduler.add_job(
-        tier3_full_signal_pass,
+        _tier3_day1_market_open,
         trigger=CronTrigger(
             hour=MARKET_OPEN_UTC_HOUR,
             minute=MARKET_OPEN_UTC_MINUTE,
