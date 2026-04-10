@@ -58,6 +58,8 @@ from config import (
     MAJOR_REPOSITION_EDGE_MIN,
     MIN_MARKET_VOLUME,
     MAX_BID_ASK_SPREAD,
+    LIQUIDITY_RETRY_INTERVAL_MIN,
+    LIQUIDITY_MAX_RETRIES,
     TIER1_INTERVAL_SECONDS,
     TIER2_INTERVAL_SECONDS,
     STALE_SIGNAL_HOURS,
@@ -83,6 +85,9 @@ _scheduler:    Optional[BackgroundScheduler] = None
 
 # Tracks how many Tier 3 retries have fired when NWS data was unavailable
 _tier3_retry_counts: dict[str, int] = {}   # key = event_date ISO string
+
+# Tracks liquidity retry attempts per market — reset when entry succeeds or gives up
+_liquidity_retry_counts: dict[str, int] = {}   # key = market_id
 
 
 # ---------------------------------------------------------------------------
@@ -393,29 +398,31 @@ def tier3_full_signal_pass(event_date: date | None = None):
             continue
 
         spread = snap_check.yes_ask - snap_check.yes_bid
-        if spread > MAX_BID_ASK_SPREAD:
-            skip_reason = (
-                f"Bid-ask spread too wide: {spread:.2f} > {MAX_BID_ASK_SPREAD:.2f} — "
-                f"illiquid market (bid={snap_check.yes_bid:.2f}, ask={snap_check.yes_ask:.2f}). "
-                f"Entry skipped to protect against unfavorable exit pricing."
-            )
-            logger.info("[Tier3] %s bucket %d: %s", station, sig.top_bucket, skip_reason)
-            sig.decision = "SKIP"
-            get_sheets_logger().log_skipped_signal(sig, skip_reason)
-            with _latest_signals_lock:
-                _latest_signals[station] = sig
-            continue
+        spread_ok = spread <= MAX_BID_ASK_SPREAD
+        volume_ok = snap_check.volume >= MIN_MARKET_VOLUME
 
-        if snap_check.volume < MIN_MARKET_VOLUME:
-            skip_reason = (
-                f"Insufficient volume: {snap_check.volume} < {MIN_MARKET_VOLUME} contracts — "
-                f"market too thin. Entry skipped to avoid moving the book."
+        if not (spread_ok and volume_ok):
+            # Market is young or illiquid right now — don't abandon the signal.
+            # Schedule a retry: recheck liquidity in LIQUIDITY_RETRY_INTERVAL_MIN minutes.
+            # The signal stays valid; we're just waiting for the book to fill in.
+            issues = []
+            if not spread_ok:
+                issues.append(
+                    f"spread {spread:.2f} > {MAX_BID_ASK_SPREAD:.2f} "
+                    f"(bid={snap_check.yes_bid:.2f} ask={snap_check.yes_ask:.2f})"
+                )
+            if not volume_ok:
+                issues.append(f"volume {snap_check.volume} < {MIN_MARKET_VOLUME}")
+            logger.info(
+                "[Tier3] %s bucket %d illiquid (%s) — scheduling liquidity retry in %d min",
+                station, sig.top_bucket, ", ".join(issues), LIQUIDITY_RETRY_INTERVAL_MIN,
             )
-            logger.info("[Tier3] %s bucket %d: %s", station, sig.top_bucket, skip_reason)
-            sig.decision = "SKIP"
-            get_sheets_logger().log_skipped_signal(sig, skip_reason)
-            with _latest_signals_lock:
-                _latest_signals[station] = sig
+            _schedule_liquidity_retry(
+                station=station,
+                event_date_iso=event_date.isoformat(),
+                bucket_lower=sig.top_bucket,
+                delay_min=LIQUIDITY_RETRY_INTERVAL_MIN,
+            )
             continue
 
         # ── Existing position routing — expansion or reposition ───────────
@@ -863,6 +870,187 @@ def _execute_expansion(
             _latest_signals[station] = sig
     else:
         logger.error("[Tier3] Expansion order failed for %s: %s", market_id, result.error)
+
+
+# ---------------------------------------------------------------------------
+# Liquidity retry — re-checks spread/volume for a signal that was ready but
+# the market book hadn't filled in yet at entry time
+# ---------------------------------------------------------------------------
+
+def _schedule_liquidity_retry(
+    station: str,
+    event_date_iso: str,
+    bucket_lower: int,
+    delay_min: int,
+):
+    """
+    Schedule a one-shot DateTrigger job to re-attempt entry once the market
+    has had time to attract liquidity. Increments the per-market retry counter.
+    """
+    global _scheduler
+    if _scheduler is None:
+        logger.error("[LiqRetry] Scheduler not initialized — cannot schedule retry")
+        return
+
+    event_date = date.fromisoformat(event_date_iso)
+    market_id  = build_market_id(station, event_date, bucket_lower)
+    attempt    = _liquidity_retry_counts.get(market_id, 0) + 1
+    _liquidity_retry_counts[market_id] = attempt
+
+    run_at = datetime.now(timezone.utc) + timedelta(minutes=delay_min)
+    job_id = f"liq_retry_{market_id}_{attempt}"
+
+    _scheduler.add_job(
+        _attempt_liquidity_entry,
+        trigger=DateTrigger(run_date=run_at, timezone="UTC"),
+        args=[station, event_date_iso, bucket_lower],
+        id=job_id,
+        name=f"Liquidity Retry {attempt}/{LIQUIDITY_MAX_RETRIES} — {market_id}",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    logger.info(
+        "[LiqRetry] Retry %d/%d scheduled for %s at %s UTC",
+        attempt, LIQUIDITY_MAX_RETRIES, market_id,
+        run_at.strftime("%H:%M"),
+    )
+
+
+def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: int):
+    """
+    Liquidity retry job — called by the DateTrigger scheduled above.
+
+    Flow:
+      1. Already in this position? Done.
+      2. Re-run signal to confirm still TRADE for this bucket (freshness check).
+      3. Re-check spread and volume.
+         - Still illiquid + retries remaining → schedule another retry.
+         - Still illiquid + retries exhausted → final skip, log to Sheets.
+         - Liquid → place order with full entry logic.
+    """
+    rm         = get_risk_manager()
+    kalshi     = get_kalshi()
+    event_date = date.fromisoformat(event_date_iso)
+    market_id  = build_market_id(station, event_date, bucket_lower)
+    attempt    = _liquidity_retry_counts.get(market_id, 1)
+
+    logger.info(
+        "[LiqRetry] Attempt %d/%d — %s", attempt, LIQUIDITY_MAX_RETRIES, market_id
+    )
+
+    # Already entered? (e.g. manual entry or another trigger beat us to it)
+    if market_id in rm.state.positions:
+        logger.info("[LiqRetry] Already in %s — cancelling retries", market_id)
+        _liquidity_retry_counts.pop(market_id, None)
+        return
+
+    # Re-run signal — confirms edge is still valid and data is fresh
+    _single_station_signal_pass(station)
+    with _latest_signals_lock:
+        sig = _latest_signals.get(station)
+
+    if sig is None or sig.decision != "TRADE" or sig.top_bucket != bucket_lower:
+        decision = sig.decision if sig else "None"
+        logger.info(
+            "[LiqRetry] %s signal no longer TRADE for bucket %d (now: %s) — final skip",
+            station, bucket_lower, decision,
+        )
+        if sig:
+            get_sheets_logger().log_skipped_signal(
+                sig, f"Liquidity retry {attempt}: signal shifted away from bucket {bucket_lower}"
+            )
+        _liquidity_retry_counts.pop(market_id, None)
+        return
+
+    # Re-check market
+    snap = kalshi.get_market_snapshot(station, event_date, bucket_lower)
+    if snap is None or not snap.is_open:
+        logger.info("[LiqRetry] %s market closed — final skip", market_id)
+        _liquidity_retry_counts.pop(market_id, None)
+        return
+
+    spread    = snap.yes_ask - snap.yes_bid
+    spread_ok = spread <= MAX_BID_ASK_SPREAD
+    volume_ok = snap.volume >= MIN_MARKET_VOLUME
+
+    if not (spread_ok and volume_ok):
+        if attempt < LIQUIDITY_MAX_RETRIES:
+            issues = []
+            if not spread_ok:
+                issues.append(f"spread={spread:.2f}")
+            if not volume_ok:
+                issues.append(f"vol={snap.volume}")
+            logger.info(
+                "[LiqRetry] %s still illiquid (%s) — retry %d/%d in %d min",
+                market_id, ", ".join(issues),
+                attempt + 1, LIQUIDITY_MAX_RETRIES, LIQUIDITY_RETRY_INTERVAL_MIN,
+            )
+            _schedule_liquidity_retry(station, event_date_iso, bucket_lower, LIQUIDITY_RETRY_INTERVAL_MIN)
+        else:
+            final_reason = (
+                f"Liquidity retry exhausted after {LIQUIDITY_MAX_RETRIES} attempts "
+                f"({LIQUIDITY_MAX_RETRIES * LIQUIDITY_RETRY_INTERVAL_MIN} min window): "
+                f"spread={spread:.2f}, volume={snap.volume}"
+            )
+            logger.info("[LiqRetry] %s — %s", market_id, final_reason)
+            sig.decision = "SKIP"
+            get_sheets_logger().log_skipped_signal(sig, final_reason)
+            _liquidity_retry_counts.pop(market_id, None)
+        return
+
+    # ── Liquidity cleared — enter now ────────────────────────────────────
+    _liquidity_retry_counts.pop(market_id, None)
+    logger.info(
+        "[LiqRetry] %s liquidity cleared (spread=%.2f vol=%d) — entering",
+        market_id, spread, snap.volume,
+    )
+
+    ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    if not ok:
+        logger.warning("[LiqRetry] Risk check failed for %s: %s", station, reason)
+        get_sheets_logger().log_skipped_signal(sig, f"Liquidity retry entry blocked: {reason}")
+        return
+
+    effective_threshold = (
+        sig.threshold_result.effective_threshold if sig.threshold_result else 0.12
+    )
+    max_price = round(sig.top_model_prob - effective_threshold, 4)
+    max_price = max(max_price, snap.yes_ask)
+
+    result = kalshi.place_order_with_fill_check(
+        market_id=market_id,
+        contracts=sig.kelly_contracts,
+        limit_price=max_price,
+        side="yes",
+    )
+
+    if result.success:
+        rm.open_position(
+            station=station,
+            market_id=market_id,
+            bucket_lower=bucket_lower,
+            contracts=sig.kelly_contracts,
+            entry_price=max_price,
+            event_date=event_date,
+        )
+        get_sheets_logger().log_trade_opened(
+            station=station,
+            event_date=event_date,
+            market_id=market_id,
+            bucket_lower=bucket_lower,
+            entry_price=max_price,
+            contracts=sig.kelly_contracts,
+            stake_usd=sig.kelly_stake_usd,
+            sig=sig,
+        )
+        logger.info(
+            "[LiqRetry] Entry complete: %s | %d contracts @ $%.2f",
+            market_id, sig.kelly_contracts, max_price,
+        )
+    else:
+        logger.error("[LiqRetry] Order failed: %s — %s", market_id, result.error)
+        alert_order_failure(station, market_id, result.error or "unknown")
 
 
 # ---------------------------------------------------------------------------

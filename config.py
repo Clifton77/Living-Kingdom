@@ -209,7 +209,11 @@ MAJOR_REPOSITION_EDGE_MIN       = 0.25   # 3+ step shift: highest bar, large for
 
 # Liquidity guards — applied before every order
 MIN_MARKET_VOLUME  = 50    # minimum contracts traded in this market before we enter
-MAX_BID_ASK_SPREAD = 0.20  # max acceptable bid-ask spread (20¢); wider = illiquid, skip
+MAX_BID_ASK_SPREAD = 0.20  # max acceptable bid-ask spread (20¢); wider = illiquid, retry
+
+# Liquidity retry — when spread/volume gates fail, retry before giving up
+LIQUIDITY_RETRY_INTERVAL_MIN = 15   # minutes between liquidity retries
+LIQUIDITY_MAX_RETRIES        = 4    # give up after 4 attempts (~1 hour total window)
 
 # Signal freshness — re-run calculation if last signal is older than this
 STALE_SIGNAL_HOURS = 4
