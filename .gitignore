@@ -11,3 +11,6 @@ token.json
 dist/
 build/
 .DS_Store
+static/vendor/node_modules/
+static/vendor/package-lock.json
+static/vendor/package.json
