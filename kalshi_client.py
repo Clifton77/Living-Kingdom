@@ -23,14 +23,19 @@ Authentication: Bearer token (API key from .env → KALSHI_API_KEY)
 from __future__ import annotations
 
 import time
+import base64
 import logging
 from datetime import date, datetime
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 from config import (
     KALSHI_API_KEY,
+    KALSHI_PRIVATE_KEY_PATH,
     KALSHI_DEMO_URL,
     KALSHI_LIVE_URL,
     USE_DEMO,
@@ -149,19 +154,55 @@ class KalshiClient:
     """
 
     def __init__(self, api_key: str = KALSHI_API_KEY, demo: bool = USE_DEMO):
-        self.base_url = KALSHI_DEMO_URL if demo else KALSHI_LIVE_URL
-        self.api_key  = api_key
-        self.demo     = demo
-        self.session  = requests.Session()
+        self.base_url   = KALSHI_DEMO_URL if demo else KALSHI_LIVE_URL
+        self.api_key    = api_key
+        self.demo       = demo
+        # Extract the path prefix from base_url (e.g. "/trade-api/v2")
+        parsed          = urlparse(self.base_url)
+        self._path_base = parsed.path.rstrip("/")   # "/trade-api/v2"
+
+        # Load RSA private key for request signing
+        self._private_key = None
+        if KALSHI_PRIVATE_KEY_PATH:
+            try:
+                with open(KALSHI_PRIVATE_KEY_PATH, "rb") as f:
+                    self._private_key = serialization.load_pem_private_key(f.read(), password=None)
+                logger.info("RSA private key loaded from %s", KALSHI_PRIVATE_KEY_PATH)
+            except Exception as exc:
+                logger.error("Failed to load RSA private key: %s", exc)
+
+        self.session = requests.Session()
         self.session.headers.update({
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
+            "Content-Type": "application/json",
+            "Accept":       "application/json",
         })
         logger.info(
-            "KalshiClient initialized | mode=%s | base=%s",
+            "KalshiClient initialized | mode=%s | base=%s | rsa=%s",
             "DEMO" if demo else "LIVE", self.base_url,
+            "yes" if self._private_key else "no",
         )
+
+    def _signed_headers(self, method: str, path: str) -> dict:
+        """
+        Build Kalshi RSA-signed request headers.
+        Kalshi signs: timestamp_ms + METHOD + /trade-api/v2/path (no query string).
+        """
+        timestamp_ms = str(int(time.time() * 1000))
+        full_path    = self._path_base + path          # e.g. /trade-api/v2/markets
+        msg          = (timestamp_ms + method.upper() + full_path).encode()
+
+        headers = {
+            "KALSHI-ACCESS-KEY":       self.api_key,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+        }
+
+        if self._private_key:
+            sig = self._private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+            headers["KALSHI-ACCESS-SIGNATURE"] = base64.b64encode(sig).decode()
+        else:
+            logger.warning("No RSA key — request will likely fail auth")
+
+        return headers
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
@@ -169,7 +210,8 @@ class KalshiClient:
         url = f"{self.base_url}{path}"
         for attempt in range(3):
             try:
-                resp = self.session.get(url, params=params, timeout=10)
+                headers = {**self.session.headers, **self._signed_headers("GET", path)}
+                resp    = requests.get(url, headers=headers, params=params, timeout=10)
                 if resp.status_code == 429:
                     wait = 2 ** attempt
                     logger.warning("Rate limited — waiting %ds", wait)
@@ -186,7 +228,10 @@ class KalshiClient:
         url = f"{self.base_url}{path}"
         for attempt in range(3):
             try:
-                resp = self.session.post(url, json=body, timeout=10)
+                import json as _json
+                body_bytes = _json.dumps(body).encode()
+                headers    = {**self.session.headers, **self._signed_headers("POST", path)}
+                resp       = requests.post(url, headers=headers, data=body_bytes, timeout=10)
                 if resp.status_code == 429:
                     wait = 2 ** attempt
                     logger.warning("Rate limited — waiting %ds", wait)

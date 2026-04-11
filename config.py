@@ -84,7 +84,8 @@ BIAS_PARQUET     = os.path.join(DATA_DIR, "bias_table.parquet")
 # External API credentials (loaded from .env)
 # ---------------------------------------------------------------------------
 NOAA_CDO_TOKEN = os.getenv("NOAA_CDO_TOKEN", "")
-KALSHI_API_KEY = os.getenv("KALSHI_API_KEY", "")
+KALSHI_API_KEY         = os.getenv("KALSHI_API_KEY", "")          # key ID (UUID)
+KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")  # path to RSA .pem file
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")  # path to service account JSON
 
