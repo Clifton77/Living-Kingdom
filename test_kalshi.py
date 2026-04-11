@@ -1,59 +1,89 @@
 """
-Quick Kalshi API probe — run this locally to verify auth and bucket discovery.
+Kalshi API probe — run locally to verify auth and bucket discovery.
 Usage:  python test_kalshi.py
 """
-import json
+import json, requests
 from datetime import date, timedelta
-from kalshi_client import KalshiClient, build_event_id
 
-client = KalshiClient()          # reads key from .env / config.py
+KEY  = "aecddeb6-4791-4bb1-93dd-d8aa666a560b"
+DEMO = "https://demo-api.kalshi.co/trade-api/v2"
+LIVE = "https://trading-api.kalshi.com/trade-api/v2"
 
-# ── 1. Balance check (auth test) ─────────────────────────────────────────────
-print("=== Auth / Balance ===")
-try:
-    bal = client.get_balance()
-    print(f"  Balance: ${bal:.2f}")
-except Exception as e:
-    print(f"  FAILED: {e}")
+def try_get(base, path, headers, params=None, label=""):
+    url = f"{base}{path}"
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        print(f"  [{r.status_code}] {label or path}")
+        if r.status_code == 200:
+            return r.json()
+        else:
+            print(f"         {r.text[:200]}")
+    except Exception as e:
+        print(f"  [ERR] {label or path}: {e}")
+    return None
 
-# ── 2. Raw market list for tomorrow's KJFK ───────────────────────────────────
-tomorrow = date.today() + timedelta(days=1)
-event    = build_event_id("KJFK", tomorrow)
-print(f"\n=== Raw markets for {event} ===")
-try:
-    data = client._get("/markets", params={"event_ticker": event, "limit": 50})
-    markets = data.get("markets", [])
-    print(f"  {len(markets)} markets returned")
-    if markets:
-        print("  First market raw keys:", list(markets[0].keys()))
-        print("  First market sample:")
-        print(json.dumps(markets[0], indent=4))
-except Exception as e:
-    print(f"  FAILED: {e}")
+# ── Try auth header variants ─────────────────────────────────────────────────
+print("=== Auth variants ===")
+auth_variants = {
+    "Bearer":  {"Authorization": f"Bearer {KEY}", "Accept": "application/json"},
+    "ApiKey":  {"KALSHI-ACCESS-KEY": KEY, "Accept": "application/json"},
+    "Token":   {"Authorization": f"Token {KEY}",  "Accept": "application/json"},
+}
 
-# ── 3. Parsed snapshots via get_markets_for_station_date ─────────────────────
-print(f"\n=== Parsed snapshots for KJFK {tomorrow} ===")
-try:
-    snaps = client.get_markets_for_station_date("KJFK", tomorrow)
-    if snaps:
-        for s in snaps:
-            print(
-                f"  bucket_lower={s.bucket_lower:3d}  label={s.bucket_label:<18s}"
-                f"  bid={s.yes_bid:.2f}  ask={s.yes_ask:.2f}"
-                f"  vol={s.volume:5d}  open={s.is_open}"
-            )
-    else:
-        print("  No snapshots parsed — check raw output above for clues")
-except Exception as e:
-    print(f"  FAILED: {e}")
+working_headers = None
+working_base    = None
 
-# ── 4. Try KLAX as a second station ──────────────────────────────────────────
-print(f"\n=== Parsed snapshots for KLAX {tomorrow} ===")
-try:
-    snaps = client.get_markets_for_station_date("KLAX", tomorrow)
-    for s in snaps:
-        print(f"  bucket_lower={s.bucket_lower:3d}  label={s.bucket_label:<18s}  bid={s.yes_bid:.2f}  ask={s.yes_ask:.2f}")
-    if not snaps:
-        print("  No snapshots")
-except Exception as e:
-    print(f"  FAILED: {e}")
+for label, headers in auth_variants.items():
+    for base_label, base in [("DEMO", DEMO), ("LIVE", LIVE)]:
+        data = try_get(base, "/portfolio/balance", headers, label=f"{label} / {base_label}")
+        if data is not None:
+            print(f"  ✓ Auth works: {label} on {base_label}")
+            print(f"  Balance: {json.dumps(data, indent=4)}")
+            working_headers = headers
+            working_base    = base
+            break
+    if working_headers:
+        break
+
+if not working_headers:
+    # Fall through — markets endpoint may still be public
+    print("  No auth worked — trying public market endpoints anyway")
+    working_headers = auth_variants["Bearer"]
+    working_base    = LIVE
+
+# ── Search for any KXHIGH markets (broad search) ────────────────────────────
+print("\n=== Broad KXHIGH market search ===")
+for base_label, base in [("LIVE", LIVE), ("DEMO", DEMO)]:
+    data = try_get(base, "/markets",
+                   working_headers,
+                   params={"series_ticker": "KXHIGH", "limit": 5},
+                   label=f"series search / {base_label}")
+    if data and data.get("markets"):
+        print(f"  Found {len(data['markets'])} markets on {base_label}")
+        print(json.dumps(data["markets"][0], indent=4))
+        break
+
+# ── Today and tomorrow for KJFK ─────────────────────────────────────────────
+today    = date.today()
+tomorrow = today + timedelta(days=1)
+
+for label, base in [("LIVE", LIVE), ("DEMO", DEMO)]:
+    for d in [today, tomorrow]:
+        tag   = d.strftime("%y%b%d").upper()
+        event = f"KXHIGHJFK-{tag}"
+        print(f"\n=== {event} ({label}) ===")
+        data = try_get(base, "/markets",
+                       working_headers,
+                       params={"event_ticker": event, "limit": 20},
+                       label=event)
+        if data and data.get("markets"):
+            mks = data["markets"]
+            print(f"  {len(mks)} markets found")
+            print("  First market:")
+            print(json.dumps(mks[0], indent=4))
+            print("\n  All tickers:")
+            for m in mks:
+                print(f"    {m.get('ticker','?'):40s}  "
+                      f"bid={m.get('yes_bid','?'):4}  ask={m.get('yes_ask','?'):4}  "
+                      f"vol={m.get('volume','?'):6}  status={m.get('status','?')}")
+            break   # found — skip remaining date/base combos
