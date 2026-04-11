@@ -238,7 +238,7 @@ function buildPositionCardInner(mid, pos) {
       <div>
         <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
-        <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+        <span class="ms-2 text-muted">${fmtBucket(pos.bucket_lower)}</span>
       </div>
       <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
         $${sign}${pos.unrealized_pnl.toFixed(2)}
@@ -491,6 +491,13 @@ function escHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/** Format a bucket lower bound into a human-readable range string. */
+function fmtBucket(lower) {
+  if (lower <= 68) return '\u226468\u00b0F';          // ≤68°F
+  if (lower >= 77) return '\u226577\u00b0F';          // ≥77°F
+  return `${lower}\u2013${lower + 1}\u00b0F`;         // 69–70°F
 }
 
 function nowStr() {

@@ -138,7 +138,7 @@
                   <div>
                     <span class="fw-bold fs-5">{{ pos.station }}</span>
                     <span class="badge bg-primary ms-2">HIGH</span>
-                    <span class="ms-2 text-muted">{{ pos.bucket_lower }}–{{ pos.bucket_lower + 2 }}°F</span>
+                    <span class="ms-2 text-muted">{% if pos.bucket_lower <= 68 %}≤68{% elif pos.bucket_lower >= 77 %}≥77{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
                   </div>
                   <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
                         id="pos-badge-{{ market_id|replace('-','_') }}">
@@ -273,7 +273,7 @@
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">{{ sig.top_bucket }}–{{ sig.top_bucket + 2 }}°F</span>
+              <span class="fw-semibold">{% if sig.top_bucket <= 68 %}≤68{% elif sig.top_bucket >= 77 %}≥77{% else %}{{ sig.top_bucket }}–{{ sig.top_bucket + 1 }}{% endif %}°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">{{ "%.0f"|format(sig.top_model_prob * 100) }}%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">{{ "%.0f"|format(sig.top_kalshi_prob * 100) }}%</span></span>

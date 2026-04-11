@@ -479,7 +479,7 @@ body {
                   <div>
                     <span class="fw-bold fs-5">KLAX</span>
                     <span class="badge bg-primary ms-2">HIGH</span>
-                    <span class="ms-2 text-muted">71–73°F</span>
+                    <span class="ms-2 text-muted">71–72°F</span>
                   </div>
                   <span class="badge bg-success fs-6"
                         id="pos-badge-KXHIGHLAX_26APR09_B71.5">
@@ -536,7 +536,7 @@ body {
                   <div>
                     <span class="fw-bold fs-5">KJFK</span>
                     <span class="badge bg-primary ms-2">HIGH</span>
-                    <span class="ms-2 text-muted">69–71°F</span>
+                    <span class="ms-2 text-muted">69–70°F</span>
                   </div>
                   <span class="badge bg-danger fs-6"
                         id="pos-badge-KXHIGHJFK_26APR09_B69.5">
@@ -653,7 +653,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">69–71°F</span>
+              <span class="fw-semibold">69–70°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">48%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">29%</span></span>
@@ -956,7 +956,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">71–73°F</span>
+              <span class="fw-semibold">71–72°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">52%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">28%</span></span>
@@ -1259,7 +1259,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">65–67°F</span>
+              <span class="fw-semibold">≤68°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">38%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">29%</span></span>
@@ -1448,7 +1448,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">88–90°F</span>
+              <span class="fw-semibold">≥77°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">34%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">28%</span></span>
@@ -1637,7 +1637,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">81–83°F</span>
+              <span class="fw-semibold">≥77°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">31%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">23%</span></span>
@@ -1826,7 +1826,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">77–79°F</span>
+              <span class="fw-semibold">≥77°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">29%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">22%</span></span>
@@ -2015,7 +2015,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">63–65°F</span>
+              <span class="fw-semibold">≤68°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">27%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">22%</span></span>
@@ -2204,7 +2204,7 @@ body {
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
-              <span class="fw-semibold">83–85°F</span>
+              <span class="fw-semibold">≥77°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body">26%</span></span>
                 <span class="text-muted small">Kalshi <span class="text-body">22%</span></span>
@@ -2838,7 +2838,7 @@ function buildPositionCardInner(mid, pos) {
       <div>
         <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
-        <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+        <span class="ms-2 text-muted">${fmtBucket(pos.bucket_lower)}</span>
       </div>
       <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
         $${sign}${pos.unrealized_pnl.toFixed(2)}
@@ -3093,6 +3093,13 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+/** Format a bucket lower bound into a human-readable range string. */
+function fmtBucket(lower) {
+  if (lower <= 68) return '\u226468\u00b0F';          // ≤68°F
+  if (lower >= 77) return '\u226577\u00b0F';          // ≥77°F
+  return `${lower}\u2013${lower + 1}\u00b0F`;         // 69–70°F
+}
+
 function nowStr() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
@@ -3105,7 +3112,7 @@ function updateTimestamp() {
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   applyLocalTimes();
-  // SSE disabled in static preview
+  // SSE disabled
 try { initSSE(); } catch(e) {}
   updateTimestamp();
 });
