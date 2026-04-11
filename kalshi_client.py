@@ -257,6 +257,124 @@ class KalshiClient:
             is_open=raw.get("status", "") == "open",
         )
 
+    def get_markets_for_station_date(
+        self,
+        station: str,
+        event_date: date,
+    ) -> list[MarketSnapshot]:
+        """
+        Dynamically discover all available bucket markets from Kalshi for a
+        station + date, parse actual boundaries from the response, and return
+        a list of MarketSnapshot objects sorted by bucket_min.
+
+        This replaces the hardcoded all_bucket_lowers() approach so the signal
+        logic is correct regardless of how Kalshi structures buckets that day.
+        """
+        event_ticker = build_event_id(station, event_date)
+        try:
+            data = self._get("/markets", params={"event_ticker": event_ticker, "limit": 50})
+        except Exception as exc:
+            logger.error("get_markets_for_station_date %s %s failed: %s", station, event_date, exc)
+            return []
+
+        raw_markets = data.get("markets", [])
+        if not raw_markets:
+            logger.warning("No markets returned for event %s", event_ticker)
+            return []
+
+        logger.info("Event %s — %d raw markets from Kalshi", event_ticker, len(raw_markets))
+
+        snapshots = []
+        for m in raw_markets:
+            snap = self._parse_market_snapshot(m, station)
+            if snap:
+                snapshots.append(snap)
+
+        snapshots.sort(key=lambda s: (s.bucket_lower is None, s.bucket_lower or 0))
+        logger.info(
+            "%s %s — parsed %d/%d bucket snapshots dynamically",
+            station, event_date, len(snapshots), len(raw_markets),
+        )
+        return snapshots
+
+    def _parse_market_snapshot(self, raw: dict, station: str) -> MarketSnapshot | None:
+        """
+        Parse a single raw Kalshi market dict into a MarketSnapshot.
+        Derives bucket_lower and bucket_label from the market ticker and/or title.
+        Prices are in cents (0–100) in the API; converted to 0–1 fractions here.
+        """
+        import re
+
+        ticker = raw.get("ticker", "")
+        title  = raw.get("title", raw.get("subtitle", ""))
+        status = raw.get("status", "")
+
+        if not ticker:
+            return None
+
+        # ── Parse bucket boundaries ───────────────────────────────────────
+        # Strategy 1: extract center from ticker suffix (e.g. "B71.5" → 71–72)
+        bucket_lower: int | None = None
+        bucket_label_str         = ""
+
+        center_match = re.search(r"-B([\d.]+)$", ticker)
+        if center_match:
+            center = float(center_match.group(1))
+            # Determine width by checking if it's a tail bucket
+            # Centers like 68 (floor) and 77 (ceiling) are special-cased
+            if center == KALSHI_BUCKET_LOWER_TAIL:
+                bucket_lower     = int(center)
+                bucket_label_str = f"{int(center)}° or below"
+            elif center == KALSHI_BUCKET_UPPER_TAIL:
+                bucket_lower     = int(center)
+                bucket_label_str = f"{int(center)}° or above"
+            else:
+                bucket_lower     = int(center - 0.5)   # e.g. 71.5 → 71
+                bucket_upper     = int(center + 0.5)   # e.g. 71.5 → 72
+                bucket_label_str = f"{bucket_lower}° to {bucket_upper}°"
+
+        # Strategy 2: parse from title text (catches non-standard centers)
+        if bucket_lower is None and title:
+            # "between X and Y" / "X to Y" / "above X" / "below X" / "at or below X"
+            between = re.search(r"(\d+)\s*(?:°F)?\s*(?:to|and|-)\s*(\d+)\s*(?:°F)?", title, re.I)
+            above   = re.search(r"(?:above|at or above|or above)\s+(\d+)\s*(?:°F)?", title, re.I)
+            below   = re.search(r"(?:below|at or below|or below)\s+(\d+)\s*(?:°F)?", title, re.I)
+
+            if between:
+                lo, hi           = int(between.group(1)), int(between.group(2))
+                bucket_lower     = lo
+                bucket_label_str = f"{lo}° to {hi}°"
+            elif above:
+                bucket_lower     = int(above.group(1))
+                bucket_label_str = f"{bucket_lower}° or above"
+            elif below:
+                bucket_lower     = int(below.group(1))
+                bucket_label_str = f"{bucket_lower}° or below"
+
+        if bucket_lower is None:
+            logger.debug("Could not parse bucket from ticker=%s title=%s", ticker, title)
+            return None
+
+        # ── Prices (cents → fraction) ─────────────────────────────────────
+        yes_bid = raw.get("yes_bid", 0) / 100.0
+        yes_ask = raw.get("yes_ask", 100) / 100.0
+        no_bid  = raw.get("no_bid",  0) / 100.0
+        no_ask  = raw.get("no_ask",  100) / 100.0
+
+        return MarketSnapshot(
+            market_id    = ticker,
+            station      = station,
+            bucket_lower = bucket_lower,
+            bucket_label = bucket_label_str or bucket_label(bucket_lower),
+            yes_bid      = yes_bid,
+            yes_ask      = yes_ask,
+            no_bid       = no_bid,
+            no_ask       = no_ask,
+            implied_prob = yes_ask,
+            volume       = raw.get("volume", 0),
+            is_open      = status == "open",
+        )
+
     def get_all_snapshots(
         self,
         station: str,
@@ -264,18 +382,18 @@ class KalshiClient:
     ) -> dict[int, MarketSnapshot]:
         """
         Fetch snapshots for all buckets for a station/date.
+        Uses dynamic bucket discovery (get_markets_for_station_date) so the
+        result always reflects whatever Kalshi is offering that day.
         Returns dict keyed by bucket_lower.
         """
-        snapshots = {}
-        for lower in all_bucket_lowers():
-            snap = self.get_market_snapshot(station, event_date, lower)
-            if snap:
-                snapshots[lower] = snap
+        snaps = self.get_markets_for_station_date(station, event_date)
+        result = {s.bucket_lower: s for s in snaps}
         logger.info(
-            "%s %s — fetched %d/%d bucket snapshots",
-            station, event_date, len(snapshots), len(all_bucket_lowers()),
+            "%s %s — %d buckets discovered: %s",
+            station, event_date, len(result),
+            sorted(result.keys()),
         )
-        return snapshots
+        return result
 
     # ── Order management ──────────────────────────────────────────────────
 
