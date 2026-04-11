@@ -120,63 +120,75 @@
 
   {% if initial_state.positions %}
   <div id="positions-carousel" class="carousel slide wb-carousel" data-bs-ride="false" data-bs-interval="false">
+    {% set pos_list = initial_state.positions.items() | list %}
+    {% set num_slides = ((pos_list | length + 1) // 2) %}
     <div class="carousel-inner" id="carousel-inner">
-      {% for market_id, pos in initial_state.positions.items() %}
-      <div class="carousel-item {% if loop.first %}active{% endif %}" data-market-id="{{ market_id }}">
-        <div class="wb-position-card card mx-auto">
-          <div class="card-body">
-            <!-- Header -->
-            <div class="d-flex justify-content-between align-items-start mb-2">
-              <div>
-                <span class="fw-bold fs-5">{{ pos.station }}</span>
-                <span class="badge bg-primary ms-2">HIGH</span>
-                <span class="ms-2 text-muted">{{ pos.bucket_lower }}–{{ pos.bucket_lower + 2 }}°F</span>
-              </div>
-              <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
-                    id="pos-badge-{{ market_id|replace('-','_') }}">
-                ${{ "%+.2f"|format(pos.unrealized_pnl) }}
-              </span>
-            </div>
-            <!-- P/L row (prominent) -->
-            <div class="wb-pnl-row mb-3">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <span class="text-muted small">Entry</span>
-                  <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
-                  <span class="mx-2 text-muted">→</span>
-                  <span class="text-muted small">Current</span>
-                  <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
-                    ${{ "%.2f"|format(pos.current_bid) }}
+      {% for i in range(0, pos_list | length, 2) %}
+      <div class="carousel-item {% if i == 0 %}active{% endif %}">
+        <div class="row g-2 mx-0">
+          {% for offset in [0, 1] %}
+          {% if i + offset < pos_list | length %}
+          {% set market_id = pos_list[i + offset][0] %}
+          {% set pos = pos_list[i + offset][1] %}
+          <div class="col-12 col-md-6" data-market-id="{{ market_id }}">
+            <div class="wb-position-card card">
+              <div class="card-body">
+                <!-- Header -->
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div>
+                    <span class="fw-bold fs-5">{{ pos.station }}</span>
+                    <span class="badge bg-primary ms-2">HIGH</span>
+                    <span class="ms-2 text-muted">{{ pos.bucket_lower }}–{{ pos.bucket_lower + 2 }}°F</span>
+                  </div>
+                  <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
+                        id="pos-badge-{{ market_id|replace('-','_') }}">
+                    ${{ "%+.2f"|format(pos.unrealized_pnl) }}
                   </span>
                 </div>
-                <div class="text-end">
-                  <span class="{% if pos.pnl_pct >= 0 %}text-success{% else %}text-danger{% endif %} fw-bold"
-                        id="pos-pct-{{ market_id|replace('-','_') }}">
-                    {{ "%+.1f"|format(pos.pnl_pct) }}%
-                  </span>
+                <!-- P/L row (prominent) -->
+                <div class="wb-pnl-row mb-3">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                      <span class="text-muted small">Entry</span>
+                      <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
+                      <span class="mx-2 text-muted">→</span>
+                      <span class="text-muted small">Current</span>
+                      <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
+                        ${{ "%.2f"|format(pos.current_bid) }}
+                      </span>
+                    </div>
+                    <div class="text-end">
+                      <span class="{% if pos.pnl_pct >= 0 %}text-success{% else %}text-danger{% endif %} fw-bold"
+                            id="pos-pct-{{ market_id|replace('-','_') }}">
+                        {{ "%+.1f"|format(pos.pnl_pct) }}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <!-- Details -->
+                <div class="row g-1 text-muted small mb-3">
+                  <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
+                  <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
+                  <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
+                  <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
+                </div>
+                <!-- Actions -->
+                <div class="d-flex gap-2">
+                  <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                          onclick="confirmClose('{{ market_id }}', '{{ pos.station }}', {{ pos.unrealized_pnl }})">
+                    Close Position
+                  </button>
                 </div>
               </div>
-            </div>
-            <!-- Details -->
-            <div class="row g-1 text-muted small mb-3">
-              <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
-              <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
-              <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
-              <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
-            </div>
-            <!-- Actions -->
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                      onclick="confirmClose('{{ market_id }}', '{{ pos.station }}', {{ pos.unrealized_pnl }})">
-                Close Position
-              </button>
             </div>
           </div>
+          {% endif %}
+          {% endfor %}
         </div>
       </div>
       {% endfor %}
     </div>
-    {% if initial_state.positions|length > 1 %}
+    {% if num_slides > 1 %}
     <button class="carousel-control-prev wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="prev">
       <span class="carousel-control-prev-icon"></span>
     </button>
@@ -184,9 +196,9 @@
       <span class="carousel-control-next-icon"></span>
     </button>
     <div class="carousel-indicators wb-carousel-dots" style="position:static;margin-top:8px;">
-      {% for market_id in initial_state.positions %}
-      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="{{ loop.index0 }}"
-              {% if loop.first %}class="active"{% endif %}></button>
+      {% for i in range(num_slides) %}
+      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="{{ i }}"
+              {% if i == 0 %}class="active"{% endif %}></button>
       {% endfor %}
     </div>
     {% endif %}
@@ -223,12 +235,24 @@
                 {{ {'KJFK':'New York','KORD':'Chicago','KMIA':'Miami','KDFW':'Dallas',
                     'KLAX':'Los Angeles','KATL':'Atlanta','KDEN':'Denver','KHOU':'Houston'}[station] }}
               </span>
-            </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-{{ decision|lower }}">{{ decision }}</div>
               {% if sig %}
-              <div class="text-muted small mt-1">{{ sig.local_time if sig.local_time else '—' }}</div>
+              <div class="text-muted small">{{ sig.local_time if sig.local_time else '—' }}</div>
               {% endif %}
+            </div>
+            <div class="d-flex align-items-start gap-2">
+              {% if sig and sig.metar %}
+              {% set wx_cond = (sig.taf.weather_condition if sig.taf else 'clear') | replace(' ', '_') %}
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-{{ wx_cond }}"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">{{ sig.metar.temp_f | int }}°F</div>
+                  <div class="wb-wx-wind">{{ sig.metar.wind_speed_kt | int }}kt</div>
+                </div>
+              </div>
+              {% endif %}
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-{{ decision|lower }}">{{ decision }}</div>
+              </div>
             </div>
           </div>
 
@@ -383,7 +407,7 @@
                   Condition: {{ sig.taf.weather_condition }}
                   {% if sig.taf.has_amd %}<span class="badge bg-warning text-dark ms-1">AMD</span>{% endif %}
                   {% if sig.taf.hard_skip %}<span class="badge bg-danger ms-1">HARD SKIP</span>{% endif %}
-                  {% if sig.taf.summary %}<br><span class="opacity-75">{{ sig.taf.summary }}</span>{% endif %}
+                  {% if sig.taf.summary %}<br><span class="opacity-75" data-taf-station="{{ station }}">{{ sig.taf.summary }}</span>{% endif %}
                 </div>
               </div>
               {% endif %}
@@ -489,10 +513,10 @@
 ═══════════════════════════════════════════════════════════════════ -->
 <footer class="wb-footer px-3 py-2">
   <div class="d-flex flex-wrap gap-3 text-muted small">
-    <span>Tier 1 (TAF): <span id="tier1-last" class="text-body">{{ initial_state.tier_status.tier1 }}</span></span>
-    <span>Tier 2 (METAR): <span id="tier2-last" class="text-body">{{ initial_state.tier_status.tier2 }}</span></span>
-    <span>Tier 3 (Signal): <span id="tier3-last" class="text-body">{{ initial_state.tier_status.tier3 }}</span></span>
-    <span>Settlement: <span id="settlement-last" class="text-body">{{ initial_state.tier_status.settlement }}</span></span>
+    <span>Tier 1 (TAF): <span id="tier1-last" class="text-body" data-utc="{{ initial_state.tier_status.tier1 }}">{{ initial_state.tier_status.tier1 }}</span></span>
+    <span>Tier 2 (METAR): <span id="tier2-last" class="text-body" data-utc="{{ initial_state.tier_status.tier2 }}">{{ initial_state.tier_status.tier2 }}</span></span>
+    <span>Tier 3 (Signal): <span id="tier3-last" class="text-body" data-utc="{{ initial_state.tier_status.tier3 }}">{{ initial_state.tier_status.tier3 }}</span></span>
+    <span>Settlement: <span id="settlement-last" class="text-body" data-utc="{{ initial_state.tier_status.settlement }}">{{ initial_state.tier_status.settlement }}</span></span>
     <span class="ms-auto">
       <span id="sse-status" class="text-warning">⬤ Connecting…</span>
     </span>

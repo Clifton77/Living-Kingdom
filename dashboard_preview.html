@@ -278,6 +278,66 @@ body {
   border-color: var(--wb-card-border);
 }
 
+/* ── Weather mini infographic ───────────────────────────────── */
+.wb-weather-mini {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--wb-bucket-hl);
+  border: 1px solid var(--wb-card-border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+.wb-wx-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.wb-wx-icon.wb-wx-clear {
+  background: radial-gradient(circle at 40% 40%, #ffd700, #ff8c00);
+  box-shadow: 0 0 5px rgba(255,180,0,0.4);
+}
+.wb-wx-icon.wb-wx-scattered,
+.wb-wx-icon.wb-wx-few {
+  background: linear-gradient(135deg, #ffd700 50%, #8892a4 50%);
+}
+.wb-wx-icon.wb-wx-broken {
+  background: linear-gradient(135deg, #8892a4 65%, #ffd700 65%);
+}
+.wb-wx-icon.wb-wx-overcast {
+  background: #8892a4;
+}
+.wb-wx-icon.wb-wx-marine_fog {
+  background: repeating-linear-gradient(
+    0deg,
+    var(--wb-card-border) 0px 3px,
+    transparent 3px 7px
+  );
+  border: 1px solid var(--wb-card-border);
+  border-radius: 4px;
+  height: 20px;
+}
+.wb-wx-icon.wb-wx-convective {
+  background: linear-gradient(160deg, #495057 55%, #ffc107 55%);
+}
+.wb-wx-icon.wb-wx-precip {
+  background: linear-gradient(180deg, #7ea8c4 30%, #3d86c4 100%);
+}
+.wb-wx-stats {
+  line-height: 1.2;
+  min-width: 30px;
+}
+.wb-wx-temp {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.wb-wx-wind {
+  font-size: 0.65rem;
+  color: var(--wb-text-dim);
+}
+
 /* ── Responsive tweaks ──────────────────────────────────────── */
 @media (max-width: 576px) {
   .wb-navbar .navbar-brand { font-size: 0.9rem; }
@@ -401,129 +461,129 @@ body {
 
   
   <div id="positions-carousel" class="carousel slide wb-carousel" data-bs-ride="false" data-bs-interval="false">
+    
+    
     <div class="carousel-inner" id="carousel-inner">
       
-      <div class="carousel-item active" data-market-id="KXHIGHLAX-26APR09-B71.5">
-        <div class="wb-position-card card mx-auto">
-          <div class="card-body">
-            <!-- Header -->
-            <div class="d-flex justify-content-between align-items-start mb-2">
-              <div>
-                <span class="fw-bold fs-5">KLAX</span>
-                <span class="badge bg-primary ms-2">HIGH</span>
-                <span class="ms-2 text-muted">71–73°F</span>
-              </div>
-              <span class="badge bg-success fs-6"
-                    id="pos-badge-KXHIGHLAX_26APR09_B71.5">
-                $+1.30
-              </span>
-            </div>
-            <!-- P/L row (prominent) -->
-            <div class="wb-pnl-row mb-3">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <span class="text-muted small">Entry</span>
-                  <span class="ms-1 fw-semibold">$0.28</span>
-                  <span class="mx-2 text-muted">→</span>
-                  <span class="text-muted small">Current</span>
-                  <span class="ms-1 fw-semibold" id="pos-bid-KXHIGHLAX_26APR09_B71.5">
-                    $0.41
+      <div class="carousel-item active">
+        <div class="row g-2 mx-0">
+          
+          
+          
+          
+          <div class="col-12 col-md-6" data-market-id="KXHIGHLAX-26APR09-B71.5">
+            <div class="wb-position-card card">
+              <div class="card-body">
+                <!-- Header -->
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div>
+                    <span class="fw-bold fs-5">KLAX</span>
+                    <span class="badge bg-primary ms-2">HIGH</span>
+                    <span class="ms-2 text-muted">71–73°F</span>
+                  </div>
+                  <span class="badge bg-success fs-6"
+                        id="pos-badge-KXHIGHLAX_26APR09_B71.5">
+                    $+1.30
                   </span>
                 </div>
-                <div class="text-end">
-                  <span class="text-success fw-bold"
-                        id="pos-pct-KXHIGHLAX_26APR09_B71.5">
-                    +46.4%
-                  </span>
+                <!-- P/L row (prominent) -->
+                <div class="wb-pnl-row mb-3">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                      <span class="text-muted small">Entry</span>
+                      <span class="ms-1 fw-semibold">$0.28</span>
+                      <span class="mx-2 text-muted">→</span>
+                      <span class="text-muted small">Current</span>
+                      <span class="ms-1 fw-semibold" id="pos-bid-KXHIGHLAX_26APR09_B71.5">
+                        $0.41
+                      </span>
+                    </div>
+                    <div class="text-end">
+                      <span class="text-success fw-bold"
+                            id="pos-pct-KXHIGHLAX_26APR09_B71.5">
+                        +46.4%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <!-- Details -->
+                <div class="row g-1 text-muted small mb-3">
+                  <div class="col-6">Contracts: <span class="text-body">10</span></div>
+                  <div class="col-6">Stake: <span class="text-body">$2.80</span></div>
+                  <div class="col-12">Entered: <span class="text-body">2026-04-08T14:07:00+00:00</span></div>
+                  <div class="col-12">Event: <span class="text-body">2026-04-09</span></div>
+                </div>
+                <!-- Actions -->
+                <div class="d-flex gap-2">
+                  <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                          onclick="confirmClose('KXHIGHLAX-26APR09-B71.5', 'KLAX', 1.3)">
+                    Close Position
+                  </button>
                 </div>
               </div>
-            </div>
-            <!-- Details -->
-            <div class="row g-1 text-muted small mb-3">
-              <div class="col-6">Contracts: <span class="text-body">10</span></div>
-              <div class="col-6">Stake: <span class="text-body">$2.80</span></div>
-              <div class="col-12">Entered: <span class="text-body">2026-04-08T14:07:00+00:00</span></div>
-              <div class="col-12">Event: <span class="text-body">2026-04-09</span></div>
-            </div>
-            <!-- Actions -->
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                      onclick="confirmClose('KXHIGHLAX-26APR09-B71.5', 'KLAX', 1.3)">
-                Close Position
-              </button>
             </div>
           </div>
-        </div>
-      </div>
-      
-      <div class="carousel-item " data-market-id="KXHIGHJFK-26APR09-B69.5">
-        <div class="wb-position-card card mx-auto">
-          <div class="card-body">
-            <!-- Header -->
-            <div class="d-flex justify-content-between align-items-start mb-2">
-              <div>
-                <span class="fw-bold fs-5">KJFK</span>
-                <span class="badge bg-primary ms-2">HIGH</span>
-                <span class="ms-2 text-muted">69–71°F</span>
-              </div>
-              <span class="badge bg-danger fs-6"
-                    id="pos-badge-KXHIGHJFK_26APR09_B69.5">
-                $-0.20
-              </span>
-            </div>
-            <!-- P/L row (prominent) -->
-            <div class="wb-pnl-row mb-3">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <span class="text-muted small">Entry</span>
-                  <span class="ms-1 fw-semibold">$0.35</span>
-                  <span class="mx-2 text-muted">→</span>
-                  <span class="text-muted small">Current</span>
-                  <span class="ms-1 fw-semibold" id="pos-bid-KXHIGHJFK_26APR09_B69.5">
-                    $0.31
+          
+          
+          
+          
+          
+          <div class="col-12 col-md-6" data-market-id="KXHIGHJFK-26APR09-B69.5">
+            <div class="wb-position-card card">
+              <div class="card-body">
+                <!-- Header -->
+                <div class="d-flex justify-content-between align-items-start mb-2">
+                  <div>
+                    <span class="fw-bold fs-5">KJFK</span>
+                    <span class="badge bg-primary ms-2">HIGH</span>
+                    <span class="ms-2 text-muted">69–71°F</span>
+                  </div>
+                  <span class="badge bg-danger fs-6"
+                        id="pos-badge-KXHIGHJFK_26APR09_B69.5">
+                    $-0.20
                   </span>
                 </div>
-                <div class="text-end">
-                  <span class="text-danger fw-bold"
-                        id="pos-pct-KXHIGHJFK_26APR09_B69.5">
-                    -11.4%
-                  </span>
+                <!-- P/L row (prominent) -->
+                <div class="wb-pnl-row mb-3">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                      <span class="text-muted small">Entry</span>
+                      <span class="ms-1 fw-semibold">$0.35</span>
+                      <span class="mx-2 text-muted">→</span>
+                      <span class="text-muted small">Current</span>
+                      <span class="ms-1 fw-semibold" id="pos-bid-KXHIGHJFK_26APR09_B69.5">
+                        $0.31
+                      </span>
+                    </div>
+                    <div class="text-end">
+                      <span class="text-danger fw-bold"
+                            id="pos-pct-KXHIGHJFK_26APR09_B69.5">
+                        -11.4%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <!-- Details -->
+                <div class="row g-1 text-muted small mb-3">
+                  <div class="col-6">Contracts: <span class="text-body">5</span></div>
+                  <div class="col-6">Stake: <span class="text-body">$1.75</span></div>
+                  <div class="col-12">Entered: <span class="text-body">2026-04-08T14:09:00+00:00</span></div>
+                  <div class="col-12">Event: <span class="text-body">2026-04-09</span></div>
+                </div>
+                <!-- Actions -->
+                <div class="d-flex gap-2">
+                  <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                          onclick="confirmClose('KXHIGHJFK-26APR09-B69.5', 'KJFK', -0.2)">
+                    Close Position
+                  </button>
                 </div>
               </div>
-            </div>
-            <!-- Details -->
-            <div class="row g-1 text-muted small mb-3">
-              <div class="col-6">Contracts: <span class="text-body">5</span></div>
-              <div class="col-6">Stake: <span class="text-body">$1.75</span></div>
-              <div class="col-12">Entered: <span class="text-body">2026-04-08T14:09:00+00:00</span></div>
-              <div class="col-12">Event: <span class="text-body">2026-04-09</span></div>
-            </div>
-            <!-- Actions -->
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                      onclick="confirmClose('KXHIGHJFK-26APR09-B69.5', 'KJFK', -0.2)">
-                Close Position
-              </button>
             </div>
           </div>
+          
+          
         </div>
       </div>
-      
-    </div>
-    
-    <button class="carousel-control-prev wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="prev">
-      <span class="carousel-control-prev-icon"></span>
-    </button>
-    <button class="carousel-control-next wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="next">
-      <span class="carousel-control-next-icon"></span>
-    </button>
-    <div class="carousel-indicators wb-carousel-dots" style="position:static;margin-top:8px;">
-      
-      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="0"
-              class="active"></button>
-      
-      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="1"
-              ></button>
       
     </div>
     
@@ -555,12 +615,24 @@ body {
               <span class="text-muted ms-2">
                 New York
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  10:45 EDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-trade">TRADE</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  10:45 EDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-clear"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">64°F</div>
+                  <div class="wb-wx-wind">12kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-trade">TRADE</div>
+              </div>
             </div>
           </div>
 
@@ -804,7 +876,7 @@ body {
                   Condition: clear
                   
                   
-                  <br><span class="opacity-75">VFR conditions expected through 12Z tomorrow. No significant weather.</span>
+                  <br><span class="opacity-75" data-taf-station="KJFK">VFR conditions expected through 12Z tomorrow. No significant weather.</span>
                 </div>
               </div>
               
@@ -846,12 +918,24 @@ body {
               <span class="text-muted ms-2">
                 Los Angeles
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  07:45 PDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-trade">TRADE</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  07:45 PDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-marine_fog"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">61°F</div>
+                  <div class="wb-wx-wind">8kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-trade">TRADE</div>
+              </div>
             </div>
           </div>
 
@@ -1095,7 +1179,7 @@ body {
                   Condition: marine_fog
                   
                   
-                  <br><span class="opacity-75">Marine layer OVC015 through 18Z, lifting to BKN030 by 20Z, becoming VFR by 22Z.</span>
+                  <br><span class="opacity-75" data-taf-station="KLAX">Marine layer OVC015 through 18Z, lifting to BKN030 by 20Z, becoming VFR by 22Z.</span>
                 </div>
               </div>
               
@@ -1137,12 +1221,24 @@ body {
               <span class="text-muted ms-2">
                 Chicago
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  09:45 CDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-watch">WATCH</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  09:45 CDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-convective"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">58°F</div>
+                  <div class="wb-wx-wind">15kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-watch">WATCH</div>
+              </div>
             </div>
           </div>
 
@@ -1272,7 +1368,7 @@ body {
                   Condition: convective
                   
                   
-                  <br><span class="opacity-75">VCTS possible 20Z–00Z. BKN020 through period.</span>
+                  <br><span class="opacity-75" data-taf-station="KORD">VCTS possible 20Z–00Z. BKN020 through period.</span>
                 </div>
               </div>
               
@@ -1314,12 +1410,24 @@ body {
               <span class="text-muted ms-2">
                 Miami
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  10:45 EDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  10:45 EDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-clear"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">82°F</div>
+                  <div class="wb-wx-wind">10kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+              </div>
             </div>
           </div>
 
@@ -1449,7 +1557,7 @@ body {
                   Condition: clear
                   
                   
-                  <br><span class="opacity-75">VFR through period.</span>
+                  <br><span class="opacity-75" data-taf-station="KMIA">VFR through period.</span>
                 </div>
               </div>
               
@@ -1491,12 +1599,24 @@ body {
               <span class="text-muted ms-2">
                 Dallas
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  09:45 CDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  09:45 CDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-scattered"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">74°F</div>
+                  <div class="wb-wx-wind">12kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+              </div>
             </div>
           </div>
 
@@ -1626,7 +1746,7 @@ body {
                   Condition: scattered
                   
                   
-                  <br><span class="opacity-75">SCT clouds through period, VFR.</span>
+                  <br><span class="opacity-75" data-taf-station="KDFW">SCT clouds through period, VFR.</span>
                 </div>
               </div>
               
@@ -1668,12 +1788,24 @@ body {
               <span class="text-muted ms-2">
                 Atlanta
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  10:45 EDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  10:45 EDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-clear"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">70°F</div>
+                  <div class="wb-wx-wind">8kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+              </div>
             </div>
           </div>
 
@@ -1803,7 +1935,7 @@ body {
                   Condition: clear
                   
                   
-                  <br><span class="opacity-75">VFR through period.</span>
+                  <br><span class="opacity-75" data-taf-station="KATL">VFR through period.</span>
                 </div>
               </div>
               
@@ -1845,12 +1977,24 @@ body {
               <span class="text-muted ms-2">
                 Denver
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  08:45 MDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  08:45 MDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-scattered"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">55°F</div>
+                  <div class="wb-wx-wind">14kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+              </div>
             </div>
           </div>
 
@@ -1980,7 +2124,7 @@ body {
                   Condition: scattered
                   
                   
-                  <br><span class="opacity-75">VFR, gusty winds.</span>
+                  <br><span class="opacity-75" data-taf-station="KDEN">VFR, gusty winds.</span>
                 </div>
               </div>
               
@@ -2022,12 +2166,24 @@ body {
               <span class="text-muted ms-2">
                 Houston
               </span>
+              
+              <div class="text-muted small">Tue Apr 8  09:45 CDT</div>
+              
             </div>
-            <div class="text-end">
-              <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+            <div class="d-flex align-items-start gap-2">
               
-              <div class="text-muted small mt-1">Tue Apr 8  09:45 CDT</div>
               
+              <div class="wb-weather-mini">
+                <div class="wb-wx-icon wb-wx-clear"></div>
+                <div class="wb-wx-stats">
+                  <div class="wb-wx-temp">78°F</div>
+                  <div class="wb-wx-wind">10kt</div>
+                </div>
+              </div>
+              
+              <div class="text-end">
+                <div class="wb-decision-badge badge wb-badge-skip">SKIP</div>
+              </div>
             </div>
           </div>
 
@@ -2157,7 +2313,7 @@ body {
                   Condition: clear
                   
                   
-                  <br><span class="opacity-75">VFR through period.</span>
+                  <br><span class="opacity-75" data-taf-station="KHOU">VFR through period.</span>
                 </div>
               </div>
               
@@ -2275,10 +2431,10 @@ body {
 ═══════════════════════════════════════════════════════════════════ -->
 <footer class="wb-footer px-3 py-2">
   <div class="d-flex flex-wrap gap-3 text-muted small">
-    <span>Tier 1 (TAF): <span id="tier1-last" class="text-body">14:30 UTC</span></span>
-    <span>Tier 2 (METAR): <span id="tier2-last" class="text-body">14:30 UTC</span></span>
-    <span>Tier 3 (Signal): <span id="tier3-last" class="text-body">14:05 UTC</span></span>
-    <span>Settlement: <span id="settlement-last" class="text-body">09:00 UTC</span></span>
+    <span>Tier 1 (TAF): <span id="tier1-last" class="text-body" data-utc="14:30 UTC">14:30 UTC</span></span>
+    <span>Tier 2 (METAR): <span id="tier2-last" class="text-body" data-utc="14:30 UTC">14:30 UTC</span></span>
+    <span>Tier 3 (Signal): <span id="tier3-last" class="text-body" data-utc="14:05 UTC">14:05 UTC</span></span>
+    <span>Settlement: <span id="settlement-last" class="text-body" data-utc="09:00 UTC">09:00 UTC</span></span>
     <span class="ms-auto">
       <span id="sse-status" class="text-warning">⬤ Connecting…</span>
     </span>
@@ -2457,6 +2613,57 @@ const STATION_CITIES = {
   KJFK: 'New York', KORD: 'Chicago', KMIA: 'Miami',   KDFW: 'Dallas',
   KLAX: 'Los Angeles', KATL: 'Atlanta', KDEN: 'Denver', KHOU: 'Houston'
 };
+const STATION_TZ = {
+  KJFK: 'America/New_York',  KMIA: 'America/New_York',  KATL: 'America/New_York',
+  KORD: 'America/Chicago',   KDFW: 'America/Chicago',   KHOU: 'America/Chicago',
+  KDEN: 'America/Denver',    KLAX: 'America/Los_Angeles',
+};
+
+// ── Time / locale helpers ────────────────────────────────────
+/** Convert a Zulu hour string like "18Z" or "0630Z" to station local time. */
+function localizeZuluInText(text, station) {
+  if (!text || !station) return text;
+  const tz = STATION_TZ[station];
+  if (!tz) return text;
+  return text.replace(/\b(\d{2})(\d{2})?Z\b/g, (match, hh, mm) => {
+    const h = parseInt(hh, 10);
+    const m = mm ? parseInt(mm, 10) : 0;
+    const now = new Date();
+    const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m));
+    const opts = { timeZone: tz, hour: 'numeric', timeZoneName: 'short' };
+    if (m) opts.minute = '2-digit';
+    const local = utc.toLocaleTimeString('en-US', opts);
+    return `${match}\u202F(${local})`;
+  });
+}
+
+/** Set tier footer span with both UTC string and user's local time. */
+function setTierTime(id, utcStr) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const m = String(utcStr).match(/(\d{1,2}):(\d{2})/);
+  if (!m) { el.textContent = utcStr; return; }
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    parseInt(m[1], 10), parseInt(m[2], 10)));
+  const local = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  el.textContent = `${utcStr} / ${local}`;
+}
+
+/** Run on page load: convert all TAF Z-times and tier spans to local. */
+function applyLocalTimes() {
+  // TAF summaries
+  document.querySelectorAll('[data-taf-station]').forEach(el => {
+    const station = el.getAttribute('data-taf-station');
+    el.textContent = localizeZuluInText(el.textContent, station);
+  });
+  // Footer tier spans
+  document.querySelectorAll('[data-utc]').forEach(el => {
+    const utc = el.getAttribute('data-utc');
+    const id  = el.id;
+    if (id) setTierTime(id, utc);
+  });
+}
 
 // ── Theme ────────────────────────────────────────────────────
 (function initTheme() {
@@ -2528,8 +2735,7 @@ function initSSE() {
   src.addEventListener('tier_heartbeat', e => {
     const tiers = JSON.parse(e.data);
     ['tier1','tier2','tier3','settlement'].forEach(t => {
-      const el = document.getElementById(`${t}-last`);
-      if (el && tiers[t]) el.textContent = tiers[t];
+      if (tiers[t]) setTierTime(`${t}-last`, tiers[t]);
     });
   });
 
@@ -2554,8 +2760,7 @@ function applyFullState(state) {
   updateSummaryStrip(state.summary);
   if (state.tier_status) {
     ['tier1','tier2','tier3','settlement'].forEach(t => {
-      const el = document.getElementById(`${t}-last`);
-      if (el && state.tier_status[t]) el.textContent = state.tier_status[t];
+      if (state.tier_status[t]) setTierTime(`${t}-last`, state.tier_status[t]);
     });
   }
   updateTimestamp();
@@ -2604,79 +2809,83 @@ function rebuildCarousel(positions) {
   const entries = Object.entries(positions);
   if (entries.length === 0) {
     inner.innerHTML = '';
-    const placeholder = document.getElementById('no-positions-placeholder');
-    if (placeholder) placeholder.classList.remove('d-none');
+    document.getElementById('no-positions-placeholder')?.classList.remove('d-none');
     return;
   }
 
-  // Re-render all cards (simple approach for small N)
-  inner.innerHTML = entries.map(([mid, pos], i) =>
-    buildPositionCardHTML(mid, pos, i === 0)
-  ).join('');
+  // Group into pairs — 2 cards per slide on md+, 1 on mobile
+  const slides = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const pair   = entries.slice(i, i + 2);
+    const active = i === 0 ? ' active' : '';
+    const cols   = pair.map(([mid, pos]) =>
+      `<div class="col-12 col-md-6" data-market-id="${mid}">${buildPositionCardInner(mid, pos)}</div>`
+    ).join('');
+    slides.push(`<div class="carousel-item${active}"><div class="row g-2 mx-0">${cols}</div></div>`);
+  }
+  inner.innerHTML = slides.join('');
 }
 
-function buildPositionCardHTML(mid, pos, active) {
-  const safeMid = mid.replace(/-/g, '_');
+function buildPositionCardInner(mid, pos) {
+  const safeMid  = mid.replace(/-/g, '_');
   const pnlClass = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
   const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
-  const sign = pos.unrealized_pnl >= 0 ? '+' : '';
+  const sign     = pos.unrealized_pnl >= 0 ? '+' : '';
   return `
-<div class="carousel-item ${active ? 'active' : ''}" data-market-id="${mid}">
-  <div class="wb-position-card card mx-auto">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-start mb-2">
+<div class="wb-position-card card">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="badge bg-primary ms-2">HIGH</span>
+        <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+      </div>
+      <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
+        $${sign}${pos.unrealized_pnl.toFixed(2)}
+      </span>
+    </div>
+    <div class="wb-pnl-row mb-3">
+      <div class="d-flex justify-content-between align-items-center">
         <div>
-          <span class="fw-bold fs-5">${pos.station}</span>
-          <span class="badge bg-primary ms-2">HIGH</span>
-          <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+          <span class="text-muted small">Entry</span>
+          <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
+          <span class="mx-2 text-muted">→</span>
+          <span class="text-muted small">Current</span>
+          <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
         </div>
-        <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
-          $${sign}${pos.unrealized_pnl.toFixed(2)}
-        </span>
+        <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
       </div>
-      <div class="wb-pnl-row mb-3">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <span class="text-muted small">Entry</span>
-            <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
-            <span class="mx-2 text-muted">→</span>
-            <span class="text-muted small">Current</span>
-            <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
-          </div>
-          <div class="text-end">
-            <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
-          </div>
-        </div>
-      </div>
-      <div class="row g-1 text-muted small mb-3">
-        <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
-        <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
-        <div class="col-12">Entered: <span class="text-body">${pos.entry_time}</span></div>
-        <div class="col-12">Event: <span class="text-body">${pos.event_date}</span></div>
-      </div>
-      <div class="d-flex gap-2">
-        <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                onclick="confirmClose('${mid}', '${pos.station}', ${pos.unrealized_pnl})">
-          Close Position
-        </button>
-      </div>
+    </div>
+    <div class="row g-1 text-muted small mb-3">
+      <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
+      <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
+      <div class="col-12">Entered: <span class="text-body">${escHtml(pos.entry_time)}</span></div>
+      <div class="col-12">Event: <span class="text-body">${escHtml(pos.event_date)}</span></div>
+    </div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-danger flex-grow-1"
+              onclick="confirmClose('${escHtml(mid)}', '${escHtml(pos.station)}', ${pos.unrealized_pnl})">
+        Close Position
+      </button>
     </div>
   </div>
 </div>`;
 }
 
 function removeCarouselCard(marketId) {
-  const item = document.querySelector(`[data-market-id="${marketId}"]`);
-  if (!item) return;
-  const wasActive = item.classList.contains('active');
-  item.remove();
-  // If removed card was active, activate the first remaining
-  if (wasActive) {
-    const first = document.querySelector('#carousel-inner .carousel-item');
-    if (first) first.classList.add('active');
+  const col = document.querySelector(`[data-market-id="${marketId}"]`);
+  if (!col) return;
+  const slide = col.closest('.carousel-item');
+  col.remove();
+  // If slide is now empty, remove it and reactivate adjacent slide
+  if (slide && slide.querySelectorAll('[data-market-id]').length === 0) {
+    const wasActive = slide.classList.contains('active');
+    slide.remove();
+    if (wasActive) {
+      document.querySelector('#carousel-inner .carousel-item')?.classList.add('active');
+    }
   }
-  const remaining = document.querySelectorAll('#carousel-inner .carousel-item').length;
-  updatePositionCount(remaining);
+  updatePositionCount(document.querySelectorAll('#carousel-inner [data-market-id]').length);
 }
 
 function flashSignalCard(station, decision) {
@@ -2895,6 +3104,7 @@ function updateTimestamp() {
 
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  applyLocalTimes();
   // SSE disabled in static preview
 try { initSSE(); } catch(e) {}
   updateTimestamp();

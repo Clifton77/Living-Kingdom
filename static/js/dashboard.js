@@ -13,6 +13,57 @@ const STATION_CITIES = {
   KJFK: 'New York', KORD: 'Chicago', KMIA: 'Miami',   KDFW: 'Dallas',
   KLAX: 'Los Angeles', KATL: 'Atlanta', KDEN: 'Denver', KHOU: 'Houston'
 };
+const STATION_TZ = {
+  KJFK: 'America/New_York',  KMIA: 'America/New_York',  KATL: 'America/New_York',
+  KORD: 'America/Chicago',   KDFW: 'America/Chicago',   KHOU: 'America/Chicago',
+  KDEN: 'America/Denver',    KLAX: 'America/Los_Angeles',
+};
+
+// ── Time / locale helpers ────────────────────────────────────
+/** Convert a Zulu hour string like "18Z" or "0630Z" to station local time. */
+function localizeZuluInText(text, station) {
+  if (!text || !station) return text;
+  const tz = STATION_TZ[station];
+  if (!tz) return text;
+  return text.replace(/\b(\d{2})(\d{2})?Z\b/g, (match, hh, mm) => {
+    const h = parseInt(hh, 10);
+    const m = mm ? parseInt(mm, 10) : 0;
+    const now = new Date();
+    const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m));
+    const opts = { timeZone: tz, hour: 'numeric', timeZoneName: 'short' };
+    if (m) opts.minute = '2-digit';
+    const local = utc.toLocaleTimeString('en-US', opts);
+    return `${match}\u202F(${local})`;
+  });
+}
+
+/** Set tier footer span with both UTC string and user's local time. */
+function setTierTime(id, utcStr) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const m = String(utcStr).match(/(\d{1,2}):(\d{2})/);
+  if (!m) { el.textContent = utcStr; return; }
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    parseInt(m[1], 10), parseInt(m[2], 10)));
+  const local = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  el.textContent = `${utcStr} / ${local}`;
+}
+
+/** Run on page load: convert all TAF Z-times and tier spans to local. */
+function applyLocalTimes() {
+  // TAF summaries
+  document.querySelectorAll('[data-taf-station]').forEach(el => {
+    const station = el.getAttribute('data-taf-station');
+    el.textContent = localizeZuluInText(el.textContent, station);
+  });
+  // Footer tier spans
+  document.querySelectorAll('[data-utc]').forEach(el => {
+    const utc = el.getAttribute('data-utc');
+    const id  = el.id;
+    if (id) setTierTime(id, utc);
+  });
+}
 
 // ── Theme ────────────────────────────────────────────────────
 (function initTheme() {
@@ -84,8 +135,7 @@ function initSSE() {
   src.addEventListener('tier_heartbeat', e => {
     const tiers = JSON.parse(e.data);
     ['tier1','tier2','tier3','settlement'].forEach(t => {
-      const el = document.getElementById(`${t}-last`);
-      if (el && tiers[t]) el.textContent = tiers[t];
+      if (tiers[t]) setTierTime(`${t}-last`, tiers[t]);
     });
   });
 
@@ -110,8 +160,7 @@ function applyFullState(state) {
   updateSummaryStrip(state.summary);
   if (state.tier_status) {
     ['tier1','tier2','tier3','settlement'].forEach(t => {
-      const el = document.getElementById(`${t}-last`);
-      if (el && state.tier_status[t]) el.textContent = state.tier_status[t];
+      if (state.tier_status[t]) setTierTime(`${t}-last`, state.tier_status[t]);
     });
   }
   updateTimestamp();
@@ -160,79 +209,83 @@ function rebuildCarousel(positions) {
   const entries = Object.entries(positions);
   if (entries.length === 0) {
     inner.innerHTML = '';
-    const placeholder = document.getElementById('no-positions-placeholder');
-    if (placeholder) placeholder.classList.remove('d-none');
+    document.getElementById('no-positions-placeholder')?.classList.remove('d-none');
     return;
   }
 
-  // Re-render all cards (simple approach for small N)
-  inner.innerHTML = entries.map(([mid, pos], i) =>
-    buildPositionCardHTML(mid, pos, i === 0)
-  ).join('');
+  // Group into pairs — 2 cards per slide on md+, 1 on mobile
+  const slides = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const pair   = entries.slice(i, i + 2);
+    const active = i === 0 ? ' active' : '';
+    const cols   = pair.map(([mid, pos]) =>
+      `<div class="col-12 col-md-6" data-market-id="${mid}">${buildPositionCardInner(mid, pos)}</div>`
+    ).join('');
+    slides.push(`<div class="carousel-item${active}"><div class="row g-2 mx-0">${cols}</div></div>`);
+  }
+  inner.innerHTML = slides.join('');
 }
 
-function buildPositionCardHTML(mid, pos, active) {
-  const safeMid = mid.replace(/-/g, '_');
+function buildPositionCardInner(mid, pos) {
+  const safeMid  = mid.replace(/-/g, '_');
   const pnlClass = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
   const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
-  const sign = pos.unrealized_pnl >= 0 ? '+' : '';
+  const sign     = pos.unrealized_pnl >= 0 ? '+' : '';
   return `
-<div class="carousel-item ${active ? 'active' : ''}" data-market-id="${mid}">
-  <div class="wb-position-card card mx-auto">
-    <div class="card-body">
-      <div class="d-flex justify-content-between align-items-start mb-2">
+<div class="wb-position-card card">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="badge bg-primary ms-2">HIGH</span>
+        <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+      </div>
+      <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
+        $${sign}${pos.unrealized_pnl.toFixed(2)}
+      </span>
+    </div>
+    <div class="wb-pnl-row mb-3">
+      <div class="d-flex justify-content-between align-items-center">
         <div>
-          <span class="fw-bold fs-5">${pos.station}</span>
-          <span class="badge bg-primary ms-2">HIGH</span>
-          <span class="ms-2 text-muted">${pos.bucket_lower}–${pos.bucket_lower + 2}°F</span>
+          <span class="text-muted small">Entry</span>
+          <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
+          <span class="mx-2 text-muted">→</span>
+          <span class="text-muted small">Current</span>
+          <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
         </div>
-        <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
-          $${sign}${pos.unrealized_pnl.toFixed(2)}
-        </span>
+        <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
       </div>
-      <div class="wb-pnl-row mb-3">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <span class="text-muted small">Entry</span>
-            <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
-            <span class="mx-2 text-muted">→</span>
-            <span class="text-muted small">Current</span>
-            <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
-          </div>
-          <div class="text-end">
-            <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
-          </div>
-        </div>
-      </div>
-      <div class="row g-1 text-muted small mb-3">
-        <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
-        <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
-        <div class="col-12">Entered: <span class="text-body">${pos.entry_time}</span></div>
-        <div class="col-12">Event: <span class="text-body">${pos.event_date}</span></div>
-      </div>
-      <div class="d-flex gap-2">
-        <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                onclick="confirmClose('${mid}', '${pos.station}', ${pos.unrealized_pnl})">
-          Close Position
-        </button>
-      </div>
+    </div>
+    <div class="row g-1 text-muted small mb-3">
+      <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
+      <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
+      <div class="col-12">Entered: <span class="text-body">${escHtml(pos.entry_time)}</span></div>
+      <div class="col-12">Event: <span class="text-body">${escHtml(pos.event_date)}</span></div>
+    </div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-danger flex-grow-1"
+              onclick="confirmClose('${escHtml(mid)}', '${escHtml(pos.station)}', ${pos.unrealized_pnl})">
+        Close Position
+      </button>
     </div>
   </div>
 </div>`;
 }
 
 function removeCarouselCard(marketId) {
-  const item = document.querySelector(`[data-market-id="${marketId}"]`);
-  if (!item) return;
-  const wasActive = item.classList.contains('active');
-  item.remove();
-  // If removed card was active, activate the first remaining
-  if (wasActive) {
-    const first = document.querySelector('#carousel-inner .carousel-item');
-    if (first) first.classList.add('active');
+  const col = document.querySelector(`[data-market-id="${marketId}"]`);
+  if (!col) return;
+  const slide = col.closest('.carousel-item');
+  col.remove();
+  // If slide is now empty, remove it and reactivate adjacent slide
+  if (slide && slide.querySelectorAll('[data-market-id]').length === 0) {
+    const wasActive = slide.classList.contains('active');
+    slide.remove();
+    if (wasActive) {
+      document.querySelector('#carousel-inner .carousel-item')?.classList.add('active');
+    }
   }
-  const remaining = document.querySelectorAll('#carousel-inner .carousel-item').length;
-  updatePositionCount(remaining);
+  updatePositionCount(document.querySelectorAll('#carousel-inner [data-market-id]').length);
 }
 
 function flashSignalCard(station, decision) {
@@ -451,6 +504,7 @@ function updateTimestamp() {
 
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  applyLocalTimes();
   initSSE();
   updateTimestamp();
 });

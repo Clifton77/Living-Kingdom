@@ -263,6 +263,66 @@ body {
   border-color: var(--wb-card-border);
 }
 
+/* ── Weather mini infographic ───────────────────────────────── */
+.wb-weather-mini {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--wb-bucket-hl);
+  border: 1px solid var(--wb-card-border);
+  border-radius: 8px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+.wb-wx-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.wb-wx-icon.wb-wx-clear {
+  background: radial-gradient(circle at 40% 40%, #ffd700, #ff8c00);
+  box-shadow: 0 0 5px rgba(255,180,0,0.4);
+}
+.wb-wx-icon.wb-wx-scattered,
+.wb-wx-icon.wb-wx-few {
+  background: linear-gradient(135deg, #ffd700 50%, #8892a4 50%);
+}
+.wb-wx-icon.wb-wx-broken {
+  background: linear-gradient(135deg, #8892a4 65%, #ffd700 65%);
+}
+.wb-wx-icon.wb-wx-overcast {
+  background: #8892a4;
+}
+.wb-wx-icon.wb-wx-marine_fog {
+  background: repeating-linear-gradient(
+    0deg,
+    var(--wb-card-border) 0px 3px,
+    transparent 3px 7px
+  );
+  border: 1px solid var(--wb-card-border);
+  border-radius: 4px;
+  height: 20px;
+}
+.wb-wx-icon.wb-wx-convective {
+  background: linear-gradient(160deg, #495057 55%, #ffc107 55%);
+}
+.wb-wx-icon.wb-wx-precip {
+  background: linear-gradient(180deg, #7ea8c4 30%, #3d86c4 100%);
+}
+.wb-wx-stats {
+  line-height: 1.2;
+  min-width: 30px;
+}
+.wb-wx-temp {
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.wb-wx-wind {
+  font-size: 0.65rem;
+  color: var(--wb-text-dim);
+}
+
 /* ── Responsive tweaks ──────────────────────────────────────── */
 @media (max-width: 576px) {
   .wb-navbar .navbar-brand { font-size: 0.9rem; }
