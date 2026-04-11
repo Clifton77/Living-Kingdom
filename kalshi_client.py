@@ -197,7 +197,14 @@ class KalshiClient:
         }
 
         if self._private_key:
-            sig = self._private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+            sig = self._private_key.sign(
+                msg,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
             headers["KALSHI-ACCESS-SIGNATURE"] = base64.b64encode(sig).decode()
         else:
             logger.warning("No RSA key — request will likely fail auth")
