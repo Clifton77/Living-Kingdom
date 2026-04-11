@@ -213,17 +213,11 @@ function rebuildCarousel(positions) {
     return;
   }
 
-  // Group into pairs — 2 cards per slide on md+, 1 on mobile
-  const slides = [];
-  for (let i = 0; i < entries.length; i += 2) {
-    const pair   = entries.slice(i, i + 2);
-    const active = i === 0 ? ' active' : '';
-    const cols   = pair.map(([mid, pos]) =>
-      `<div class="col-12 col-md-6" data-market-id="${mid}">${buildPositionCardInner(mid, pos)}</div>`
-    ).join('');
-    slides.push(`<div class="carousel-item${active}"><div class="row g-2 mx-0">${cols}</div></div>`);
-  }
-  inner.innerHTML = slides.join('');
+  inner.innerHTML = entries.map(([mid, pos], i) =>
+    `<div class="carousel-item${i === 0 ? ' active' : ''}" data-market-id="${mid}">
+       ${buildPositionCardInner(mid, pos)}
+     </div>`
+  ).join('');
 }
 
 function buildPositionCardInner(mid, pos) {
@@ -232,7 +226,7 @@ function buildPositionCardInner(mid, pos) {
   const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
   const sign     = pos.unrealized_pnl >= 0 ? '+' : '';
   return `
-<div class="wb-position-card card">
+<div class="wb-position-card card mx-auto">
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-start mb-2">
       <div>
@@ -273,19 +267,14 @@ function buildPositionCardInner(mid, pos) {
 }
 
 function removeCarouselCard(marketId) {
-  const col = document.querySelector(`[data-market-id="${marketId}"]`);
-  if (!col) return;
-  const slide = col.closest('.carousel-item');
-  col.remove();
-  // If slide is now empty, remove it and reactivate adjacent slide
-  if (slide && slide.querySelectorAll('[data-market-id]').length === 0) {
-    const wasActive = slide.classList.contains('active');
-    slide.remove();
-    if (wasActive) {
-      document.querySelector('#carousel-inner .carousel-item')?.classList.add('active');
-    }
+  const item = document.querySelector(`.carousel-item[data-market-id="${marketId}"]`);
+  if (!item) return;
+  const wasActive = item.classList.contains('active');
+  item.remove();
+  if (wasActive) {
+    document.querySelector('#carousel-inner .carousel-item')?.classList.add('active');
   }
-  updatePositionCount(document.querySelectorAll('#carousel-inner [data-market-id]').length);
+  updatePositionCount(document.querySelectorAll('#carousel-inner .carousel-item').length);
 }
 
 function flashSignalCard(station, decision) {
