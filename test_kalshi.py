@@ -1,62 +1,74 @@
 """
-Kalshi API probe — run locally after setting up .env.
-
-Required .env entries:
-    KALSHI_API_KEY=aecddeb6-4791-4bb1-93dd-d8aa666a560b
-    KALSHI_PRIVATE_KEY_PATH=C:/Users/clift/weather-bot/kalshi_private_key.pem
-
-The private key PEM file comes from Kalshi → Account → API Keys → Download.
+Kalshi API probe — find correct event ticker format for temperature markets.
 Run:  python test_kalshi.py
 """
 import json
-from datetime import date, timedelta
-from kalshi_client import KalshiClient, build_event_id
+from kalshi_client import KalshiClient
 
-client = KalshiClient(demo=False)   # use live API — real market data
+client = KalshiClient(demo=False)
 
-today    = date.today()
-tomorrow = today + timedelta(days=1)
-
-# ── 1. Balance (auth test) ───────────────────────────────────────────────────
-print("=== Auth / Balance ===")
+# ── 1. List all available series ─────────────────────────────────────────────
+print("=== Available series (first 30) ===")
 try:
-    bal = client.get_balance()
-    print(f"  Balance: ${bal:.2f}  ✓ auth working")
+    data = client._get("/series", params={"limit": 30})
+    for s in data.get("series", []):
+        print(f"  {s.get('ticker','?'):30s}  {s.get('title','?')}")
 except Exception as e:
     print(f"  FAILED: {e}")
 
-# ── 2. Raw market list for today's KJFK ─────────────────────────────────────
-for d in [today, tomorrow]:
-    event = build_event_id("KJFK", d)
-    print(f"\n=== Raw markets for {event} ===")
-    try:
-        data    = client._get("/markets", params={"event_ticker": event, "limit": 20})
-        markets = data.get("markets", [])
-        print(f"  {len(markets)} markets")
-        if markets:
-            print("  Keys:", list(markets[0].keys()))
-            print("  First market:")
-            print(json.dumps(markets[0], indent=4))
-            print("\n  All tickers:")
-            for m in markets:
-                print(f"    {m.get('ticker','?'):45s} "
-                      f"bid={m.get('yes_bid','?'):>4}  ask={m.get('yes_ask','?'):>4}  "
-                      f"vol={m.get('volume','?'):>6}  status={m.get('status','?')}")
-    except Exception as e:
-        print(f"  FAILED: {e}")
-
-# ── 3. Parsed snapshots ──────────────────────────────────────────────────────
-print(f"\n=== Parsed snapshots KJFK {today} ===")
+# ── 2. Search events with "temperature" or "high" ────────────────────────────
+print("\n=== Events matching 'temperature' ===")
 try:
-    snaps = client.get_markets_for_station_date("KJFK", today)
-    for s in snaps:
-        print(f"  lower={s.bucket_lower:3d}  label={s.bucket_label:<18s} "
-              f"bid={s.yes_bid:.2f}  ask={s.yes_ask:.2f}  vol={s.volume}")
-    if not snaps:
-        print("  None — try tomorrow:")
-        snaps = client.get_markets_for_station_date("KJFK", tomorrow)
-        for s in snaps:
-            print(f"  lower={s.bucket_lower:3d}  label={s.bucket_label:<18s} "
-                  f"bid={s.yes_bid:.2f}  ask={s.yes_ask:.2f}  vol={s.volume}")
+    data = client._get("/events", params={"limit": 20, "status": "open"})
+    for ev in data.get("events", []):
+        t = ev.get("title", "")
+        if any(w in t.lower() for w in ["temp", "high", "weather", "kx"]):
+            print(f"  {ev.get('event_ticker','?'):40s}  {t}")
+except Exception as e:
+    print(f"  FAILED: {e}")
+
+# ── 3. Broad market search — any open market with KXHIGH or temp ─────────────
+print("\n=== Open markets matching KXHIGH ===")
+try:
+    data = client._get("/markets", params={"limit": 20, "series_ticker": "KXHIGH"})
+    markets = data.get("markets", [])
+    print(f"  {len(markets)} markets found")
+    for m in markets[:5]:
+        print(f"  {m.get('ticker','?'):50s}  {m.get('title',m.get('subtitle','?'))[:60]}")
+except Exception as e:
+    print(f"  FAILED: {e}")
+
+# ── 4. Try alternate ticker formats for JFK tomorrow ─────────────────────────
+print("\n=== Trying alternate event ticker formats ===")
+from datetime import date, timedelta
+tomorrow = date.today() + timedelta(days=1)
+
+formats = [
+    f"KXHIGHJFK-{tomorrow.strftime('%y%b%d').upper()}",
+    f"KXHIGH-JFK-{tomorrow.strftime('%y%b%d').upper()}",
+    f"HIGHTEMP-JFK-{tomorrow.strftime('%Y-%m-%d')}",
+    f"KXHIGH-KJFK-{tomorrow.strftime('%y%b%d').upper()}",
+    f"KXHIGHJFK{tomorrow.strftime('%y%b%d').upper()}",
+]
+for ticker in formats:
+    try:
+        data = client._get("/markets", params={"event_ticker": ticker, "limit": 5})
+        n = len(data.get("markets", []))
+        print(f"  {ticker:45s}  → {n} markets")
+        if n:
+            for m in data["markets"]:
+                print(f"      {m.get('ticker','?')}")
+    except Exception as e:
+        print(f"  {ticker:45s}  → ERROR: {e}")
+
+# ── 5. Raw dump of first open event to see structure ─────────────────────────
+print("\n=== First open event (raw) ===")
+try:
+    data = client._get("/events", params={"limit": 1, "status": "open"})
+    events = data.get("events", [])
+    if events:
+        print(json.dumps(events[0], indent=2))
+    else:
+        print("  No open events returned")
 except Exception as e:
     print(f"  FAILED: {e}")
