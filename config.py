@@ -8,13 +8,41 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Target stations (ICAO → GHCND mapping for NOAA CDO cross-validation)
+# Target stations
+# These are the KALSHI-SIDE labels used as keys throughout the bot.
+# They do NOT always match the actual NWS settlement station (see below).
 # ---------------------------------------------------------------------------
 STATIONS = ["KJFK", "KORD", "KMIA", "KDFW", "KLAX", "KATL", "KDEN", "KHOU"]
 
+# ---------------------------------------------------------------------------
+# Kalshi settlement stations (confirmed from rules_primary, Apr 2026)
+# CRITICAL: The bias model and all pipeline scripts must use these stations
+# for observation and forecast data — NOT the ICAO codes in STATIONS above.
+#
+# Confirmed mismatches:
+#   KJFK → KXHIGHNY settles on Central Park, NY (KNYC), NOT JFK Airport
+#   KORD → KXHIGHCHI settles on Chicago Midway (KMDW),  NOT O'Hare
+#
+# Unconfirmed (inferred from short rules excerpt):
+#   KHOU → may settle on KIAH (Bush Intercontinental) rather than KHOU (Hobby)
+#          verify by reading full rules_primary for KXHIGHTHOU
+# ---------------------------------------------------------------------------
+KALSHI_SETTLEMENT_STATION = {
+    "KJFK": "KNYC",   # Central Park, New York  — NWS WBAN: 94728
+    "KORD": "KMDW",   # Chicago Midway          — NWS WBAN: 14819
+    "KMIA": "KMIA",   # Miami International     — matches
+    "KDFW": "KDFW",   # Dallas/Fort Worth Intl  — matches (inferred)
+    "KLAX": "KLAX",   # Los Angeles Airport     — matches
+    "KATL": "KATL",   # Atlanta Hartsfield      — matches (inferred)
+    "KDEN": "KDEN",   # Denver International    — matches (inferred)
+    "KHOU": "KHOU",   # Houston Hobby           — matches (inferred; verify vs KIAH)
+}
+
+# GHCND IDs for the SETTLEMENT stations (used by build_obs_database.py)
+# Key = settlement station ICAO (from KALSHI_SETTLEMENT_STATION values)
 GHCND_IDS = {
-    "KJFK": "USW00094789",
-    "KORD": "USW00094846",
+    "KNYC": "USW00094728",   # Central Park, New York
+    "KMDW": "USW00014819",   # Chicago Midway
     "KMIA": "USW00012839",
     "KDFW": "USW00003927",
     "KLAX": "USW00023174",
@@ -23,10 +51,10 @@ GHCND_IDS = {
     "KHOU": "USW00012918",
 }
 
-# Station coordinates (lat, lon) for Open-Meteo and other coordinate-based APIs
+# Station coordinates (lat, lon) — settlement stations for Open-Meteo forecasts
 STATION_COORDS = {
-    "KJFK": (40.6413, -73.7781),
-    "KORD": (41.9742, -87.9073),
+    "KNYC": (40.7789, -73.9692),   # Central Park, New York
+    "KMDW": (41.7862, -87.7525),   # Chicago Midway
     "KMIA": (25.7959, -80.2870),
     "KDFW": (32.8998, -97.0403),
     "KLAX": (33.9425, -118.4081),
@@ -47,10 +75,11 @@ STATION_TIMEZONES = {
     "KHOU": "America/Chicago",
 }
 
-# WFO mapping for IEM AFM archive (station → WFO code)
+# WFO mapping for IEM AFM archive (Kalshi station label → WFO code)
+# KNYC and KMDW share the same WFO as KJFK and KORD respectively.
 WFO_MAP = {
-    "KJFK": "OKX",
-    "KORD": "LOT",
+    "KJFK": "OKX",   # OKX covers both JFK and Central Park
+    "KORD": "LOT",   # LOT covers both O'Hare and Midway
     "KMIA": "MFL",
     "KDFW": "FWD",
     "KLAX": "LOX",
@@ -173,6 +202,9 @@ KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_LIVE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Coastal stations — eligible for marine fog penalty
+# KJFK is the Kalshi label but the settlement station is Central Park (KNYC),
+# which is inland. Keep KJFK here so the signal engine can still apply the
+# NYC marine fog modifier (fog from the ocean still affects Central Park temps).
 COASTAL_STATIONS = {"KLAX", "KJFK", "KMIA"}
 
 # Early exit: if position bid reaches this level and high is locked in bucket
@@ -330,3 +362,26 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")   # required — set in
 # Aliases for backward compatibility
 # ---------------------------------------------------------------------------
 CLUSTER_PKL = CENTROIDS_PKL   # pattern_classifier.py uses this name
+
+
+# ---------------------------------------------------------------------------
+# Settlement station helper
+# ---------------------------------------------------------------------------
+def settlement_station(kalshi_label: str) -> str:
+    """
+    Return the NWS settlement station ICAO for a given Kalshi station label.
+    Pipeline scripts (build_obs_database, build_model_forecast_archive, etc.)
+    should use this to fetch the correct historical data.
+
+    Example:
+        settlement_station("KJFK") → "KNYC"  (Central Park, not JFK Airport)
+        settlement_station("KORD") → "KMDW"  (Midway, not O'Hare)
+        settlement_station("KMIA") → "KMIA"  (match)
+    """
+    return KALSHI_SETTLEMENT_STATION.get(kalshi_label, kalshi_label)
+
+
+# Convenience: list of unique settlement stations (for pipeline iteration)
+SETTLEMENT_STATIONS = list(dict.fromkeys(
+    KALSHI_SETTLEMENT_STATION[s] for s in STATIONS
+))
