@@ -146,10 +146,27 @@ KALSHI_BUCKET_CENTERS    = {         # bucket_lower → Kalshi center label
     77: "77",
 }
 
-# Market series format: KXHIGH{4-char-station} e.g. KXHIGHLAX
-# Event format:  KXHIGHLAX-26APR08
-# Market format: KXHIGHLAX-26APR08-B71.5
-KALSHI_SERIES_PREFIX = "KXHIGH"
+# Per-station Kalshi series tickers (confirmed from live API series list Apr 2026).
+# Each city has a unique series ticker — there is NO universal prefix.
+# Event tickers are: {series_ticker}-{YYMONDD}  e.g. KXHIGHLAX-26APR14
+# Market tickers:    {series_ticker}-{YYMONDD}-B{center}  e.g. KXHIGHLAX-26APR14-B80.5
+# Bucket centers use center of 2°F range (e.g. 80-81° → B80.5).
+# Tail buckets (floor/ceiling) use their bound value (e.g. B77, B86).
+# Bucket ranges shift by station and season — always discover dynamically via API.
+KALSHI_STATION_SERIES = {
+    "KJFK": "KXHIGHNY0",    # NYC high temperature
+    "KORD": "KXHIGHCHI",    # Highest temperature in Chicago
+    "KMIA": "KXHIGHMIA",    # Highest temperature in Miami
+    "KDFW": "KXHIGHTDAL",   # Dallas Maximum Temperature
+    "KLAX": "KXHIGHLAX",    # Highest temperature in Los Angeles
+    "KATL": "KXHIGHTATL",   # Atlanta Max Temperature
+    "KDEN": "KXHIGHDEN",    # Highest temperature in Denver
+    "KHOU": "KXHIGHTHOU",   # Daily High Temperature Houston
+}
+
+# Kept for legacy reference only — actual bucket ranges are station/date dependent.
+# Bot always uses dynamic discovery (get_markets_for_station_date) not these constants.
+KALSHI_SERIES_PREFIX = "KXHIGH"   # deprecated — use KALSHI_STATION_SERIES
 
 # Kalshi API base URLs
 KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"

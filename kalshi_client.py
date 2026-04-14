@@ -4,20 +4,19 @@ Kalshi REST API client — paper trading (demo) mode.
 Handles authentication, market lookup, order placement,
 position polling, and account balance queries.
 
-Market ID format (confirmed from live data):
-  Series:  KXHIGH{4-char}              e.g. KXHIGHLAX
-  Event:   KXHIGH{4-char}-{YY}{MON}{DD}   e.g. KXHIGHLAX-26APR08
-  Market:  KXHIGH{4-char}-{YY}{MON}{DD}-B{center}  e.g. KXHIGHLAX-26APR08-B71.5
+Market ID format (confirmed from live API, Apr 2026):
+  Series:  per-station ticker            e.g. KXHIGHLAX, KXHIGHNY0, KXHIGHCHI
+  Event:   {series}-{YYMONDD}            e.g. KXHIGHLAX-26APR14
+  Market:  {series}-{YYMONDD}-B{center}  e.g. KXHIGHLAX-26APR14-B80.5
 
-Bucket centers (2°F odd-start bins):
-  ≤68    → B68
-  69–70  → B69.5
-  71–72  → B71.5
-  73–74  → B73.5
-  75–76  → B75.5
-  ≥77    → B77
+Bucket structure (2°F wide, even-start, station/season dependent):
+  Floor:    "77° or below"  → B77    (actual floor value varies)
+  Interior: "78° to 79°"   → B78.5  (center of range)
+  Interior: "80° to 81°"   → B80.5
+  Ceiling:  "86° or above" → B86    (actual ceiling value varies)
+  Buckets are discovered dynamically per station/date — never hardcoded.
 
-Authentication: Bearer token (API key from .env → KALSHI_API_KEY)
+Authentication: RSA-PSS signed headers (KALSHI-ACCESS-KEY / SIGNATURE / TIMESTAMP)
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ from config import (
     KALSHI_DEMO_URL,
     KALSHI_LIVE_URL,
     USE_DEMO,
-    KALSHI_SERIES_PREFIX,
+    KALSHI_STATION_SERIES,
     KALSHI_BUCKET_CENTERS,
     KALSHI_BUCKET_LOWER_TAIL,
     KALSHI_BUCKET_UPPER_TAIL,
@@ -96,46 +95,55 @@ class OrderResult:
 # Market ID helpers
 # ---------------------------------------------------------------------------
 
-def _station_suffix(station: str) -> str:
-    """KJFK → JFK (drop the K prefix, 3 chars)."""
-    return station[1:] if station.startswith("K") else station
+def get_series_ticker(station: str) -> str:
+    """
+    Return the Kalshi series ticker for a station.
+    e.g. get_series_ticker("KLAX") → "KXHIGHLAX"
+         get_series_ticker("KJFK") → "KXHIGHNY0"
+    Raises KeyError if station is not in KALSHI_STATION_SERIES.
+    """
+    if station not in KALSHI_STATION_SERIES:
+        raise KeyError(
+            f"No Kalshi series ticker configured for station {station!r}. "
+            f"Known stations: {sorted(KALSHI_STATION_SERIES)}"
+        )
+    return KALSHI_STATION_SERIES[station]
 
 
 def _date_tag(d: date) -> str:
-    """date(2026,4,8) → '26APR08'"""
+    """date(2026,4,14) → '26APR14'"""
     return d.strftime("%y%b%d").upper()
 
 
+def _parse_date_from_ticker(ticker: str) -> date | None:
+    """
+    Extract event date from a market ticker.
+    e.g. "KXHIGHLAX-26APR14-B80.5" → date(2026, 4, 14)
+    Returns None if not parseable.
+    """
+    import re
+    from datetime import datetime
+    m = re.search(r"-(\d{2}[A-Z]{3}\d{2})-", ticker)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%y%b%d").date()
+    except ValueError:
+        return None
+
+
 def bucket_lower_to_center(bucket_lower: int) -> str:
-    """Map bucket lower bound to Kalshi center string."""
+    """Map bucket lower bound to Kalshi center string (legacy helper)."""
     return KALSHI_BUCKET_CENTERS.get(bucket_lower, str(bucket_lower))
 
 
-def build_market_id(station: str, event_date: date, bucket_lower: int) -> str:
-    """
-    Build Kalshi market ticker.
-    e.g. build_market_id("KLAX", date(2026,4,8), 71) → "KXHIGHLAX-26APR08-B71.5"
-    """
-    suffix = _station_suffix(station)
-    dtag   = _date_tag(event_date)
-    center = bucket_lower_to_center(bucket_lower)
-    return f"{KALSHI_SERIES_PREFIX}{suffix}-{dtag}-B{center}"
-
-
-def build_event_id(station: str, event_date: date) -> str:
-    """e.g. "KXHIGHLAX-26APR08" """
-    suffix = _station_suffix(station)
-    dtag   = _date_tag(event_date)
-    return f"{KALSHI_SERIES_PREFIX}{suffix}-{dtag}"
-
-
 def all_bucket_lowers() -> list[int]:
-    """Return all bucket lower bounds in order."""
+    """Return hardcoded bucket lower bounds (legacy — prefer dynamic discovery)."""
     return [KALSHI_BUCKET_LOWER_TAIL] + KALSHI_BUCKET_STARTS + [KALSHI_BUCKET_UPPER_TAIL]
 
 
 def bucket_label(lower: int) -> str:
-    """Human-readable bucket label."""
+    """Human-readable bucket label from lower bound (legacy fallback)."""
     if lower == KALSHI_BUCKET_LOWER_TAIL:
         return f"{lower}° or below"
     if lower == KALSHI_BUCKET_UPPER_TAIL:
@@ -315,26 +323,64 @@ class KalshiClient:
         event_date: date,
     ) -> list[MarketSnapshot]:
         """
-        Dynamically discover all available bucket markets from Kalshi for a
-        station + date, parse actual boundaries from the response, and return
-        a list of MarketSnapshot objects sorted by bucket_min.
+        Dynamically discover all bucket markets from Kalshi for a station + date.
 
-        This replaces the hardcoded all_bucket_lowers() approach so the signal
-        logic is correct regardless of how Kalshi structures buckets that day.
+        Strategy:
+          1. Look up the correct series ticker for the station (e.g. KXHIGHNY0 for KJFK).
+          2. Query GET /markets?series_ticker=...&status=open&limit=100 to get all open
+             markets in the series (today's and possibly tomorrow's buckets).
+          3. Filter to markets whose ticker contains the event_date string.
+          4. Parse bucket boundaries from title text (most reliable) or ticker center.
+
+        Returns MarketSnapshot list sorted by bucket_lower ascending.
         """
-        event_ticker = build_event_id(station, event_date)
         try:
-            data = self._get("/markets", params={"event_ticker": event_ticker, "limit": 50})
+            series_ticker = get_series_ticker(station)
+        except KeyError as exc:
+            logger.error("%s", exc)
+            return []
+
+        date_tag = _date_tag(event_date)   # e.g. "26APR14"
+
+        # Step 1: try event_ticker query (most precise — single event's buckets)
+        event_ticker = f"{series_ticker}-{date_tag}"
+        raw_markets: list[dict] = []
+
+        try:
+            data = self._get("/markets", params={"event_ticker": event_ticker, "limit": 100})
+            raw_markets = data.get("markets", [])
+            logger.debug(
+                "event_ticker=%s → %d markets", event_ticker, len(raw_markets)
+            )
         except Exception as exc:
-            logger.error("get_markets_for_station_date %s %s failed: %s", station, event_date, exc)
-            return []
+            logger.warning("event_ticker query failed (%s), falling back to series query: %s", event_ticker, exc)
 
-        raw_markets = data.get("markets", [])
+        # Step 2: fallback — query by series_ticker and filter by date string in ticker
         if not raw_markets:
-            logger.warning("No markets returned for event %s", event_ticker)
-            return []
+            try:
+                data = self._get(
+                    "/markets",
+                    params={"series_ticker": series_ticker, "status": "open", "limit": 100},
+                )
+                all_in_series = data.get("markets", [])
+                raw_markets = [
+                    m for m in all_in_series
+                    if date_tag in m.get("ticker", "")
+                ]
+                logger.info(
+                    "series_ticker=%s → %d total, %d match date %s",
+                    series_ticker, len(all_in_series), len(raw_markets), date_tag,
+                )
+            except Exception as exc:
+                logger.error("series query failed for %s: %s", series_ticker, exc)
+                return []
 
-        logger.info("Event %s — %d raw markets from Kalshi", event_ticker, len(raw_markets))
+        if not raw_markets:
+            logger.warning(
+                "No markets found for %s %s (series=%s event=%s)",
+                station, event_date, series_ticker, event_ticker,
+            )
+            return []
 
         snapshots = []
         for m in raw_markets:
@@ -344,67 +390,91 @@ class KalshiClient:
 
         snapshots.sort(key=lambda s: (s.bucket_lower is None, s.bucket_lower or 0))
         logger.info(
-            "%s %s — parsed %d/%d bucket snapshots dynamically",
-            station, event_date, len(snapshots), len(raw_markets),
+            "%s %s — parsed %d/%d bucket snapshots (series=%s)",
+            station, event_date, len(snapshots), len(raw_markets), series_ticker,
         )
         return snapshots
 
     def _parse_market_snapshot(self, raw: dict, station: str) -> MarketSnapshot | None:
         """
         Parse a single raw Kalshi market dict into a MarketSnapshot.
-        Derives bucket_lower and bucket_label from the market ticker and/or title.
-        Prices are in cents (0–100) in the API; converted to 0–1 fractions here.
+
+        Bucket boundary parsing strategy (in priority order):
+          1. Title text — most reliable; Kalshi titles use plain English like
+             "80° to 81°", "77° or below", "86° or above". Works for all cities.
+          2. Ticker B-suffix — fallback for integer centers (e.g. B80.5 → 80-81°).
+             Note: tail buckets (floor/ceiling) have integer centers that are
+             NOT reliably distinguishable from interior buckets without the title.
+
+        Prices in API are in cents (0–100); converted here to 0–1 fractions.
+        Yes price = implied probability (1¢ = 1%).
         """
         import re
 
         ticker = raw.get("ticker", "")
-        title  = raw.get("title", raw.get("subtitle", ""))
+        # Kalshi uses "subtitle" for the per-bucket label (e.g. "80° to 81°")
+        # Fall back to "title" which may contain the full question
+        title  = raw.get("subtitle", raw.get("title", ""))
         status = raw.get("status", "")
 
         if not ticker:
             return None
 
-        # ── Parse bucket boundaries ───────────────────────────────────────
-        # Strategy 1: extract center from ticker suffix (e.g. "B71.5" → 71–72)
         bucket_lower: int | None = None
         bucket_label_str         = ""
 
-        center_match = re.search(r"-B([\d.]+)$", ticker)
-        if center_match:
-            center = float(center_match.group(1))
-            # Determine width by checking if it's a tail bucket
-            # Centers like 68 (floor) and 77 (ceiling) are special-cased
-            if center == KALSHI_BUCKET_LOWER_TAIL:
-                bucket_lower     = int(center)
-                bucket_label_str = f"{int(center)}° or below"
-            elif center == KALSHI_BUCKET_UPPER_TAIL:
-                bucket_lower     = int(center)
-                bucket_label_str = f"{int(center)}° or above"
-            else:
-                bucket_lower     = int(center - 0.5)   # e.g. 71.5 → 71
-                bucket_upper     = int(center + 0.5)   # e.g. 71.5 → 72
-                bucket_label_str = f"{bucket_lower}° to {bucket_upper}°"
-
-        # Strategy 2: parse from title text (catches non-standard centers)
-        if bucket_lower is None and title:
-            # "between X and Y" / "X to Y" / "above X" / "below X" / "at or below X"
-            between = re.search(r"(\d+)\s*(?:°F)?\s*(?:to|and|-)\s*(\d+)\s*(?:°F)?", title, re.I)
-            above   = re.search(r"(?:above|at or above|or above)\s+(\d+)\s*(?:°F)?", title, re.I)
-            below   = re.search(r"(?:below|at or below|or below)\s+(\d+)\s*(?:°F)?", title, re.I)
+        # ── Strategy 1: parse from title/subtitle text ────────────────────
+        # Handles: "78° to 79°", "80 to 81", "77° or below", "86° or above"
+        if title:
+            between = re.search(
+                r"(\d+)\s*°?\s*(?:to|and)\s*(\d+)\s*°?",
+                title, re.I,
+            )
+            above = re.search(
+                r"(\d+)\s*°?\s*or\s+above|above\s+(\d+)\s*°?|at\s+or\s+above\s+(\d+)\s*°?",
+                title, re.I,
+            )
+            below = re.search(
+                r"(\d+)\s*°?\s*or\s+below|below\s+(\d+)\s*°?|at\s+or\s+below\s+(\d+)\s*°?",
+                title, re.I,
+            )
 
             if between:
                 lo, hi           = int(between.group(1)), int(between.group(2))
                 bucket_lower     = lo
                 bucket_label_str = f"{lo}° to {hi}°"
-            elif above:
-                bucket_lower     = int(above.group(1))
-                bucket_label_str = f"{bucket_lower}° or above"
             elif below:
-                bucket_lower     = int(below.group(1))
-                bucket_label_str = f"{bucket_lower}° or below"
+                val              = int(next(g for g in below.groups() if g))
+                bucket_lower     = val
+                bucket_label_str = f"{val}° or below"
+            elif above:
+                val              = int(next(g for g in above.groups() if g))
+                bucket_lower     = val
+                bucket_label_str = f"{val}° or above"
+
+        # ── Strategy 2: ticker B-suffix (fallback) ────────────────────────
+        # e.g. "KXHIGHLAX-26APR14-B80.5" → center=80.5 → bucket 80-81°
+        # Interior buckets: center ends in .5 (e.g. 80.5), floor/ceiling are whole numbers.
+        # We can't reliably detect floor vs ceiling without title, so only use this
+        # for interior (.5) centers when title parsing failed.
+        if bucket_lower is None:
+            center_match = re.search(r"-B([\d.]+)$", ticker)
+            if center_match:
+                center = float(center_match.group(1))
+                if center != int(center):
+                    # Interior bucket — center is X.5
+                    lo               = int(center - 0.5)
+                    hi               = int(center + 0.5)
+                    bucket_lower     = lo
+                    bucket_label_str = f"{lo}° to {hi}°"
+                else:
+                    # Whole number — likely a tail bucket, but we can't tell which
+                    # without the title. Use generic label and let caller handle.
+                    bucket_lower     = int(center)
+                    bucket_label_str = f"{int(center)}°"
 
         if bucket_lower is None:
-            logger.debug("Could not parse bucket from ticker=%s title=%s", ticker, title)
+            logger.debug("Could not parse bucket from ticker=%s title=%r", ticker, title)
             return None
 
         # ── Prices (cents → fraction) ─────────────────────────────────────

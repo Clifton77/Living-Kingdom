@@ -1,74 +1,69 @@
 """
-Kalshi API probe — find correct event ticker format for temperature markets.
+Kalshi API probe — verify correct series tickers and live bucket discovery.
 Run:  python test_kalshi.py
 """
 import json
-from kalshi_client import KalshiClient
+from datetime import date, timedelta
+from kalshi_client import KalshiClient, get_series_ticker, _date_tag
+from config import KALSHI_STATION_SERIES
 
 client = KalshiClient(demo=False)
+today    = date.today()
+tomorrow = today + timedelta(days=1)
 
-# ── 1. List all available series ─────────────────────────────────────────────
-print("=== Available series (first 30) ===")
-try:
-    data = client._get("/series", params={"limit": 30})
-    for s in data.get("series", []):
-        print(f"  {s.get('ticker','?'):30s}  {s.get('title','?')}")
-except Exception as e:
-    print(f"  FAILED: {e}")
+# ── 1. Verify our station→series mapping ─────────────────────────────────────
+print("=== Station → Series mapping (from config) ===")
+for station, series in KALSHI_STATION_SERIES.items():
+    print(f"  {station}  →  {series}")
 
-# ── 2. Search events with "temperature" or "high" ────────────────────────────
-print("\n=== Events matching 'temperature' ===")
-try:
-    data = client._get("/events", params={"limit": 20, "status": "open"})
-    for ev in data.get("events", []):
-        t = ev.get("title", "")
-        if any(w in t.lower() for w in ["temp", "high", "weather", "kx"]):
-            print(f"  {ev.get('event_ticker','?'):40s}  {t}")
-except Exception as e:
-    print(f"  FAILED: {e}")
-
-# ── 3. Broad market search — any open market with KXHIGH or temp ─────────────
-print("\n=== Open markets matching KXHIGH ===")
-try:
-    data = client._get("/markets", params={"limit": 20, "series_ticker": "KXHIGH"})
-    markets = data.get("markets", [])
-    print(f"  {len(markets)} markets found")
-    for m in markets[:5]:
-        print(f"  {m.get('ticker','?'):50s}  {m.get('title',m.get('subtitle','?'))[:60]}")
-except Exception as e:
-    print(f"  FAILED: {e}")
-
-# ── 4. Try alternate ticker formats for JFK tomorrow ─────────────────────────
-print("\n=== Trying alternate event ticker formats ===")
-from datetime import date, timedelta
-tomorrow = date.today() + timedelta(days=1)
-
-formats = [
-    f"KXHIGHJFK-{tomorrow.strftime('%y%b%d').upper()}",
-    f"KXHIGH-JFK-{tomorrow.strftime('%y%b%d').upper()}",
-    f"HIGHTEMP-JFK-{tomorrow.strftime('%Y-%m-%d')}",
-    f"KXHIGH-KJFK-{tomorrow.strftime('%y%b%d').upper()}",
-    f"KXHIGHJFK{tomorrow.strftime('%y%b%d').upper()}",
-]
-for ticker in formats:
+# ── 2. Query each series for open markets → confirm series tickers work ───────
+print("\n=== Open markets per series (first 3 buckets each) ===")
+for station, series in KALSHI_STATION_SERIES.items():
     try:
-        data = client._get("/markets", params={"event_ticker": ticker, "limit": 5})
-        n = len(data.get("markets", []))
-        print(f"  {ticker:45s}  → {n} markets")
-        if n:
-            for m in data["markets"]:
-                print(f"      {m.get('ticker','?')}")
+        data = client._get("/markets", params={"series_ticker": series, "status": "open", "limit": 20})
+        markets = data.get("markets", [])
+        print(f"\n  {station} ({series}) → {len(markets)} open markets")
+        for m in markets[:3]:
+            ticker   = m.get("ticker", "?")
+            subtitle = m.get("subtitle", m.get("title", "?"))[:50]
+            yes_ask  = m.get("yes_ask", "?")
+            print(f"    {ticker:55s}  subtitle={subtitle!r:35s}  yes_ask={yes_ask}")
     except Exception as e:
-        print(f"  {ticker:45s}  → ERROR: {e}")
+        print(f"  {station} ({series}) → FAILED: {e}")
 
-# ── 5. Raw dump of first open event to see structure ─────────────────────────
-print("\n=== First open event (raw) ===")
+# ── 3. Live dynamic bucket discovery for today and tomorrow ──────────────────
+print("\n=== Dynamic bucket discovery (get_markets_for_station_date) ===")
+for check_date in [today, tomorrow]:
+    label = "TODAY" if check_date == today else "TOMORROW"
+    print(f"\n--- {label} ({check_date}) ---")
+    for station in list(KALSHI_STATION_SERIES)[:3]:   # first 3 stations to keep output short
+        snapshots = client.get_markets_for_station_date(station, check_date)
+        if snapshots:
+            print(f"  {station} — {len(snapshots)} buckets:")
+            for s in snapshots:
+                print(
+                    f"    {s.bucket_label:20s}  yes_ask={s.yes_ask:.2f}  "
+                    f"yes_bid={s.yes_bid:.2f}  vol={s.volume}  open={s.is_open}"
+                )
+        else:
+            print(f"  {station} — no markets found")
+
+# ── 4. Raw dump of a single bucket market to see all available fields ─────────
+print("\n=== Raw dump of first bucket market (KJFK or first available) ===")
 try:
-    data = client._get("/events", params={"limit": 1, "status": "open"})
-    events = data.get("events", [])
-    if events:
-        print(json.dumps(events[0], indent=2))
+    series  = get_series_ticker("KJFK")
+    data    = client._get("/markets", params={"series_ticker": series, "status": "open", "limit": 1})
+    markets = data.get("markets", [])
+    if markets:
+        print(json.dumps(markets[0], indent=2))
     else:
-        print("  No open events returned")
+        # Fall back to any series
+        series  = list(KALSHI_STATION_SERIES.values())[0]
+        data    = client._get("/markets", params={"series_ticker": series, "status": "open", "limit": 1})
+        markets = data.get("markets", [])
+        if markets:
+            print(json.dumps(markets[0], indent=2))
+        else:
+            print("  No open markets found")
 except Exception as e:
     print(f"  FAILED: {e}")
