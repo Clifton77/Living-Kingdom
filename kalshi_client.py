@@ -290,32 +290,19 @@ class KalshiClient:
     ) -> MarketSnapshot | None:
         """
         Fetch current bid/ask for a specific bucket market.
+        Uses dynamic discovery to find the market — avoids hardcoded ticker
+        construction which is fragile given Kalshi's per-station ticker naming.
         Returns None if market not found or not open.
         """
-        market_id = build_market_id(station, event_date, bucket_lower)
-        raw = self.get_market(market_id)
-        if not raw:
-            return None
-
-        # Kalshi prices are in cents (0–100); convert to 0–1
-        yes_bid = raw.get("yes_bid", 0) / 100.0
-        yes_ask = raw.get("yes_ask", 1) / 100.0
-        no_bid  = raw.get("no_bid",  0) / 100.0
-        no_ask  = raw.get("no_ask",  1) / 100.0
-
-        return MarketSnapshot(
-            market_id=market_id,
-            station=station,
-            bucket_lower=bucket_lower,
-            bucket_label=bucket_label(bucket_lower),
-            yes_bid=yes_bid,
-            yes_ask=yes_ask,
-            no_bid=no_bid,
-            no_ask=no_ask,
-            implied_prob=yes_ask,     # cost to buy Yes = implied probability
-            volume=raw.get("volume", 0),
-            is_open=raw.get("status", "") == "open",
+        snaps = self.get_markets_for_station_date(station, event_date)
+        for s in snaps:
+            if s.bucket_lower == bucket_lower:
+                return s
+        logger.warning(
+            "get_market_snapshot: bucket_lower=%d not found for %s %s",
+            bucket_lower, station, event_date,
         )
+        return None
 
     def get_markets_for_station_date(
         self,
@@ -400,20 +387,24 @@ class KalshiClient:
         Parse a single raw Kalshi market dict into a MarketSnapshot.
 
         Bucket boundary parsing strategy (in priority order):
-          1. Title text — most reliable; Kalshi titles use plain English like
-             "80° to 81°", "77° or below", "86° or above". Works for all cities.
-          2. Ticker B-suffix — fallback for integer centers (e.g. B80.5 → 80-81°).
-             Note: tail buckets (floor/ceiling) have integer centers that are
-             NOT reliably distinguishable from interior buckets without the title.
+          1. Title text — most reliable. Kalshi subtitles use two formats:
+             a. Short:  "81° or above", "72° or below", "79° to 80°"
+             b. Long:   "Will the high temp in LA be >73° on Apr 15, 2026?"
+                        "Will the high temp in LA be <66° on Apr 15, 2026?"
+                        "Will the high temp in LA be 72-73° on Apr 15, 2026?"
+          2. Ticker B/T-suffix — fallback.
 
-        Prices in API are in cents (0–100); converted here to 0–1 fractions.
-        Yes price = implied probability (1¢ = 1%).
+        Prices: Kalshi API v2 returns _dollars fields as strings already in
+        the 0–1 fraction range ("0.0300" = 3¢ = 3%).  Legacy integer cent
+        fields (yes_ask, yes_bid) may not be present.
+        Status: Kalshi uses "active" for tradeable markets, not "open".
+        Volume: returned as "volume_fp" (string float), not "volume".
         """
         import re
 
         ticker = raw.get("ticker", "")
-        # Kalshi uses "subtitle" for the per-bucket label (e.g. "80° to 81°")
-        # Fall back to "title" which may contain the full question
+        # Kalshi uses "subtitle" for the per-bucket label.
+        # Long-form questions appear as "title"; subtitle has the shorter version.
         title  = raw.get("subtitle", raw.get("title", ""))
         status = raw.get("status", "")
 
@@ -423,19 +414,31 @@ class KalshiClient:
         bucket_lower: int | None = None
         bucket_label_str         = ""
 
-        # ── Strategy 1: parse from title/subtitle text ────────────────────
-        # Handles: "78° to 79°", "80 to 81", "77° or below", "86° or above"
+        # ── Strategy 1: parse from subtitle / title text ──────────────────
         if title:
+            # Interior bucket: "79° to 80°", "82-83°", "72-73°"
             between = re.search(
-                r"(\d+)\s*°?\s*(?:to|and)\s*(\d+)\s*°?",
+                r"(\d+)\s*°?\s*(?:to|and|-)\s*(\d+)\s*°?",
                 title, re.I,
             )
+            # Upper tail:
+            #   Short form:  "81° or above", "above 81°", "at or above 81°"
+            #   Long form:   ">80°"  (strict greater → bucket starts at 81°)
             above = re.search(
-                r"(\d+)\s*°?\s*or\s+above|above\s+(\d+)\s*°?|at\s+or\s+above\s+(\d+)\s*°?",
+                r"(\d+)\s*°?\s*or\s+above"         # group 1: "81° or above"
+                r"|above\s+(\d+)\s*°?"             # group 2: "above 81°"
+                r"|at\s+or\s+above\s+(\d+)\s*°?"  # group 3: "at or above 81°"
+                r"|>\s*(\d+)\s*°?",                # group 4: ">80°"
                 title, re.I,
             )
+            # Lower tail:
+            #   Short form:  "72° or below", "below 72°", "at or below 72°"
+            #   Long form:   "<73°"  (strict less → bucket ends at 72°)
             below = re.search(
-                r"(\d+)\s*°?\s*or\s+below|below\s+(\d+)\s*°?|at\s+or\s+below\s+(\d+)\s*°?",
+                r"(\d+)\s*°?\s*or\s+below"         # group 1: "72° or below"
+                r"|below\s+(\d+)\s*°?"             # group 2: "below 72°"
+                r"|at\s+or\s+below\s+(\d+)\s*°?"  # group 3: "at or below 72°"
+                r"|<\s*(\d+)\s*°?",                # group 4: "<73°"
                 title, re.I,
             )
 
@@ -444,32 +447,41 @@ class KalshiClient:
                 bucket_lower     = lo
                 bucket_label_str = f"{lo}° to {hi}°"
             elif below:
-                val              = int(next(g for g in below.groups() if g))
-                bucket_lower     = val
-                bucket_label_str = f"{val}° or below"
+                g1, g2, g3, g4 = below.groups()
+                if g1 or g2 or g3:
+                    # "72° or below" → bucket_lower = 72
+                    val = int(g1 or g2 or g3)
+                    bucket_lower     = val
+                    bucket_label_str = f"{val}° or below"
+                else:
+                    # "<73°" → bucket is "72° or below" → bucket_lower = 72
+                    val = int(g4)
+                    bucket_lower     = val - 1
+                    bucket_label_str = f"{val - 1}° or below"
             elif above:
-                val              = int(next(g for g in above.groups() if g))
-                bucket_lower     = val
-                bucket_label_str = f"{val}° or above"
+                g1, g2, g3, g4 = above.groups()
+                if g1 or g2 or g3:
+                    # "81° or above" → bucket_lower = 81
+                    val = int(g1 or g2 or g3)
+                    bucket_lower     = val
+                    bucket_label_str = f"{val}° or above"
+                else:
+                    # ">80°" → bucket is "81° or above" → bucket_lower = 81
+                    val = int(g4)
+                    bucket_lower     = val + 1
+                    bucket_label_str = f"{val + 1}° or above"
 
-        # ── Strategy 2: ticker B-suffix (fallback) ────────────────────────
-        # e.g. "KXHIGHLAX-26APR14-B80.5" → center=80.5 → bucket 80-81°
-        # Interior buckets: center ends in .5 (e.g. 80.5), floor/ceiling are whole numbers.
-        # We can't reliably detect floor vs ceiling without title, so only use this
-        # for interior (.5) centers when title parsing failed.
+        # ── Strategy 2: ticker B/T-suffix (fallback) ──────────────────────
         if bucket_lower is None:
             center_match = re.search(r"-B([\d.]+)$", ticker)
             if center_match:
                 center = float(center_match.group(1))
                 if center != int(center):
-                    # Interior bucket — center is X.5
                     lo               = int(center - 0.5)
                     hi               = int(center + 0.5)
                     bucket_lower     = lo
                     bucket_label_str = f"{lo}° to {hi}°"
                 else:
-                    # Whole number — likely a tail bucket, but we can't tell which
-                    # without the title. Use generic label and let caller handle.
                     bucket_lower     = int(center)
                     bucket_label_str = f"{int(center)}°"
 
@@ -477,11 +489,29 @@ class KalshiClient:
             logger.debug("Could not parse bucket from ticker=%s title=%r", ticker, title)
             return None
 
-        # ── Prices (cents → fraction) ─────────────────────────────────────
-        yes_bid = raw.get("yes_bid", 0) / 100.0
-        yes_ask = raw.get("yes_ask", 100) / 100.0
-        no_bid  = raw.get("no_bid",  0) / 100.0
-        no_ask  = raw.get("no_ask",  100) / 100.0
+        # ── Prices ────────────────────────────────────────────────────────
+        # Kalshi API v2: prices in *_dollars fields as strings, already 0–1.
+        # ("0.0300" = $0.03 = 3¢ = 3% implied probability)
+        # Fall back to integer cent fields if _dollars fields are absent.
+        if "yes_ask_dollars" in raw:
+            yes_bid = float(raw.get("yes_bid_dollars", "0"))
+            yes_ask = float(raw.get("yes_ask_dollars", "1"))
+            no_bid  = float(raw.get("no_bid_dollars",  "0"))
+            no_ask  = float(raw.get("no_ask_dollars",  "1"))
+        else:
+            yes_bid = raw.get("yes_bid", 0)   / 100.0
+            yes_ask = raw.get("yes_ask", 100) / 100.0
+            no_bid  = raw.get("no_bid",  0)   / 100.0
+            no_ask  = raw.get("no_ask",  100) / 100.0
+
+        # ── Volume ────────────────────────────────────────────────────────
+        # API v2: "volume_fp" (string float). Legacy: "volume" (int).
+        vol_raw = raw.get("volume_fp") or raw.get("volume", 0)
+        volume  = int(float(vol_raw)) if vol_raw else 0
+
+        # ── Status ────────────────────────────────────────────────────────
+        # Kalshi uses "active" for tradeable markets. Accept both for safety.
+        is_open = status in ("open", "active")
 
         return MarketSnapshot(
             market_id    = ticker,
@@ -493,8 +523,8 @@ class KalshiClient:
             no_bid       = no_bid,
             no_ask       = no_ask,
             implied_prob = yes_ask,
-            volume       = raw.get("volume", 0),
-            is_open      = status == "open",
+            volume       = volume,
+            is_open      = is_open,
         )
 
     def get_all_snapshots(
