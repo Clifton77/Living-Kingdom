@@ -154,7 +154,7 @@ KALSHI_BUCKET_CENTERS    = {         # bucket_lower → Kalshi center label
 # Tail buckets (floor/ceiling) use their bound value (e.g. B77, B86).
 # Bucket ranges shift by station and season — always discover dynamically via API.
 KALSHI_STATION_SERIES = {
-    "KJFK": "KXHIGHJFK",    # NYC/JFK high temperature
+    "KJFK": "KXHIGHNY",     # NYC high temperature (settles on NWS LCD, likely KLGA or KNYC)
     "KORD": "KXHIGHCHI",    # Highest temperature in Chicago
     "KMIA": "KXHIGHMIA",    # Highest temperature in Miami
     "KDFW": "KXHIGHTDAL",   # Dallas Maximum Temperature

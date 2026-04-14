@@ -85,28 +85,49 @@ try:
 except Exception as _e:
     print(f"  FAILED: {_e}")
 
-# ── 6. NYC/KJFK series probe — find the correct series ticker ────────────────
-# KXHIGHNY0 and KXHIGHJFK both return 0 open markets.
-# Try all plausible NYC candidates to find which one is active.
-print("\n=== NYC/KJFK series probe (finding correct series ticker) ===")
-_nyc_candidates = [
-    "KXHIGHNY", "KXHIGHNY0", "KXHIGHNY1", "KXHIGHNY2",
-    "KXHIGHNYC", "KXHIGHNYD", "KXHIGHJFK", "KXHIGHTNY",
-    "KXHIGHTNYC", "KXHIGHTJFK",
-]
-for _s in _nyc_candidates:
-    try:
-        _d = client._get("/markets", params={"series_ticker": _s, "status": "open", "limit": 3})
-        _m = _d.get("markets", [])
-        if _m:
-            print(f"  ✓ {_s} → {len(_m)} open markets  first: {_m[0].get('ticker','?')}")
-        else:
-            print(f"  ✗ {_s} → 0 open markets")
-    except Exception as _e:
-        print(f"  ! {_s} → ERROR: {_e}")
+# ── 6. KXHIGHNY full bucket list + settlement station check ──────────────────
+# KXHIGHNY confirmed active. Show all buckets and check rules_primary
+# to identify which weather station Kalshi uses for settlement.
+print("\n=== KXHIGHNY: all open markets + settlement station ===")
+try:
+    _d = client._get("/markets", params={"series_ticker": "KXHIGHNY", "status": "open", "limit": 50})
+    _mkts = _d.get("markets", [])
+    print(f"  Total open markets: {len(_mkts)}")
+    for _m in _mkts:
+        _tk  = _m.get("ticker", "?")
+        _sub = _m.get("subtitle", _m.get("title", "?"))[:60]
+        _ask = _m.get("yes_ask_dollars", "?")
+        print(f"    {_tk:55s}  subtitle={_sub!r:45s}  ask={_ask}")
+    # Show settlement rules for first market
+    if _mkts:
+        _first = _mkts[0]
+        print(f"\n  rules_primary: {_first.get('rules_primary','?')[:200]}")
+        print(f"  event_ticker:  {_first.get('event_ticker','?')}")
+except Exception as _e:
+    print(f"  FAILED: {_e}")
 
-# ── 7. Scan for ALL active high-temp series via events endpoint ───────────────
-# Searches /events for temperature-related events to find any we may have missed.
+# ── 7. Settlement station audit — check rules_primary for each series ────────
+# Kalshi KXHIGHCHI settles on Chicago Midway (KMDW), NOT O'Hare (KORD).
+# This section fetches one market per station series to see which NWS station
+# each Kalshi series settles on, so we can align our model training data.
+print("\n=== Settlement station audit (rules_primary per series) ===")
+for _station, _series in KALSHI_STATION_SERIES.items():
+    try:
+        _d = client._get("/markets", params={"series_ticker": _series, "status": "open", "limit": 1})
+        _mkts = _d.get("markets", [])
+        if _mkts:
+            _rules = _mkts[0].get("rules_primary", "")
+            # Extract station name: look for "recorded at {LOCATION}" pattern
+            import re as _re
+            _loc = _re.search(r"recorded at ([^,]+(?:,\s*[A-Z]{2})?)", _rules)
+            _loc_str = _loc.group(1).strip() if _loc else _rules[:80]
+            print(f"  {_station} ({_series:15s}) → settles on: {_loc_str}")
+        else:
+            print(f"  {_station} ({_series:15s}) → no open markets")
+    except Exception as _e:
+        print(f"  {_station} → FAILED: {_e}")
+
+# ── 8. Scan for ALL active high-temp series via events endpoint ───────────────
 print("\n=== Event scan: all open KXHIGH* events (first 30) ===")
 try:
     _d = client._get("/events", params={"status": "open", "limit": 100, "with_nested_markets": "false"})
