@@ -49,21 +49,37 @@ for check_date in [today, tomorrow]:
             print(f"  {station} — no markets found")
 
 # ── 4. Raw dump of a single bucket market to see all available fields ─────────
-print("\n=== Raw dump of first bucket market (KJFK or first available) ===")
+# Use KORD as anchor (confirmed working), then try other stations as fallback.
+# Purpose: see exact field names for status, yes_ask, yes_bid, no_ask, no_bid.
+print("\n=== Raw dump of first open bucket market (all fields) ===")
+_dump_done = False
+for _station in ["KJFK", "KORD", "KMIA", "KDFW", "KLAX"]:
+    try:
+        _series = get_series_ticker(_station)
+        _data   = client._get("/markets", params={"series_ticker": _series, "status": "open", "limit": 3})
+        _mkts   = _data.get("markets", [])
+        if _mkts:
+            print(f"  Station: {_station}  Series: {_series}  ({len(_mkts)} open returned)")
+            print(json.dumps(_mkts[0], indent=2))
+            _dump_done = True
+            break
+    except Exception as _e:
+        print(f"  {_station} FAILED: {_e}")
+if not _dump_done:
+    print("  No open markets found for any station")
+
+# ── 5. Individual market GET (single ticker) — may include different fields ───
+print("\n=== Single-market GET for first open KORD market ===")
 try:
-    series  = get_series_ticker("KJFK")
-    data    = client._get("/markets", params={"series_ticker": series, "status": "open", "limit": 1})
-    markets = data.get("markets", [])
-    if markets:
-        print(json.dumps(markets[0], indent=2))
+    _series = get_series_ticker("KORD")
+    _data   = client._get("/markets", params={"series_ticker": _series, "status": "open", "limit": 1})
+    _mkts   = _data.get("markets", [])
+    if _mkts:
+        _ticker = _mkts[0].get("ticker", "")
+        print(f"  Fetching /markets/{_ticker}")
+        _single = client._get(f"/markets/{_ticker}")
+        print(json.dumps(_single, indent=2))
     else:
-        # Fall back to any series
-        series  = list(KALSHI_STATION_SERIES.values())[0]
-        data    = client._get("/markets", params={"series_ticker": series, "status": "open", "limit": 1})
-        markets = data.get("markets", [])
-        if markets:
-            print(json.dumps(markets[0], indent=2))
-        else:
-            print("  No open markets found")
-except Exception as e:
-    print(f"  FAILED: {e}")
+        print("  No open KORD markets to fetch individually")
+except Exception as _e:
+    print(f"  FAILED: {_e}")
