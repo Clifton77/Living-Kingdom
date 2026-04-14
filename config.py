@@ -236,6 +236,11 @@ LIQUIDITY_MAX_RETRIES        = 4    # give up after 4 attempts (~1 hour total wi
 # Signal freshness — re-run calculation if last signal is older than this
 STALE_SIGNAL_HOURS = 4
 
+# Price opportunity scanner — re-checks Kalshi prices against last signal's model distribution
+# Catches intraday price drops that create new edge opportunities between Tier 3 cycles.
+# No model recomputation — just fresh price fetch + edge recalculation.
+PRICE_SCAN_INTERVAL_MIN = 60   # check every hour; no new entries within MARKET_OPEN_UTC_MINUTE window
+
 # Market schedule (UTC)
 MARKET_OPEN_UTC_HOUR   = 14   # Kalshi opens Day-1 markets at 14:00 UTC (10 AM EDT)
 MARKET_OPEN_UTC_MINUTE = 5    # fire 5 min after open to let liquidity settle
