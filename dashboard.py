@@ -131,6 +131,15 @@ def _get_full_state() -> dict:
         k: getattr(cfg, k) for k in _ADJUSTABLE_SETTINGS
     }
 
+    # Bias table last-updated timestamp
+    bias_updated = "—"
+    if os.path.exists(cfg.BIAS_PARQUET):
+        try:
+            ts = os.path.getmtime(cfg.BIAS_PARQUET)
+            bias_updated = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            pass
+
     return {
         "summary":      summary,
         "positions":    positions_out,
@@ -145,6 +154,8 @@ def _get_full_state() -> dict:
             k: {"label": v[0], "min": v[1], "max": v[2], "value": getattr(cfg, k)}
             for k, v in _ADJUSTABLE_SETTINGS.items()
         },
+        "city_names":      dict(cfg.STATION_CITY_NAMES),
+        "bias_updated":    bias_updated,
     }
 
 
@@ -279,6 +290,56 @@ def close_all():
 
     push_event("state_update", rm.summary())
     return jsonify({"ok": True, "results": results})
+
+
+@app.route("/api/rebuild-bias", methods=["POST"])
+@_require_auth
+def rebuild_bias():
+    """
+    Trigger a bias table rebuild in a background thread.
+    Progress arrives via SSE events: bias_rebuild_start → bias_rebuild_done.
+    """
+    import subprocess
+    import sys
+
+    def _run():
+        push_event("bias_rebuild_start", {"message": "Bias table rebuild started…"})
+        try:
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "scripts", "build_bias_table.py")
+            result = subprocess.run(
+                [sys.executable, script],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                timeout=120,
+            )
+            if result.returncode == 0:
+                # Refresh timestamp
+                bias_updated = "—"
+                if os.path.exists(cfg.BIAS_PARQUET):
+                    try:
+                        ts = os.path.getmtime(cfg.BIAS_PARQUET)
+                        bias_updated = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    except Exception:
+                        pass
+                push_event("bias_rebuild_done", {
+                    "ok": True,
+                    "message": "Bias table rebuilt successfully.",
+                    "bias_updated": bias_updated,
+                })
+                logger.info("Bias table rebuild completed via dashboard")
+            else:
+                err = (result.stderr or result.stdout or "Unknown error")[-500:]
+                push_event("bias_rebuild_done", {"ok": False, "message": f"Rebuild failed: {err}"})
+                logger.warning("Bias rebuild failed: %s", err)
+        except subprocess.TimeoutExpired:
+            push_event("bias_rebuild_done", {"ok": False, "message": "Rebuild timed out (>2 min)."})
+        except Exception as exc:
+            push_event("bias_rebuild_done", {"ok": False, "message": str(exc)})
+            logger.error("Bias rebuild exception: %s", exc)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "message": "Rebuild started — progress via SSE"})
 
 
 @app.route("/api/settings", methods=["GET"])

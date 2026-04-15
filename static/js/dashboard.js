@@ -10,13 +10,21 @@ let pendingCloseMarketId = null;
 let tradeHistoryOffset   = 0;
 const HISTORY_PAGE_SIZE  = 20;
 const STATION_CITIES = {
-  KJFK: 'New York', KORD: 'Chicago', KMIA: 'Miami',   KDFW: 'Dallas',
-  KLAX: 'Los Angeles', KATL: 'Atlanta', KDEN: 'Denver', KHOU: 'Houston'
+  KJFK: 'New York',      KORD: 'Chicago',       KMIA: 'Miami',         KDFW: 'Dallas',
+  KLAX: 'Los Angeles',   KATL: 'Atlanta',        KDEN: 'Denver',        KHOU: 'Houston',
+  KAUS: 'Austin',        KPHL: 'Philadelphia',   KBOS: 'Boston',        KDCA: 'Washington DC',
+  KLAS: 'Las Vegas',     KMSP: 'Minneapolis',    KMSY: 'New Orleans',   KOKC: 'Oklahoma City',
+  KPHX: 'Phoenix',       KSAT: 'San Antonio',    KSEA: 'Seattle',       KSFO: 'San Francisco',
 };
 const STATION_TZ = {
-  KJFK: 'America/New_York',  KMIA: 'America/New_York',  KATL: 'America/New_York',
-  KORD: 'America/Chicago',   KDFW: 'America/Chicago',   KHOU: 'America/Chicago',
-  KDEN: 'America/Denver',    KLAX: 'America/Los_Angeles',
+  KJFK: 'America/New_York',    KMIA: 'America/New_York',    KATL: 'America/New_York',
+  KPHL: 'America/New_York',    KBOS: 'America/New_York',    KDCA: 'America/New_York',
+  KORD: 'America/Chicago',     KDFW: 'America/Chicago',     KHOU: 'America/Chicago',
+  KAUS: 'America/Chicago',     KMSP: 'America/Chicago',     KMSY: 'America/Chicago',
+  KOKC: 'America/Chicago',     KSAT: 'America/Chicago',
+  KDEN: 'America/Denver',      KPHX: 'America/Phoenix',
+  KLAX: 'America/Los_Angeles', KLAS: 'America/Los_Angeles',
+  KSEA: 'America/Los_Angeles', KSFO: 'America/Los_Angeles',
 };
 
 // ── Time / locale helpers ────────────────────────────────────
@@ -139,6 +147,24 @@ function initSSE() {
     });
   });
 
+  src.addEventListener('bias_rebuild_start', e => {
+    const d = JSON.parse(e.data);
+    showToast('Bias Rebuild', d.message, 'info');
+  });
+
+  src.addEventListener('bias_rebuild_done', e => {
+    const d = JSON.parse(e.data);
+    const btn = document.getElementById('btn-rebuild-bias');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '⟳ Bias';
+      if (d.bias_updated) {
+        btn.title = `Rebuild bias table from latest obs/forecast data. Last updated: ${d.bias_updated}`;
+      }
+    }
+    showToast('Bias Rebuild', d.message, d.ok ? 'success' : 'danger');
+  });
+
   src.addEventListener('alert', e => {
     const a = JSON.parse(e.data);
     showToast(a.title, a.message, alertBootstrapClass(a.level));
@@ -231,6 +257,7 @@ function buildPositionCardInner(mid, pos) {
     <div class="d-flex justify-content-between align-items-start mb-2">
       <div>
         <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
         <span class="ms-2 text-muted">${fmtBucket(pos.bucket_lower)}</span>
       </div>
@@ -397,6 +424,22 @@ async function runSignalPass() {
     setTimeout(() => {
       if (btn) { btn.disabled = false; btn.textContent = '↻ Run Signal'; }
     }, 8000);
+  }
+}
+
+async function rebuildBiasTable() {
+  const btn = document.getElementById('btn-rebuild-bias');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Building…';
+  }
+  try {
+    const res  = await fetch('/api/rebuild-bias', { method: 'POST' });
+    const data = await res.json();
+    showToast('Bias Rebuild', data.message, 'info');
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+    if (btn) { btn.disabled = false; btn.textContent = '⟳ Bias'; }
   }
 }
 

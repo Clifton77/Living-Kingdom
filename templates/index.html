@@ -43,6 +43,12 @@
       ↻ Run Signal
     </button>
 
+    <!-- Rebuild bias -->
+    <button class="btn btn-sm btn-outline-info" id="btn-rebuild-bias" onclick="rebuildBiasTable()"
+            title="Rebuild bias table from latest obs/forecast data. Last updated: {{ initial_state.bias_updated }}">
+      ⟳ Bias
+    </button>
+
     <!-- Close all -->
     <button class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal-close-all">
       ✕ Close All
@@ -68,39 +74,39 @@
   <div class="row g-2" id="summary-strip">
     {% set s = initial_state.summary %}
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card wb-stat-card-bankroll card h-100 p-2 text-center">
         <div class="wb-stat-label">Bankroll</div>
         <div class="wb-stat-value" id="stat-bankroll">${{ "%.2f"|format(s.bankroll) }}</div>
       </div>
     </div>
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card wb-stat-card-available card h-100 p-2 text-center">
         <div class="wb-stat-label">Available</div>
         <div class="wb-stat-value" id="stat-available">${{ "%.2f"|format(s.available_capital) }}</div>
       </div>
     </div>
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card {% if s.daily_pnl >= 0 %}wb-stat-card-pnl-pos{% else %}wb-stat-card-pnl-neg{% endif %} card h-100 p-2 text-center">
         <div class="wb-stat-label">Daily P/L</div>
         <div class="wb-stat-value {% if s.daily_pnl >= 0 %}text-success{% else %}text-danger{% endif %}"
              id="stat-daily-pnl">${{ "%+.2f"|format(s.daily_pnl) }}</div>
       </div>
     </div>
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card {% if s.realized_pnl >= 0 %}wb-stat-card-pnl-pos{% else %}wb-stat-card-pnl-neg{% endif %} card h-100 p-2 text-center">
         <div class="wb-stat-label">Total P/L</div>
         <div class="wb-stat-value {% if s.realized_pnl >= 0 %}text-success{% else %}text-danger{% endif %}"
              id="stat-total-pnl">${{ "%+.2f"|format(s.realized_pnl) }}</div>
       </div>
     </div>
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card wb-stat-card-winrate card h-100 p-2 text-center">
         <div class="wb-stat-label">Win Rate</div>
         <div class="wb-stat-value" id="stat-win-rate">{{ s.win_rate }}%</div>
       </div>
     </div>
     <div class="col-6 col-sm-4 col-md-2">
-      <div class="wb-stat-card card h-100 p-2 text-center">
+      <div class="wb-stat-card wb-stat-card-open card h-100 p-2 text-center">
         <div class="wb-stat-label">Open</div>
         <div class="wb-stat-value" id="stat-open">{{ s.open_positions }}</div>
       </div>
@@ -218,11 +224,12 @@
           <!-- ── Header row ── -->
           <div class="d-flex justify-content-between align-items-start mb-1">
             <div>
-              <span class="fw-bold fs-5">{{ station }}</span>
-              <span class="text-muted ms-2">
-                {{ {'KJFK':'New York','KORD':'Chicago','KMIA':'Miami','KDFW':'Dallas',
-                    'KLAX':'Los Angeles','KATL':'Atlanta','KDEN':'Denver','KHOU':'Houston'}[station] }}
-              </span>
+              <div class="d-flex align-items-baseline gap-2">
+                <span class="fw-bold fs-5">{{ station }}</span>
+                <span class="text-muted fw-semibold">
+                  {{ initial_state.city_names.get(station, station) }}
+                </span>
+              </div>
               {% if sig %}
               <div class="text-muted small">{{ sig.local_time if sig.local_time else '—' }}</div>
               {% endif %}
@@ -230,11 +237,15 @@
             <div class="d-flex align-items-start gap-2">
               {% if sig and sig.metar %}
               {% set wx_cond = (sig.taf.weather_condition if sig.taf else 'clear') | replace(' ', '_') %}
-              <div class="wb-weather-mini">
-                <div class="wb-wx-icon wb-wx-{{ wx_cond }}"></div>
-                <div class="wb-wx-stats">
-                  <div class="wb-wx-temp">{{ sig.metar.temp_f | int }}°F</div>
-                  <div class="wb-wx-wind">{{ sig.metar.wind_speed_kt | int }}kt</div>
+              {% set temp_val = sig.metar.temp_f | int %}
+              {% set temp_cls = 'cold' if temp_val < 45 else ('warm' if temp_val > 80 else ('hot' if temp_val > 95 else 'mild')) %}
+              <div class="wb-weather-expanded">
+                <div class="wb-wx-icon wb-wx-{{ wx_cond }} mb-1"></div>
+                <div class="wb-wx-grid">
+                  <span class="wb-wx-temp wb-temp-{{ temp_cls }}">{{ temp_val }}°F</span>
+                  <span class="wb-wx-badge">{{ sig.taf.ceiling_category if sig.taf else sig.metar.sky_condition }}</span>
+                  <span class="wb-wx-wind">{{ sig.metar.wind_speed_kt | int }}kt</span>
+                  <span class="wb-wx-badge">DP {{ sig.metar.dewpoint_f | int }}°F</span>
                 </div>
               </div>
               {% endif %}
@@ -248,14 +259,37 @@
 
           {% if sig %}
           <!-- ── Forecast + cluster ── -->
-          <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+          <div class="d-flex flex-wrap align-items-baseline gap-2 mb-1">
             <span class="text-muted small">Bias-adj. forecast</span>
-            <span class="fw-bold fs-5">{{ "%.0f"|format(sig.forecast_adjusted) }}°F</span>
+            {% set fcst_val = sig.forecast_adjusted | int %}
+            {% set fcst_cls = 'cold' if fcst_val < 45 else ('warm' if fcst_val > 80 else ('hot' if fcst_val > 95 else 'mild')) %}
+            <span class="fw-bold fs-5 wb-temp-{{ fcst_cls }}">{{ "%.0f"|format(sig.forecast_adjusted) }}°F</span>
             <span class="text-muted">±{{ "%.1f"|format(sig.bias_std) }}°F</span>
+            {% if sig.model_divergence_f is not none %}
+            <span class="badge {% if sig.model_divergence_f > 2 %}bg-warning text-dark{% elif sig.model_divergence_f < -2 %}bg-info text-dark{% else %}bg-secondary{% endif %} wb-mos-badge"
+                  title="NWS AFM vs GFS-MOS forecast divergence">
+              NWS {{ "%+.0f"|format(sig.model_divergence_f) }}°F vs MOS
+            </span>
+            {% endif %}
             <span class="text-muted small ms-auto">
               Cluster {{ sig.cluster_id }} · {{ sig.season }} · n={{ sig.n_obs }}
             </span>
           </div>
+
+          <!-- ── Intraday tracking ── -->
+          {% if sig.metar %}
+          {% set obs_t = sig.metar.temp_f | float %}
+          {% set div_f = obs_t - sig.forecast_adjusted | float %}
+          {% set div_cls = 'hot' if div_f > 4 else ('cold' if div_f < -4 else 'ok') %}
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="text-muted small">Obs tracking</span>
+            <span class="fw-semibold small">{{ obs_t | int }}°F</span>
+            <span class="wb-divergence-flag wb-divergence-{{ div_cls }}">
+              {{ "%+.0f"|format(div_f) }}°F
+              {% if div_cls == 'hot' %} ▲{% elif div_cls == 'cold' %} ▼{% else %} ≈{% endif %}
+            </span>
+          </div>
+          {% endif %}
 
           <!-- ── Top bucket row ── -->
           <div class="wb-bucket-highlight rounded p-2 mb-2">

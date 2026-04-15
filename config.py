@@ -122,6 +122,30 @@ STATION_COORDS = {
     "KSFO": (37.6213, -122.3790),   # San Francisco International
 }
 
+# Human-readable city names for display (Kalshi station label → city)
+STATION_CITY_NAMES = {
+    "KJFK": "New York",
+    "KORD": "Chicago",
+    "KMIA": "Miami",
+    "KDFW": "Dallas",
+    "KLAX": "Los Angeles",
+    "KATL": "Atlanta",
+    "KDEN": "Denver",
+    "KHOU": "Houston",
+    "KAUS": "Austin",
+    "KPHL": "Philadelphia",
+    "KBOS": "Boston",
+    "KDCA": "Washington DC",
+    "KLAS": "Las Vegas",
+    "KMSP": "Minneapolis",
+    "KMSY": "New Orleans",
+    "KOKC": "Oklahoma City",
+    "KPHX": "Phoenix",
+    "KSAT": "San Antonio",
+    "KSEA": "Seattle",
+    "KSFO": "San Francisco",
+}
+
 # Station timezones (for display conversion from UTC)
 STATION_TIMEZONES = {
     # Original 8
