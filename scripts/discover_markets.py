@@ -21,7 +21,7 @@ import json
 import time
 from datetime import date
 
-# Windows consoles default to cp1252 — force UTF-8 for safe printing
+# Windows consoles default to cp1252 -- force UTF-8 for safe printing
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -40,7 +40,7 @@ TEMP_PREFIXES = ("KXHIGH",)
 # Matches any ICAO-style 4-letter code starting with K
 ICAO_RE = re.compile(r"\b(K[A-Z]{3})\b")
 
-# NWS well-known station → coordinates (lat, lon)
+# NWS well-known station -> coordinates (lat, lon)
 # Used to look up WFO if we can identify the settlement station
 KNOWN_NWS_COORDS: dict[str, tuple[float, float]] = {
     "KNYC": (40.7789, -73.9692),
@@ -113,7 +113,7 @@ def _fetch_all_series(client: KalshiClient) -> set[str]:
             cursor = data.get("cursor")
             page  += 1
             logger.info(
-                "  %s* — page %d: %d events, %d matching, %d total so far",
+                "  %s* -- page %d: %d events, %d matching, %d total so far",
                 prefix, page, len(events), len(matches), len(found),
             )
 
@@ -277,7 +277,7 @@ def discover_all_series(client: KalshiClient) -> dict:
 
     if new_found:
         print(f"\n{'-'*72}")
-        print("  NEW SERIES — DETAILED SCAN")
+        print("  NEW SERIES -- DETAILED SCAN")
         print(f"{'-'*72}")
 
         for series in new_found:
@@ -301,13 +301,13 @@ def discover_all_series(client: KalshiClient) -> dict:
                 candidate = info["icao_hints"][0]
                 wfo = _lookup_wfo(candidate)
                 info["wfo_hint"] = wfo
-                print(f"    WFO     : {wfo or '(unknown — add coordinates to KNOWN_NWS_COORDS)'}")
+                print(f"    WFO     : {wfo or '(unknown -- add coordinates to KNOWN_NWS_COORDS)'}")
             else:
                 info["wfo_hint"] = None
 
             time.sleep(0.3)
     else:
-        print("\n  No new series found — all active KXHIGH* series are configured.")
+        print("\n  No new series found -- all active KXHIGH* series are configured.")
 
     return {
         "known":     known_found,
@@ -326,7 +326,7 @@ def _print_config_snippet(new_details: list[dict]) -> None:
     print("  CONFIG.PY ADDITIONS  (review settlement station from rules before adding)")
     print(f"{'='*72}")
 
-    print("\n# KALSHI_STATION_SERIES  — pick a short Kalshi label (e.g. KSEA, KPHX):")
+    print("\n# KALSHI_STATION_SERIES  -- pick a short Kalshi label (e.g. KSEA, KPHX):")
     for info in new_details:
         s      = info["series_ticker"]
         city   = info.get("city_hint", "???")
@@ -335,20 +335,20 @@ def _print_config_snippet(new_details: list[dict]) -> None:
         icao   = (info.get("icao_hints") or ["K???"])[0]
         print(f'    "{label}": "{s}",   # {city} {mtype}')
 
-    print("\n# KALSHI_SETTLEMENT_STATION  — VERIFY from full rules_primary:")
+    print("\n# KALSHI_SETTLEMENT_STATION  -- VERIFY from full rules_primary:")
     for info in new_details:
-        icao     = info.get("icao_hints", ["K???"])[0]
-        city     = info.get("city_hint", "???")
-        print(f'    "K???": "{icao}",   # {city} — confirm from rules')
+        icao = (info.get("icao_hints") or ["K???"])[0]
+        city = info.get("city_hint", "???")
+        print(f'    "K???": "{icao}",   # {city} -- confirm from rules')
 
-    print("\n# GHCND_IDS  — look up at https://www.ncdc.noaa.gov/cdo-web/search:")
+    print("\n# GHCND_IDS  -- look up at https://www.ncdc.noaa.gov/cdo-web/search:")
     for info in new_details:
-        icao = info.get("icao_hints", ["K???"])[0]
+        icao = (info.get("icao_hints") or ["K???"])[0]
         print(f'    "{icao}": "USW000XXXXX",   # look up GHCND station ID')
 
     print("\n# STATION_COORDS  (lat, lon):")
     for info in new_details:
-        icao = info.get("icao_hints", ["K???"])[0]
+        icao = (info.get("icao_hints") or ["K???"])[0]
         print(f'    "{icao}": (XX.XXXX, -XXX.XXXX),')
 
     print("\n# WFO_MAP:")
@@ -381,7 +381,7 @@ def main() -> None:
     out_path = os.path.join("data", "raw", "discovered_series.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
-    print(f"\n  Full results saved → {out_path}")
+    print(f"\n  Full results saved -> {out_path}")
     print(f"  Scan date: {results['scan_date']}\n")
 
 
