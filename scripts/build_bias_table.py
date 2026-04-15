@@ -4,10 +4,17 @@ Script 5: Build conditional bias correction table.
 Joins:
   obs_daily.parquet      (station, date, tmax_observed_f)
   pattern_labels.parquet (date, season, cluster_id)
-  model_fcst.parquet     (station, date, forecast_tmax_f, source)
+  model_fcst.parquet     (station, date, forecast_tmax_f, model_source)
 
-Groups by (station, month, cluster_id, model_bin) and computes:
+Groups by (station, month, cluster_id, model_bin, model_source) and computes:
   bias_mean, bias_std, bias_skew, n_obs
+
+Two bias distributions per regime cell:
+  model_source='IEM_AFM'  — bias relative to the human NWS AFM forecast
+  model_source='GFS_MOS'  — bias relative to the raw GFS-MOS model guidance
+
+The signal engine uses both: IEM_AFM for the primary forecast, GFS_MOS to
+compute the AFM-vs-MOS divergence signal (forecaster overriding the model).
 
 Output: data/bias_table.parquet
 
@@ -97,13 +104,18 @@ def build_bias_table() -> None:
     merged = pd.merge(obs_df, pat_df[["date", "season", "cluster_id"]], on="date", how="inner")
     logger.info("After obs×pattern join: %d rows", len(merged))
 
-    # Join × forecasts (station + date)
+    # Join × forecasts (station + date), preserving model_source
+    # model_source='ERA5' rows are kept — they fill gaps in both IEM_AFM and GFS_MOS.
+    # The bias table will have separate cells per model_source.
+    model_source_col = "model_source" if "model_source" in fcst_df.columns else "source"
     merged = pd.merge(
         merged,
-        fcst_df[["station", "date", "forecast_tmax_f"]],
+        fcst_df[["station", "date", "forecast_tmax_f", model_source_col]],
         on=["station", "date"],
         how="inner",
     )
+    if model_source_col == "source":
+        merged = merged.rename(columns={"source": "model_source"})
     logger.info("After forecast join: %d rows", len(merged))
 
     # Drop rows with missing values
@@ -115,8 +127,8 @@ def build_bias_table() -> None:
     merged["month"] = merged["date"].dt.month
     merged["model_bin"] = merged["forecast_tmax_f"].apply(bin_forecast)
 
-    # Group and compute stats
-    group_cols = ["station", "month", "season", "cluster_id", "model_bin"]
+    # Group and compute stats — separate bias distribution per model source
+    group_cols = ["station", "month", "season", "cluster_id", "model_bin", "model_source"]
     logger.info("Grouping by %s...", group_cols)
 
     def _std(x):
@@ -142,13 +154,14 @@ def build_bias_table() -> None:
     )
 
     # Cast types
-    bias_table["n_obs"]      = bias_table["n_obs"].astype("int16")
-    bias_table["cluster_id"] = bias_table["cluster_id"].astype("int8")
-    bias_table["month"]      = bias_table["month"].astype("int8")
-    bias_table["model_bin"]  = bias_table["model_bin"].astype("float32")
-    bias_table["bias_mean"]  = bias_table["bias_mean"].astype("float32")
-    bias_table["bias_std"]   = bias_table["bias_std"].astype("float32")
-    bias_table["bias_skew"]  = bias_table["bias_skew"].astype("float32")
+    bias_table["n_obs"]        = bias_table["n_obs"].astype("int16")
+    bias_table["cluster_id"]   = bias_table["cluster_id"].astype("int8")
+    bias_table["month"]        = bias_table["month"].astype("int8")
+    bias_table["model_bin"]    = bias_table["model_bin"].astype("float32")
+    bias_table["bias_mean"]    = bias_table["bias_mean"].astype("float32")
+    bias_table["bias_std"]     = bias_table["bias_std"].astype("float32")
+    bias_table["bias_skew"]    = bias_table["bias_skew"].astype("float32")
+    bias_table["model_source"] = bias_table["model_source"].astype("category")
 
     # Save
     bias_table.to_parquet(BIAS_PARQUET, index=False)
@@ -163,12 +176,18 @@ def build_bias_table() -> None:
                 f"{(bias_table['n_obs'] >= MIN_N_OBS).sum()}\n")
         f.write(f"Cells with n_obs < {MIN_N_OBS} (low confidence): "
                 f"{(bias_table['n_obs'] < MIN_N_OBS).sum()}\n\n")
-        f.write("n_obs distribution:\n")
+        f.write("Cells by model_source:\n")
+        f.write(bias_table["model_source"].value_counts().to_string())
+        f.write("\n\nn_obs distribution:\n")
         f.write(bias_table["n_obs"].describe().to_string())
-        f.write("\n\nBias mean by station:\n")
-        f.write(bias_table.groupby("station")["bias_mean"].mean().to_string())
-        f.write("\n\nBias std by station:\n")
-        f.write(bias_table.groupby("station")["bias_std"].mean().to_string())
+        f.write("\n\nBias mean by station (IEM_AFM):\n")
+        afm_only = bias_table[bias_table["model_source"] == "IEM_AFM"]
+        f.write(afm_only.groupby("station")["bias_mean"].mean().to_string())
+        f.write("\n\nBias mean by station (GFS_MOS):\n")
+        mos_only = bias_table[bias_table["model_source"] == "GFS_MOS"]
+        f.write(mos_only.groupby("station")["bias_mean"].mean().to_string())
+        f.write("\n\nBias std by station (IEM_AFM):\n")
+        f.write(afm_only.groupby("station")["bias_std"].mean().to_string())
 
     logger.info("Bias table stats saved to %s", stats_path)
 

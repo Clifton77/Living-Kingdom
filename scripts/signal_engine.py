@@ -106,7 +106,7 @@ class TradeSignal:
     decision:           str            # "TRADE" | "WATCH" | "SKIP" | "HARD_SKIP" | "CONSTRAINED"
 
     # Forecast
-    forecast_raw:       float          # ERA5/model raw forecast
+    forecast_raw:       float          # IEM-AFM forecast (primary); falls back to Open-Meteo
     bias_mean:          float
     bias_std:           float
     forecast_adjusted:  float          # bias-corrected forecast
@@ -131,6 +131,10 @@ class TradeSignal:
     threshold_result:   Optional[ThresholdResult]
     taf:                TafResult
     metar:              MetarResult
+
+    # GFS-MOS cross-check (optional — None when IEM MAV unavailable)
+    mos_forecast_raw:   Optional[float] = None   # GFS-MOS Day-1 max forecast
+    model_divergence_f: Optional[float] = None   # AFM - MOS (+ means NWS warmer than model)
 
     # Full distribution
     buckets:            list[BucketAnalysis] = field(default_factory=list)
@@ -208,35 +212,38 @@ def lookup_bias(
     cluster_id: int,
     season: str,
     forecast_raw: float,
+    model_source: str = "IEM_AFM",
 ) -> dict:
     """
     Look up bias correction parameters from the bias table.
 
-    Matches on (station, month, season, cluster_id) first,
+    Matches on (station, month, season, cluster_id, model_source) first,
     then narrows to the nearest model_bin.
 
-    Returns dict: {bias_mean, bias_std, n_obs, model_bin}
-    Falls back to station/month average if cluster cell is too sparse.
+    model_source: 'IEM_AFM' (human NWS forecast) | 'GFS_MOS' | 'ERA5'
+    Falls back through: cluster_match → station/month → zero correction.
+    If bias_df has no model_source column (old format), ignores the filter.
+
+    Returns dict: {bias_mean, bias_std, n_obs, model_bin, source}
     """
     month = event_date.month
-
-    # Compute model_bin: 2°F odd-start bins matching Kalshi structure
-    # Bins: 69-70, 71-72, 73-74, 75-76; tails at 68, 77
-    # For bias table grouping we use the bin lower bound
     raw_bin = int(math.floor((forecast_raw - 0.5) / 2) * 2 + 1)
     raw_bin = max(KALSHI_BUCKET_LOWER_TAIL, min(raw_bin, KALSHI_BUCKET_UPPER_TAIL))
 
-    # Primary lookup: exact match
+    has_source_col = "model_source" in bias_df.columns
+
+    # Primary lookup: exact regime match
     mask = (
         (bias_df["station"]    == station) &
         (bias_df["month"]      == month)   &
         (bias_df["season"]     == season)  &
         (bias_df["cluster_id"] == cluster_id)
     )
+    if has_source_col:
+        mask &= (bias_df["model_source"] == model_source)
     subset = bias_df[mask]
 
     if len(subset) > 0:
-        # Find nearest model_bin
         subset = subset.copy()
         subset["bin_dist"] = (subset["model_bin"] - forecast_raw).abs()
         best = subset.loc[subset["bin_dist"].idxmin()]
@@ -255,6 +262,8 @@ def lookup_bias(
         (bias_df["station"] == station) &
         (bias_df["month"]   == month)
     )
+    if has_source_col:
+        fallback_mask &= (bias_df["model_source"] == model_source)
     fallback = bias_df[fallback_mask]
 
     if len(fallback) > 0:
@@ -278,55 +287,164 @@ def lookup_bias(
 
 
 # ---------------------------------------------------------------------------
-# Live forecast fetch (Open-Meteo current forecast)
+# Live forecast fetch — IEM AFM, GFS-MOS, and Open-Meteo fallback
 # ---------------------------------------------------------------------------
 
-def fetch_live_forecast(station: str, target_date: date) -> float | None:
+_AFOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+
+
+def _fetch_live_afos(pil: str, target_date: date) -> list[dict]:
+    """Fetch the most recent AFOS product for today."""
+    import requests
+    date_str = target_date.strftime("%Y-%m-%d")
+    params = {
+        "pil":   pil,
+        "fmt":   "json",
+        "sdate": f"{date_str}T00:00Z",
+        "edate": f"{date_str}T23:59Z",
+        "limit": 10,
+    }
+    resp = requests.get(_AFOS_URL, params=params, timeout=20)
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+def fetch_live_afm_forecast(station: str, target_date: date) -> float | None:
     """
-    Fetch today's maximum temperature forecast from Open-Meteo.
-    Uses coordinates of the NWS settlement station (e.g. KNYC for KJFK).
+    Fetch today's NWS AFM (human-adjusted) max temperature forecast from IEM.
+    Returns °F or None on failure.
     """
+    from config import WFO_MAP
+    from scripts.build_model_forecast_archive import (
+        _parse_afm_max_temp, _issue_time_to_valid_date,
+    )
+    wfo = WFO_MAP.get(station)
+    if not wfo:
+        return None
+    try:
+        products = _fetch_live_afos(f"AFM{wfo}", target_date)
+        # Take the most recent product that parses cleanly
+        for product in reversed(products):
+            text       = product.get("data", "")
+            issue_time = product.get("utc_valid", "")
+            if not text:
+                continue
+            valid_date = _issue_time_to_valid_date(issue_time)
+            if valid_date != target_date:
+                continue
+            tmax = _parse_afm_max_temp(text, station)
+            if tmax is not None:
+                logger.info("%s live AFM forecast: %.1f°F", station, tmax)
+                return tmax
+    except Exception as exc:
+        logger.warning("%s live AFM fetch failed: %s", station, exc)
+    return None
+
+
+def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
+    """
+    Fetch today's GFS-MOS (MAV) max temperature forecast from IEM.
+    Returns °F or None on failure.
+    """
+    from config import WFO_MAP
+    from scripts.build_model_forecast_archive import (
+        _parse_mos_max_temp, _issue_time_to_valid_date,
+    )
+    wfo = WFO_MAP.get(station)
+    if not wfo:
+        return None
+    try:
+        products = _fetch_live_afos(f"MAV{wfo}", target_date)
+        for product in reversed(products):
+            text       = product.get("data", "")
+            issue_time = product.get("utc_valid", "")
+            if not text:
+                continue
+            valid_date = _issue_time_to_valid_date(issue_time)
+            if valid_date != target_date:
+                continue
+            tmax = _parse_mos_max_temp(text, station)
+            if tmax is not None:
+                logger.info("%s live GFS-MOS forecast: %.1f°F", station, tmax)
+                return tmax
+    except Exception as exc:
+        logger.warning("%s live GFS-MOS fetch failed: %s", station, exc)
+    return None
+
+
+def _fetch_openmeteo_live(station: str, target_date: date) -> float | None:
+    """Open-Meteo current forecast — fallback when IEM products unavailable."""
     import requests
     lat, lon = STATION_COORDS[settlement_station(station)]
     try:
         resp = requests.get(
             OPEN_METEO_FORECAST_URL,
             params={
-                "latitude":          lat,
-                "longitude":         lon,
-                "daily":             "temperature_2m_max",
-                "temperature_unit":  "fahrenheit",
-                "forecast_days":     3,
-                "timezone":          "UTC",
+                "latitude":         lat,
+                "longitude":        lon,
+                "daily":            "temperature_2m_max",
+                "temperature_unit": "fahrenheit",
+                "forecast_days":    3,
+                "timezone":         "UTC",
             },
             timeout=10,
         )
         resp.raise_for_status()
-        data = resp.json()
-
-        dates = data["daily"]["time"]
-        temps = data["daily"]["temperature_2m_max"]
+        data     = resp.json()
+        dates    = data["daily"]["time"]
+        temps    = data["daily"]["temperature_2m_max"]
         date_str = target_date.isoformat()
-
         if date_str in dates:
-            idx = dates.index(date_str)
-            val = temps[idx]
+            val = temps[dates.index(date_str)]
             if val is not None:
-                logger.info("%s live forecast: %.1f°F", station, val)
+                logger.info("%s Open-Meteo forecast: %.1f°F", station, float(val))
                 return float(val)
-
     except Exception as exc:
-        logger.warning("Live forecast fetch failed for %s: %s", station, exc)
+        logger.warning("%s Open-Meteo fetch failed: %s", station, exc)
+    return None
 
-    # Fallback: use most recent value from historical forecast parquet
+
+def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, float | None, str]:
+    """
+    Fetch today's max temperature forecast.
+
+    Priority:
+      1. IEM AFM (NWS human-adjusted) → model_source='IEM_AFM'
+      2. Open-Meteo GFS forecast       → model_source='ERA5' (same bias distribution)
+
+    Also attempts GFS-MOS separately for divergence calculation.
+
+    Returns: (afm_forecast, mos_forecast, model_source_used)
+      afm_forecast   : primary forecast for bias lookup and distribution
+      mos_forecast   : GFS-MOS forecast for divergence (may be None)
+      model_source_used : 'IEM_AFM' | 'ERA5'
+    """
+    afm = fetch_live_afm_forecast(station, target_date)
+    mos = fetch_live_mos_forecast(station, target_date)
+
+    if afm is not None:
+        return afm, mos, "IEM_AFM"
+
+    # AFM unavailable — fall back to Open-Meteo, use ERA5 bias distribution
+    om = _fetch_openmeteo_live(station, target_date)
+    if om is not None:
+        return om, mos, "ERA5"
+
+    # Last resort: most recent row from historical parquet
     try:
         fcst_df = pd.read_parquet(FCST_PARQUET)
-        row = fcst_df[fcst_df["station"] == station].sort_values("date").iloc[-1]
-        val = float(row["forecast_tmax_f"])
-        logger.warning("%s using historical forecast fallback: %.1f°F", station, val)
-        return val
+        subset  = fcst_df[
+            (fcst_df["station"] == station) &
+            (fcst_df.get("model_source", fcst_df.get("source", pd.Series(dtype=str))) == "IEM_AFM")
+        ] if "model_source" in fcst_df.columns else fcst_df[fcst_df["station"] == station]
+        if len(subset) > 0:
+            val = float(subset.sort_values("date").iloc[-1]["forecast_tmax_f"])
+            logger.warning("%s using historical parquet fallback: %.1f°F", station, val)
+            return val, mos, "IEM_AFM"
     except Exception:
-        return None
+        pass
+
+    return None, mos, "ERA5"
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +528,9 @@ def _build_reasoning(
     kelly_stake_usd: float,
     kelly_contracts: int,
     confidence_scale: float,
+    mos_forecast_raw: float | None = None,
+    model_divergence_f: float | None = None,
+    model_source_used: str = "IEM_AFM",
 ) -> SignalReasoning:
     """Build fully structured plain-English reasoning for the dashboard card."""
 
@@ -476,8 +597,35 @@ def _build_reasoning(
     else:
         obs_desc = "No historical bias data found — using zero correction"
 
+    # Model source label for display
+    src_label = "NWS AFM" if model_source_used == "IEM_AFM" else "Open-Meteo/ERA5"
+
+    # NWS vs GFS-MOS divergence note
+    if mos_forecast_raw is not None and model_divergence_f is not None:
+        abs_div = abs(model_divergence_f)
+        if abs_div < 1.0:
+            div_note = (
+                f"GFS-MOS agrees closely ({mos_forecast_raw:.0f}°F, divergence <1°F) — "
+                "model and forecaster are aligned."
+            )
+        elif model_divergence_f > 0:
+            div_note = (
+                f"GFS-MOS guidance is {mos_forecast_raw:.0f}°F — the NWS forecaster is "
+                f"running {abs_div:.0f}°F WARMER than the model blend, suggesting local "
+                "warm-advection or sea-breeze break knowledge."
+            )
+        else:
+            div_note = (
+                f"GFS-MOS guidance is {mos_forecast_raw:.0f}°F — the NWS forecaster is "
+                f"running {abs_div:.0f}°F COOLER than the model blend, suggesting local "
+                "marine influence, cloud cover, or cold-pool knowledge."
+            )
+    else:
+        div_note = "GFS-MOS not available today — single-model signal only."
+
     forecast_and_bias = (
-        f"The model (Open-Meteo / ERA5) is forecasting a high of {forecast_raw:.0f}°F. "
+        f"The {src_label} forecast is {forecast_raw:.0f}°F. "
+        f"{div_note} "
         f"{obs_desc}, {station} has historically run "
         f"{abs_bias:.1f}°F {direction} than the model in conditions like today. "
         f"Our adjusted forecast is {forecast_adjusted:.1f}°F, with a typical spread of "
@@ -594,10 +742,11 @@ def _build_reasoning(
     })
 
     # ── Data sources ──────────────────────────────────────────────────────
+    mos_src_str = f"GFS-MOS {mos_forecast_raw:.0f}°F" if mos_forecast_raw is not None else "unavailable"
     data_sources = {
         "pattern":  f"{'Live GFS 00Z via NOMADS' if 'gfs' in data_source.lower() else 'Reanalysis fallback'}",
-        "forecast": "Open-Meteo (current forecast API)",
-        "bias":     f"{bias_src} — {n_obs} obs",
+        "forecast": f"{src_label} (primary) | GFS-MOS: {mos_src_str}",
+        "bias":     f"{bias_src} — {n_obs} obs (model_source={model_source_used})",
         "taf":      f"aviationweather.gov ({taf.fetched_utc})",
         "metar":    f"aviationweather.gov ({metar.fetched_utc})",
     }
@@ -640,17 +789,30 @@ def generate_signal(
     taf   = interpret_taf(station)
     metar = get_metar(station)
 
-    # ── 2. Live forecast ─────────────────────────────────────────────────
-    forecast_raw = fetch_live_forecast(station, event_date)
+    # ── 2. Live forecast (AFM primary, MOS cross-check) ─────────────────
+    forecast_raw, mos_forecast_raw, model_source_used = fetch_live_forecast(
+        station, event_date
+    )
     if forecast_raw is None:
         logger.error("%s — no forecast available, skipping", station)
         return _skip_signal(station, event_date, local_time_str, taf, metar,
                             pattern, "No forecast data available")
 
-    # ── 3. Bias lookup ───────────────────────────────────────────────────
+    model_divergence_f = (
+        round(forecast_raw - mos_forecast_raw, 1)
+        if mos_forecast_raw is not None else None
+    )
+    if model_divergence_f is not None:
+        logger.info(
+            "%s AFM=%.1f°F  GFS-MOS=%.1f°F  divergence=%+.1f°F",
+            station, forecast_raw, mos_forecast_raw, model_divergence_f,
+        )
+
+    # ── 3. Bias lookup (filtered to the model source used) ───────────────
     bias_info = lookup_bias(
         bias_df, station, event_date,
         pattern["cluster_id"], pattern["season"], forecast_raw,
+        model_source=model_source_used,
     )
     bias_mean        = bias_info["bias_mean"]
     bias_std         = bias_info["bias_std"]
@@ -754,14 +916,18 @@ def generate_signal(
         kelly_stake_usd=kelly_usd,
         kelly_contracts=kelly_contracts,
         confidence_scale=confidence_scale,
+        mos_forecast_raw=mos_forecast_raw,
+        model_divergence_f=model_divergence_f,
+        model_source_used=model_source_used,
     )
 
     logger.info(
-        "%s | %s | adj_fcst=%.1f°F | top_bucket=%s | edge=%+.3f | "
+        "%s | %s | AFM=%.1f°F MOS=%s | adj=%.1f°F | top=%s | edge=%+.3f | "
         "threshold=%.3f | kelly=$%.2f | decision=%s",
-        station, event_date, forecast_adjusted,
-        top.bucket_label, top.edge, effective_threshold,
-        kelly_usd, decision,
+        station, event_date, forecast_raw,
+        f"{mos_forecast_raw:.1f}°F" if mos_forecast_raw else "N/A",
+        forecast_adjusted, top.bucket_label, top.edge,
+        effective_threshold, kelly_usd, decision,
     )
 
     return TradeSignal(
@@ -777,6 +943,8 @@ def generate_signal(
         season=pattern["season"],
         n_obs=bias_info["n_obs"],
         pattern_confidence=pattern["confidence"],
+        mos_forecast_raw=mos_forecast_raw,
+        model_divergence_f=model_divergence_f,
         top_bucket=top.bucket_lower,
         top_edge=top.edge,
         top_model_prob=top.model_prob,
