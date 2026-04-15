@@ -20,22 +20,20 @@ STATIONS = ["KJFK", "KORD", "KMIA", "KDFW", "KLAX", "KATL", "KDEN", "KHOU"]
 # for observation and forecast data — NOT the ICAO codes in STATIONS above.
 #
 # Confirmed mismatches:
-#   KJFK → KXHIGHNY settles on Central Park, NY (KNYC), NOT JFK Airport
+#   KJFK → KXHIGHNY  settles on Central Park, NY (KNYC), NOT JFK Airport
 #   KORD → KXHIGHCHI settles on Chicago Midway (KMDW),  NOT O'Hare
-#
-# Unconfirmed (inferred from short rules excerpt):
-#   KHOU → may settle on KIAH (Bush Intercontinental) rather than KHOU (Hobby)
-#          verify by reading full rules_primary for KXHIGHTHOU
+#   KHOU → KXHIGHTHOU settles on Houston-Hobby (KHOU) — confirmed from market
+#           rules: "choosing the location 'Houston-Hobby, TX'" via CLIHOU report
 # ---------------------------------------------------------------------------
 KALSHI_SETTLEMENT_STATION = {
-    "KJFK": "KNYC",   # Central Park, New York  — NWS WBAN: 94728
-    "KORD": "KMDW",   # Chicago Midway          — NWS WBAN: 14819
-    "KMIA": "KMIA",   # Miami International     — matches
-    "KDFW": "KDFW",   # Dallas/Fort Worth Intl  — matches (inferred)
-    "KLAX": "KLAX",   # Los Angeles Airport     — matches
-    "KATL": "KATL",   # Atlanta Hartsfield      — matches (inferred)
-    "KDEN": "KDEN",   # Denver International    — matches (inferred)
-    "KHOU": "KHOU",   # Houston Hobby           — matches (inferred; verify vs KIAH)
+    "KJFK": "KNYC",   # Central Park, New York      — NWS WBAN: 94728
+    "KORD": "KMDW",   # Chicago Midway              — NWS WBAN: 14819
+    "KMIA": "KMIA",   # Miami International         — confirmed match
+    "KDFW": "KDFW",   # Dallas/Fort Worth Intl      — inferred match
+    "KLAX": "KLAX",   # Los Angeles Airport         — confirmed match
+    "KATL": "KATL",   # Atlanta Hartsfield          — inferred match
+    "KDEN": "KDEN",   # Denver International        — inferred match
+    "KHOU": "KHOU",   # Houston Hobby               — confirmed from market rules (CLIHOU)
 }
 
 # GHCND IDs for the SETTLEMENT stations (used by build_obs_database.py)
@@ -43,24 +41,24 @@ KALSHI_SETTLEMENT_STATION = {
 GHCND_IDS = {
     "KNYC": "USW00094728",   # Central Park, New York
     "KMDW": "USW00014819",   # Chicago Midway
-    "KMIA": "USW00012839",
-    "KDFW": "USW00003927",
-    "KLAX": "USW00023174",
-    "KATL": "USW00013874",
-    "KDEN": "USW00023062",
-    "KHOU": "USW00012918",
+    "KMIA": "USW00012839",   # Miami International
+    "KDFW": "USW00003927",   # Dallas/Fort Worth International
+    "KLAX": "USW00023174",   # Los Angeles International
+    "KATL": "USW00013874",   # Atlanta Hartsfield-Jackson
+    "KDEN": "USW00023062",   # Denver International
+    "KHOU": "USW00012918",   # Houston Hobby
 }
 
 # Station coordinates (lat, lon) — settlement stations for Open-Meteo forecasts
 STATION_COORDS = {
-    "KNYC": (40.7789, -73.9692),   # Central Park, New York
-    "KMDW": (41.7862, -87.7525),   # Chicago Midway
-    "KMIA": (25.7959, -80.2870),
-    "KDFW": (32.8998, -97.0403),
-    "KLAX": (33.9425, -118.4081),
-    "KATL": (33.6407, -84.4277),
-    "KDEN": (39.8561, -104.6737),
-    "KHOU": (29.6454, -95.2789),
+    "KNYC": (40.7789, -73.9692),    # Central Park, New York
+    "KMDW": (41.7862, -87.7525),    # Chicago Midway
+    "KMIA": (25.7959, -80.2870),    # Miami International
+    "KDFW": (32.8998, -97.0403),    # Dallas/Fort Worth International
+    "KLAX": (33.9425, -118.4081),   # Los Angeles International
+    "KATL": (33.6407, -84.4277),    # Atlanta Hartsfield-Jackson
+    "KDEN": (39.8561, -104.6737),   # Denver International
+    "KHOU": (29.6454, -95.2789),    # Houston Hobby
 }
 
 # Station timezones (for display conversion from UTC)
