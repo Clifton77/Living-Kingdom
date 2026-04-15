@@ -778,6 +778,53 @@ class KalshiClient:
             logger.error("get_settled_markets failed: %s", exc)
             return {}
 
+    # ── Market discovery ──────────────────────────────────────────────────
+
+    def discover_new_series(self) -> list[str]:
+        """
+        Lightweight startup check: scan all open KXHIGH*/KXLOW* events and
+        return any series tickers not yet in KALSHI_STATION_SERIES.
+
+        Called once on bot startup. If non-empty, logs a warning and the
+        dashboard should surface it as an "unconfigured markets" alert.
+
+        Run `python scripts/discover_markets.py` for full details on new series.
+        """
+        import re as _re
+        known = set(KALSHI_STATION_SERIES.values())
+        new_series: list[str] = []
+
+        for prefix in ("KXHIGH", "KXLOW"):
+            cursor = None
+            while True:
+                params: dict = {"status": "open", "limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    data   = self._get("/events", params=params)
+                    events = data.get("events", [])
+                    for e in events:
+                        s = e.get("series_ticker", "")
+                        if s.startswith(prefix) and s not in known and s not in new_series:
+                            new_series.append(s)
+                    cursor = data.get("cursor")
+                    if not cursor or len(events) < 200:
+                        break
+                except Exception as exc:
+                    logger.warning("discover_new_series %s scan failed: %s", prefix, exc)
+                    break
+
+        if new_series:
+            logger.warning(
+                "NEW Kalshi temperature series found (not in config): %s  "
+                "Run `python scripts/discover_markets.py` for full details.",
+                new_series,
+            )
+        else:
+            logger.info("discover_new_series: no new series found")
+
+        return new_series
+
     def get_position_pnl(
         self,
         market_id: str,
