@@ -72,6 +72,10 @@ def fetch_iem_daily(station: str, start: str, end: str) -> pd.DataFrame:
             tmax_f = float("nan")
         rows.append({"date": row.get("day", "").strip(), "tmax_f": tmax_f})
 
+    if not rows:
+        logger.warning("IEM %s: empty response", station)
+        return pd.DataFrame(columns=["station", "date", "tmax_f"])
+
     df = pd.DataFrame(rows)
     df["station"] = station
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
