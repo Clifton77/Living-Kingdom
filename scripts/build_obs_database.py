@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     STATIONS, GHCND_IDS, START_DATE, END_DATE,
     NOAA_CDO_TOKEN, OBS_PARQUET, LOGS_DIR, RAW_DIR,
+    settlement_station,
 )
 from utils.retry import retry_request
 from utils.validate import cross_validate_obs
@@ -166,18 +167,24 @@ def build_obs_database() -> None:
     missing_log = []
 
     for station in STATIONS:
-        logger.info("Processing station: %s", station)
+        # Use the NWS settlement station for data fetching (may differ from Kalshi label).
+        # KJFK → fetch KNYC (Central Park), KORD → fetch KMDW (Midway), others unchanged.
+        # Results are stored under the original Kalshi label so downstream joins work.
+        settle = settlement_station(station)
+        logger.info("Processing station: %s (settlement: %s)", station, settle)
 
         # --- IEM ---
         try:
-            iem_df = fetch_iem_daily(station, START_DATE, END_DATE)
+            iem_df = fetch_iem_daily(settle, START_DATE, END_DATE)
+            iem_df["station"] = station   # relabel KNYC→KJFK, KMDW→KORD, etc.
         except Exception as e:
             logger.error("IEM fetch failed for %s: %s", station, e)
             iem_df = pd.DataFrame(columns=["station", "date", "tmax_f"])
 
         # --- CDO ---
         try:
-            cdo_df = fetch_noaa_cdo(station, start_year, end_year)
+            cdo_df = fetch_noaa_cdo(settle, start_year, end_year)
+            cdo_df["station"] = station   # relabel
         except Exception as e:
             logger.error("CDO fetch failed for %s: %s", station, e)
             cdo_df = pd.DataFrame(columns=["station", "date", "tmax_f"])

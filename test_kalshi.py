@@ -117,11 +117,8 @@ for _station, _series in KALSHI_STATION_SERIES.items():
         _mkts = _d.get("markets", [])
         if _mkts:
             _rules = _mkts[0].get("rules_primary", "")
-            # Extract station name: look for "recorded at {LOCATION}" pattern
-            import re as _re
-            _loc = _re.search(r"recorded at ([^,]+(?:,\s*[A-Z]{2})?)", _rules)
-            _loc_str = _loc.group(1).strip() if _loc else _rules[:80]
-            print(f"  {_station} ({_series:15s}) → settles on: {_loc_str}")
+            # Print first 150 chars of rules to see full location name
+            print(f"  {_station} ({_series:15s}) → {_rules[:150]}")
         else:
             print(f"  {_station} ({_series:15s}) → no open markets")
     except Exception as _e:

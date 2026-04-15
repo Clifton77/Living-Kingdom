@@ -40,6 +40,7 @@ from config import (
     OPEN_METEO_FORECAST_URL,
     STATION_COORDS,
     MIN_KELLY_STAKE,
+    settlement_station,
     STARTING_BANKROLL,
     MAX_STAKE_PCT,
     MIN_N_OBS,
@@ -283,10 +284,10 @@ def lookup_bias(
 def fetch_live_forecast(station: str, target_date: date) -> float | None:
     """
     Fetch today's maximum temperature forecast from Open-Meteo.
-    Uses the standard forecast API (not the archive).
+    Uses coordinates of the NWS settlement station (e.g. KNYC for KJFK).
     """
     import requests
-    lat, lon = STATION_COORDS[station]
+    lat, lon = STATION_COORDS[settlement_station(station)]
     try:
         resp = requests.get(
             OPEN_METEO_FORECAST_URL,
@@ -845,7 +846,7 @@ def check_forecast_availability(event_date: date, probe_station: str = "KJFK") -
         details   : str    — human-readable status for logging
     """
     import requests as req
-    lat, lon = STATION_COORDS[probe_station]
+    lat, lon = STATION_COORDS[settlement_station(probe_station)]
     try:
         resp = req.get(
             OPEN_METEO_FORECAST_URL,

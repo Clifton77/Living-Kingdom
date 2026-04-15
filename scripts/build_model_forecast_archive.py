@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     STATIONS, WFO_MAP, STATION_COORDS, START_DATE, END_DATE,
     FCST_PARQUET, LOGS_DIR, RAW_DIR,
+    settlement_station,
 )
 from utils.retry import retry_request
 from utils.logging_config import setup_logging
@@ -205,15 +206,18 @@ def _fetch_openmeteo_era5(lat: float, lon: float,
 def fetch_era5_fallback(station: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch ERA5 daily max temp from Open-Meteo as model forecast proxy.
+    Uses the NWS settlement station's coordinates (e.g. KNYC for KJFK,
+    KMDW for KORD) so ERA5 reflects the correct location.
     Returns DataFrame: [station, date, forecast_tmax_f, source]
     """
-    coords = STATION_COORDS.get(station)
+    settle = settlement_station(station)
+    coords = STATION_COORDS.get(settle)
     if not coords:
         logger.warning("No coordinates for %s — skipping ERA5 fallback", station)
         return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "source"])
 
     lat, lon = coords
-    logger.info("Fetching ERA5 for %s (%s → %s)...", station, start_date, end_date)
+    logger.info("Fetching ERA5 for %s (settle=%s, %s → %s)...", station, settle, start_date, end_date)
 
     # Open-Meteo archive has a max range — chunk by year to be safe
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
