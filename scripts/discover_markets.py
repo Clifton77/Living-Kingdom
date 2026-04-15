@@ -21,6 +21,10 @@ import json
 import time
 from datetime import date
 
+# Windows consoles default to cp1252 — force UTF-8 for safe printing
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -259,9 +263,9 @@ def discover_all_series(client: KalshiClient) -> dict:
     print(f"  NEW (unconfigured) : {len(new_found)}")
 
     # ── Known series summary ─────────────────────────────────────────────
-    print(f"\n{'─'*72}")
+    print(f"\n{'-'*72}")
     print("  CONFIGURED SERIES")
-    print(f"{'─'*72}")
+    print(f"{'-'*72}")
     label_by_series = {v: k for k, v in KALSHI_STATION_SERIES.items()}
     for s in sorted(known_found):
         station = label_by_series.get(s, "?")
@@ -272,12 +276,12 @@ def discover_all_series(client: KalshiClient) -> dict:
     new_details: list[dict] = []
 
     if new_found:
-        print(f"\n{'─'*72}")
+        print(f"\n{'-'*72}")
         print("  NEW SERIES — DETAILED SCAN")
-        print(f"{'─'*72}")
+        print(f"{'-'*72}")
 
         for series in new_found:
-            print(f"\n  ► {series}")
+            print(f"\n  >> {series}")
             info = _get_series_detail(client, series)
             new_details.append(info)
 
