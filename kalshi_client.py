@@ -99,7 +99,7 @@ def get_series_ticker(station: str) -> str:
     """
     Return the Kalshi series ticker for a station.
     e.g. get_series_ticker("KLAX") → "KXHIGHLAX"
-         get_series_ticker("KJFK") → "KXHIGHNY0"
+         get_series_ticker("KJFK") → "KXHIGHNY"
     Raises KeyError if station is not in KALSHI_STATION_SERIES.
     """
     if station not in KALSHI_STATION_SERIES:

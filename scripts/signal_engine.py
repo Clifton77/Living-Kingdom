@@ -834,7 +834,7 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
 # Forecast data availability probe
 # ---------------------------------------------------------------------------
 
-def check_forecast_availability(event_date: date, probe_station: str = "KJFK") -> dict:
+def check_forecast_availability(event_date: date, probe_station: str = STATIONS[0]) -> dict:
     """
     Quick probe to confirm live forecast data is available for the target date.
     Used by the scheduler before running a full Tier 3 pass — if data is missing,
