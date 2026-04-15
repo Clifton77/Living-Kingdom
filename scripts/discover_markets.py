@@ -1,8 +1,8 @@
 """
-Discover all active Kalshi temperature series via the API.
+Discover all active Kalshi HIGH temperature series via the API.
 
-Finds every KXHIGH* and KXLOW* series, identifies which are already
-configured in config.py, and reports new ones with:
+Finds every KXHIGH* series, identifies which are already configured
+in config.py, and reports new ones with:
   - City name (parsed from title/rules)
   - Settlement station hint (ICAO codes found in rules_primary)
   - NWS WFO (auto-looked up from NWS API if coordinates known)
@@ -30,8 +30,8 @@ from utils.logging_config import setup_logging
 
 logger = setup_logging("discover_markets")
 
-# Series prefixes that indicate temperature markets
-TEMP_PREFIXES = ("KXHIGH", "KXLOW")
+# Only high temperature markets
+TEMP_PREFIXES = ("KXHIGH",)
 
 # Matches any ICAO-style 4-letter code starting with K
 ICAO_RE = re.compile(r"\b(K[A-Z]{3})\b")
@@ -164,7 +164,7 @@ def _get_series_detail(client: KalshiClient, series_ticker: str) -> dict:
         )
         city_hint = city_m.group(1).strip() if city_m else ""
 
-        market_type = "LOW" if "LOW" in series_ticker.upper() else "HIGH"
+        market_type = "HIGH"
 
         return {
             "series_ticker": series_ticker,
@@ -247,7 +247,7 @@ def discover_all_series(client: KalshiClient) -> dict:
     print("\n" + "=" * 72)
     print("  KALSHI TEMPERATURE MARKET DISCOVERY")
     print("=" * 72)
-    print(f"  Scanning KXHIGH* and KXLOW* series across all open events...")
+    print(f"  Scanning KXHIGH* series across all open events...")
 
     all_found = _fetch_all_series(client)
 
@@ -303,7 +303,7 @@ def discover_all_series(client: KalshiClient) -> dict:
 
             time.sleep(0.3)
     else:
-        print("\n  No new series found — all active KXHIGH/KXLOW series are configured.")
+        print("\n  No new series found — all active KXHIGH* series are configured.")
 
     return {
         "known":     known_found,

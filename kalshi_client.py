@@ -782,7 +782,7 @@ class KalshiClient:
 
     def discover_new_series(self) -> list[str]:
         """
-        Lightweight startup check: scan all open KXHIGH*/KXLOW* events and
+        Lightweight startup check: scan all open KXHIGH* events and
         return any series tickers not yet in KALSHI_STATION_SERIES.
 
         Called once on bot startup. If non-empty, logs a warning and the
@@ -794,7 +794,7 @@ class KalshiClient:
         known = set(KALSHI_STATION_SERIES.values())
         new_series: list[str] = []
 
-        for prefix in ("KXHIGH", "KXLOW"):
+        for prefix in ("KXHIGH",):
             cursor = None
             while True:
                 params: dict = {"status": "open", "limit": 200}
