@@ -21,10 +21,6 @@ import json
 import time
 from datetime import date
 
-# Windows consoles default to cp1252 -- force UTF-8 for safe printing
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -248,19 +244,19 @@ def discover_all_series(client: KalshiClient) -> dict:
     """
     known_series  = set(KALSHI_STATION_SERIES.values())
 
-    print("\n" + "=" * 72)
-    print("  KALSHI TEMPERATURE MARKET DISCOVERY")
-    print("=" * 72)
-    print(f"  Scanning KXHIGH* series across all open events...")
+    print("\n" + "=" * 72, flush=True)
+    print("  KALSHI TEMPERATURE MARKET DISCOVERY", flush=True)
+    print("=" * 72, flush=True)
+    print("  Scanning KXHIGH* series across all open events...", flush=True)
 
     all_found = _fetch_all_series(client)
 
     known_found = sorted(all_found & known_series)
     new_found   = sorted(all_found - known_series)
 
-    print(f"\n  Total series found : {len(all_found)}")
-    print(f"  Already configured : {len(known_found)}")
-    print(f"  NEW (unconfigured) : {len(new_found)}")
+    print(f"\n  Total series found : {len(all_found)}", flush=True)
+    print(f"  Already configured : {len(known_found)}", flush=True)
+    print(f"  NEW (unconfigured) : {len(new_found)}", flush=True)
 
     # ── Known series summary ─────────────────────────────────────────────
     print(f"\n{'-'*72}")
@@ -386,4 +382,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        import traceback
+        print(f"\nFATAL ERROR: {exc}", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
