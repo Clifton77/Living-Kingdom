@@ -332,7 +332,7 @@ def _print_config_snippet(new_details: list[dict]) -> None:
         city   = info.get("city_hint", "???")
         mtype  = info.get("market_type", "?")
         label  = "K???"
-        icao   = info.get("icao_hints", ["K???"])[0]
+        icao   = (info.get("icao_hints") or ["K???"])[0]
         print(f'    "{label}": "{s}",   # {city} {mtype}')
 
     print("\n# KALSHI_SETTLEMENT_STATION  — VERIFY from full rules_primary:")
