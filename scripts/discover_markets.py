@@ -244,66 +244,66 @@ def discover_all_series(client: KalshiClient) -> dict:
     """
     known_series  = set(KALSHI_STATION_SERIES.values())
 
-    print("\n" + "=" * 72, flush=True)
-    print("  KALSHI TEMPERATURE MARKET DISCOVERY", flush=True)
-    print("=" * 72, flush=True)
-    print("  Scanning KXHIGH* series across all open events...", flush=True)
+    logger.info("=" * 72)
+    logger.info("  KALSHI TEMPERATURE MARKET DISCOVERY")
+    logger.info("=" * 72)
+    logger.info("  Scanning KXHIGH* series across all open events...")
 
     all_found = _fetch_all_series(client)
 
     known_found = sorted(all_found & known_series)
     new_found   = sorted(all_found - known_series)
 
-    print(f"\n  Total series found : {len(all_found)}", flush=True)
-    print(f"  Already configured : {len(known_found)}", flush=True)
-    print(f"  NEW (unconfigured) : {len(new_found)}", flush=True)
+    logger.info("Total series found : %d", len(all_found))
+    logger.info("Already configured : %d", len(known_found))
+    logger.info("NEW (unconfigured) : %d", len(new_found))
 
-    # ── Known series summary ─────────────────────────────────────────────
-    print(f"\n{'-'*72}")
-    print("  CONFIGURED SERIES")
-    print(f"{'-'*72}")
+    # Known series summary
+    logger.info("-" * 72)
+    logger.info("CONFIGURED SERIES")
+    logger.info("-" * 72)
     label_by_series = {v: k for k, v in KALSHI_STATION_SERIES.items()}
     for s in sorted(known_found):
         station = label_by_series.get(s, "?")
         settle  = KALSHI_SETTLEMENT_STATION.get(station, station)
-        print(f"  {s:22s}  station={station}  settle={settle}")
+        logger.info("  %-22s  station=%-6s  settle=%s", s, station, settle)
 
-    # ── New series deep scan ─────────────────────────────────────────────
+    # New series deep scan
     new_details: list[dict] = []
 
     if new_found:
-        print(f"\n{'-'*72}")
-        print("  NEW SERIES -- DETAILED SCAN")
-        print(f"{'-'*72}")
+        logger.info("-" * 72)
+        logger.info("NEW SERIES -- DETAILED SCAN")
+        logger.info("-" * 72)
 
         for series in new_found:
-            print(f"\n  >> {series}")
+            logger.info(">> %s", series)
             info = _get_series_detail(client, series)
             new_details.append(info)
 
             if "error" in info:
-                print(f"    ERROR: {info['error']}")
+                logger.warning("  ERROR: %s", info["error"])
                 time.sleep(0.3)
                 continue
 
-            print(f"    Type    : {info['market_type']}")
-            print(f"    Title   : {info['title']}")
-            print(f"    City    : {info['city_hint'] or '(not parsed)'}")
-            print(f"    ICAO hints in rules: {info['icao_hints'] or 'none found'}")
-            print(f"    Rules   : {info['rules_snippet'][:200]}")
+            logger.info("  Type    : %s", info["market_type"])
+            logger.info("  Title   : %s", info["title"])
+            logger.info("  City    : %s", info["city_hint"] or "(not parsed)")
+            logger.info("  ICAO hints: %s", info["icao_hints"] or "none found")
+            logger.info("  Rules   : %s", info["rules_snippet"][:200])
 
             # Best-effort WFO lookup
             if info["icao_hints"]:
                 candidate = info["icao_hints"][0]
                 wfo = _lookup_wfo(candidate)
                 info["wfo_hint"] = wfo
-                print(f"    WFO     : {wfo or '(unknown -- add coordinates to KNOWN_NWS_COORDS)'}")
+                logger.info("  WFO     : %s", wfo or "(unknown)")
             else:
                 info["wfo_hint"] = None
 
             time.sleep(0.3)
     else:
-        print("\n  No new series found -- all active KXHIGH* series are configured.")
+        logger.info("No new series found -- all active KXHIGH* series are configured.")
 
     return {
         "known":     known_found,
@@ -313,72 +313,66 @@ def discover_all_series(client: KalshiClient) -> dict:
     }
 
 
-def _print_config_snippet(new_details: list[dict]) -> None:
-    """Print a ready-to-paste config.py block for new stations."""
+def _log_config_snippet(new_details: list[dict]) -> None:
+    """Log a ready-to-paste config.py block for new stations."""
     if not new_details:
         return
 
-    print(f"\n{'='*72}")
-    print("  CONFIG.PY ADDITIONS  (review settlement station from rules before adding)")
-    print(f"{'='*72}")
+    logger.info("=" * 72)
+    logger.info("CONFIG.PY ADDITIONS (verify settlement station from rules first)")
+    logger.info("=" * 72)
 
-    print("\n# KALSHI_STATION_SERIES  -- pick a short Kalshi label (e.g. KSEA, KPHX):")
+    logger.info("# KALSHI_STATION_SERIES -- assign a Kalshi label (e.g. KSEA, KPHX):")
     for info in new_details:
-        s      = info["series_ticker"]
-        city   = info.get("city_hint", "???")
-        mtype  = info.get("market_type", "?")
-        label  = "K???"
-        icao   = (info.get("icao_hints") or ["K???"])[0]
-        print(f'    "{label}": "{s}",   # {city} {mtype}')
+        s    = info["series_ticker"]
+        city = info.get("city_hint", "???")
+        logger.info('    "K???": "%s",   # %s', s, city)
 
-    print("\n# KALSHI_SETTLEMENT_STATION  -- VERIFY from full rules_primary:")
+    logger.info("# KALSHI_SETTLEMENT_STATION -- VERIFY from full rules_primary:")
     for info in new_details:
         icao = (info.get("icao_hints") or ["K???"])[0]
         city = info.get("city_hint", "???")
-        print(f'    "K???": "{icao}",   # {city} -- confirm from rules')
+        logger.info('    "K???": "%s",   # %s -- confirm from rules', icao, city)
 
-    print("\n# GHCND_IDS  -- look up at https://www.ncdc.noaa.gov/cdo-web/search:")
+    logger.info("# GHCND_IDS -- look up at ncdc.noaa.gov/cdo-web/search:")
     for info in new_details:
         icao = (info.get("icao_hints") or ["K???"])[0]
-        print(f'    "{icao}": "USW000XXXXX",   # look up GHCND station ID')
+        logger.info('    "%s": "USW000XXXXX",', icao)
 
-    print("\n# STATION_COORDS  (lat, lon):")
+    logger.info("# STATION_COORDS (lat, lon):")
     for info in new_details:
         icao = (info.get("icao_hints") or ["K???"])[0]
-        print(f'    "{icao}": (XX.XXXX, -XXX.XXXX),')
+        logger.info('    "%s": (XX.XXXX, -XXX.XXXX),', icao)
 
-    print("\n# WFO_MAP:")
+    logger.info("# WFO_MAP:")
     for info in new_details:
-        label = "K???"
-        wfo   = info.get("wfo_hint") or "???"
-        print(f'    "{label}": "{wfo}",')
+        wfo = info.get("wfo_hint") or "???"
+        logger.info('    "K???": "%s",', wfo)
 
-    print("\n# STATION_TIMEZONES:")
+    logger.info("# STATION_TIMEZONES:")
     for info in new_details:
-        label = "K???"
-        city  = info.get("city_hint", "???")
-        print(f'    "{label}": "America/???",   # {city}')
+        city = info.get("city_hint", "???")
+        logger.info('    "K???": "America/???",   # %s', city)
 
-    print("\n# Then add the new label to STATIONS list at the top of config.py.")
-    print("# After adding, run:")
-    print("#   python run_pipeline.py --only obs --force")
-    print("#   python run_pipeline.py --only forecasts --force")
-    print("#   python run_pipeline.py --only bias --force")
+    logger.info("# After adding, run:")
+    logger.info("#   python run_pipeline.py --only obs --force")
+    logger.info("#   python run_pipeline.py --only forecasts --force")
+    logger.info("#   python run_pipeline.py --only bias --force")
 
 
 def main() -> None:
     client  = KalshiClient(demo=False)
     results = discover_all_series(client)
 
-    _print_config_snippet(results["new"])
+    _log_config_snippet(results["new"])
 
     # Save full results for reference
     os.makedirs(os.path.join("data", "raw"), exist_ok=True)
     out_path = os.path.join("data", "raw", "discovered_series.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
-    print(f"\n  Full results saved -> {out_path}")
-    print(f"  Scan date: {results['scan_date']}\n")
+    logger.info("Full results saved -> %s", out_path)
+    logger.info("Scan date: %s", results["scan_date"])
 
 
 if __name__ == "__main__":
