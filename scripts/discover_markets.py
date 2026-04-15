@@ -33,6 +33,11 @@ logger = setup_logging("discover_markets")
 # Only high temperature markets
 TEMP_PREFIXES = ("KXHIGH",)
 
+# Series that match KXHIGH* but are NOT temperature markets — exclude from results
+NON_TEMP_SERIES = {
+    "KXHIGHINFLATION",  # CPI market, not temperature
+}
+
 # Matches any ICAO-style 4-letter code starting with K
 ICAO_RE = re.compile(r"\b(K[A-Z]{3})\b")
 
@@ -103,6 +108,7 @@ def _fetch_all_series(client: KalshiClient) -> set[str]:
                 e.get("series_ticker", "")
                 for e in events
                 if e.get("series_ticker", "").startswith(prefix)
+                and e.get("series_ticker", "") not in NON_TEMP_SERIES
             ]
             found.update(s for s in matches if s)
 

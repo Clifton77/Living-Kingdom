@@ -38,14 +38,28 @@ OPENMETEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Station names as they appear in AFM text (partial match sufficient)
 STATION_AFM_NAMES = {
-    "KJFK": ["NEW YORK", "JFK", "KENNEDY"],
-    "KORD": ["CHICAGO", "O'HARE", "OHARE"],
+    # Original 8
+    "KJFK": ["NEW YORK", "JFK", "KENNEDY", "CENTRAL PARK"],
+    "KORD": ["CHICAGO", "MIDWAY", "MDW"],
     "KMIA": ["MIAMI"],
     "KDFW": ["DALLAS", "FORT WORTH", "DFW"],
     "KLAX": ["LOS ANGELES", "LAX"],
     "KATL": ["ATLANTA"],
     "KDEN": ["DENVER"],
     "KHOU": ["HOUSTON", "HOBBY"],
+    # New 12
+    "KAUS": ["AUSTIN", "BERGSTROM"],
+    "KPHL": ["PHILADELPHIA", "PHL"],
+    "KBOS": ["BOSTON", "LOGAN"],
+    "KDCA": ["WASHINGTON", "REAGAN", "NATIONAL", "DCA"],
+    "KLAS": ["LAS VEGAS"],
+    "KMSP": ["MINNEAPOLIS", "ST PAUL", "MSP"],
+    "KMSY": ["NEW ORLEANS", "MOISANT", "MSY"],
+    "KOKC": ["OKLAHOMA CITY", "WILL ROGERS", "OKC"],
+    "KPHX": ["PHOENIX", "SKY HARBOR"],
+    "KSAT": ["SAN ANTONIO", "SAT"],
+    "KSEA": ["SEATTLE", "SEA-TAC", "SEATAC"],
+    "KSFO": ["SAN FRANCISCO", "SFO"],
 }
 
 
