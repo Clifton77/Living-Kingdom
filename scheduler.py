@@ -46,10 +46,10 @@ from scripts.signal_engine import run_signal_pass, TradeSignal, check_forecast_a
 from scripts.taf_interpreter import interpret_taf, get_metar
 from kalshi_client import KalshiClient, build_market_id
 from risk import RiskManager
+from utils.peak_hours import get_peak_hour
 from config import (
     STATIONS,
     STATION_TIMEZONES,
-    STATION_PEAK_HOURS,
     KALSHI_BUCKET_LOWER_TAIL,
     KALSHI_BUCKET_UPPER_TAIL,
     KALSHI_BUCKET_STARTS,
@@ -266,9 +266,8 @@ def tier2_metar_and_positions():
 
                 current_edge = sig.top_edge if sig and sig.top_bucket == pos.bucket_lower else 0.0
 
-                # Peak heating hour for this station and event month
-                event_month       = date.fromisoformat(pos.event_date).month
-                peak_heating_hour = STATION_PEAK_HOURS.get(station, {}).get(event_month, 15)
+                # Peak heating hour — DOY-smoothed seasonal curve
+                peak_heating_hour = get_peak_hour(station, date.fromisoformat(pos.event_date))
 
                 # Update position and evaluate exit
                 exit_decision = rm.update_position(
@@ -884,8 +883,7 @@ def _evaluate_expansion(
     local_now   = datetime.now(tz)
     local_hour  = local_now.hour
     is_event_day = (date.today() == event_date)
-    event_month  = event_date.month
-    peak_hour    = STATION_PEAK_HOURS.get(station, {}).get(event_month, 15)
+    peak_hour    = get_peak_hour(station, event_date)
 
     # Before peak hour: always true on Day -1; time-checked on event day
     before_peak = (not is_event_day) or (local_hour < peak_hour)
@@ -947,8 +945,7 @@ def _evaluate_reposition(
     tz         = ZoneInfo(STATION_TIMEZONES[station])
     local_hour = datetime.now(tz).hour
     is_event_day = (date.today() == event_date)
-    event_month  = event_date.month
-    peak_hour    = STATION_PEAK_HOURS.get(station, {}).get(event_month, 15)
+    peak_hour    = get_peak_hour(station, event_date)
     before_peak  = (not is_event_day) or (local_hour < peak_hour)
 
     if not before_peak:

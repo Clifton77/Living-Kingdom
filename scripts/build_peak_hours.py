@@ -1,287 +1,406 @@
 """
-One-time analysis script: compute climatological peak heating hours.
+Build seasonal peak heating hours from IEM hourly ASOS archive.
 
-For each station and calendar month, finds the local hour by which
-90% of historical days have already reached their daily maximum
-temperature. This becomes the cutoff for overshoot exit protection —
-after this hour the daily high is almost certainly set, so we hold
-the position rather than exiting on overshoot risk.
+For each station and day-of-year (DOY 1–365), finds the local hour by
+which 90% of historical days have reached their daily maximum temperature,
+using a ±WINDOW_DAYS rolling window across the full historical record.
 
-Data source: IEM ASOS hourly archive (same stations as Phase 1)
-Date range:  2010-01-01 to 2024-12-31 (matches training period)
-Output:      data/peak_hours.parquet  +  logs/peak_hours_report.txt
+This produces a smooth seasonal curve instead of hard monthly bins,
+correctly capturing gradual season transitions (e.g. the shift in peak
+timing across May as the sun climbs higher each day).
 
-Run once:
+Data source: IEM ASOS hourly archive — settlement station ICAO codes
+             (KNYC for KJFK, KMDW for KORD, others match directly)
+Date range:  START_DATE → END_DATE from config.py (default 2010–2024)
+
+Cache:  data/hourly_obs.parquet — raw hourly obs per station;
+        re-used on subsequent runs so IEM is only contacted once.
+        Add --force-fetch to re-pull all stations from IEM.
+
+Output: data/peak_hours.parquet — (station, doy, p50_peak_hour,
+        p90_peak_hour, n_days) — one row per station per DOY.
+
+Run via pipeline:
+    python run_pipeline.py --only peak_hours
+    python run_pipeline.py --only peak_hours --force   # re-fetch IEM
+
+Or standalone:
     python scripts/build_peak_hours.py
+    python scripts/build_peak_hours.py --force-fetch
 
-Results are then baked into config.py as STATION_PEAK_HOURS.
+Dynamic lookup (no config.py edits needed):
+    from utils.peak_hours import get_peak_hour
+    hour = get_peak_hour("KJFK", date(2026, 7, 15))   # → e.g. 16
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import time
-import calendar
 from io import StringIO
-from datetime import datetime
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import requests
-
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.logging_config import setup_logging
-from config import STATIONS, STATION_TIMEZONES, DATA_DIR, LOGS_DIR, START_DATE, END_DATE
+from config import (
+    STATIONS, STATION_TIMEZONES, DATA_DIR, LOGS_DIR,
+    START_DATE, END_DATE,
+    PEAK_HOURS_PARQUET, HOURLY_OBS_PARQUET,
+    settlement_station,
+)
 
 logger = setup_logging("build_peak_hours")
 
-OUTPUT_PARQUET = os.path.join(DATA_DIR, "peak_hours.parquet")
-OUTPUT_REPORT  = os.path.join(LOGS_DIR, "peak_hours_report.txt")
-
 IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
-# Percentile to use as the safety cutoff
-# 90th = by this hour, 90% of historical days have reached their max
+# Rolling window half-width in calendar days.
+# ±30 days → each DOY point draws from ~61 calendar days × 15 years ≈ 900 obs days.
+WINDOW_DAYS = 30
+
+# Percentile used as the overshoot safety cutoff.
+# p90 = by this local hour, 90 % of historical days have already hit their max.
 PERCENTILE = 90
 
+# Skip a DOY point if fewer than this many obs days fall in its window.
+MIN_WINDOW_OBS = 30
+
+# Require at least this many hourly readings in a day before trusting it.
+MIN_HOURLY_OBS_PER_DAY = 6
+
+# Safety floor: never place the peak-hour cutoff before noon local time.
+PEAK_HOUR_FLOOR = 12
+
 
 # ---------------------------------------------------------------------------
-# IEM hourly fetch
+# IEM hourly data fetch
 # ---------------------------------------------------------------------------
 
-def fetch_hourly_asos(station: str, start: str, end: str) -> pd.DataFrame | None:
+def fetch_hourly_asos(kalshi_label: str, start: str, end: str) -> pd.DataFrame | None:
     """
-    Fetch hourly temperature observations from IEM ASOS archive.
-    Returns DataFrame with columns: [valid_local, tmpf]
+    Fetch routine hourly temperature obs from IEM ASOS for a station.
 
-    Temperatures are returned in local time so peak-hour analysis
-    is directly interpretable (e.g. "3 PM local").
+    Uses settlement_station() to resolve the correct IEM ICAO code:
+        KJFK → KNYC (Central Park)
+        KORD → KMDW (Midway)
+        others → same ICAO
+
+    Returns DataFrame with columns [station, valid_local, tmpf]:
+        station     : Kalshi label (e.g. "KJFK"), NOT the IEM ICAO
+        valid_local : local-time timestamp, tz-naive (IEM converts to station TZ)
+        tmpf        : temperature in °F
+    Returns None on all-attempts failure.
     """
-    tz = STATION_TIMEZONES[station]
+    icao = settlement_station(kalshi_label)
+    tz   = STATION_TIMEZONES[kalshi_label]
 
     params = {
-        "station":  station,
-        "data":     "tmpf",
-        "year1":    start[:4], "month1": start[5:7], "day1": start[8:10],
-        "year2":    end[:4],   "month2": end[5:7],   "day2": end[8:10],
-        "tz":       tz,
-        "format":   "onlycomma",
-        "latlon":   "no",
-        "missing":  "M",
-        "trace":    "T",
-        "direct":   "no",
-        "report_type": "1",    # only routine hourly obs
+        "station":     icao,
+        "data":        "tmpf",
+        "year1":       start[:4],  "month1": start[5:7],  "day1": start[8:10],
+        "year2":       end[:4],    "month2": end[5:7],    "day2": end[8:10],
+        "tz":          tz,
+        "format":      "onlycomma",
+        "latlon":      "no",
+        "missing":     "M",
+        "trace":       "T",
+        "direct":      "no",
+        "report_type": "1",    # routine METAR / ASOS hourly obs only
     }
 
     for attempt in range(4):
         try:
-            logger.info("%s: fetching hourly ASOS (attempt %d)...", station, attempt + 1)
-            resp = requests.get(IEM_ASOS_URL, params=params, timeout=120)
+            logger.info("%s (→ %s): fetching hourly ASOS (attempt %d)…",
+                        kalshi_label, icao, attempt + 1)
+            resp = requests.get(IEM_ASOS_URL, params=params, timeout=180)
             resp.raise_for_status()
 
             text = resp.text.strip()
             if not text or len(text) < 50:
-                logger.warning("%s: empty response", station)
+                logger.warning("%s: IEM returned empty response", kalshi_label)
                 return None
 
-            df = pd.read_csv(
-                StringIO(text),
-                skiprows=0,
-                na_values=["M", "T", ""],
-            )
+            df = pd.read_csv(StringIO(text), na_values=["M", "T", ""])
 
-            # IEM returns: station, valid, tmpf
             if "valid" not in df.columns or "tmpf" not in df.columns:
-                logger.warning("%s: unexpected columns: %s", station, df.columns.tolist())
+                logger.warning("%s: unexpected IEM columns: %s",
+                               kalshi_label, df.columns.tolist())
                 return None
 
             df["valid_local"] = pd.to_datetime(df["valid"], errors="coerce")
+            df["tmpf"]        = pd.to_numeric(df["tmpf"], errors="coerce")
             df = df.dropna(subset=["valid_local", "tmpf"])
-            df["tmpf"] = pd.to_numeric(df["tmpf"], errors="coerce")
-            df = df.dropna(subset=["tmpf"])
 
-            logger.info("%s: fetched %d hourly obs", station, len(df))
-            return df[["valid_local", "tmpf"]].copy()
+            result = df[["valid_local", "tmpf"]].copy()
+            result.insert(0, "station", kalshi_label)
+
+            logger.info("%s: fetched %d hourly obs", kalshi_label, len(result))
+            return result
 
         except Exception as exc:
             wait = 2 ** attempt
-            logger.warning("%s: fetch failed (%s) — retrying in %ds", station, exc, wait)
+            logger.warning("%s: fetch failed (%s) — retrying in %ds",
+                           kalshi_label, exc, wait)
             time.sleep(wait)
 
-    logger.error("%s: all fetch attempts failed", station)
+    logger.error("%s: all IEM fetch attempts failed", kalshi_label)
     return None
 
 
+def load_or_fetch_hourly_obs(force_fetch: bool = False) -> pd.DataFrame:
+    """
+    Return a combined DataFrame of raw hourly obs for all stations.
+
+    If HOURLY_OBS_PARQUET exists and force_fetch is False, loads the cache
+    and only fetches stations that are missing from it.  If force_fetch is
+    True, re-fetches every station from IEM and replaces the file.
+
+    Raises RuntimeError if no data is available at all.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    existing:          pd.DataFrame | None = None
+    existing_stations: set[str]            = set()
+
+    if not force_fetch and os.path.exists(HOURLY_OBS_PARQUET):
+        try:
+            existing = pd.read_parquet(HOURLY_OBS_PARQUET)
+            existing_stations = set(existing["station"].unique())
+            logger.info(
+                "Hourly obs cache: %d rows, %d stations  (%s)",
+                len(existing), len(existing_stations),
+                ", ".join(sorted(existing_stations)),
+            )
+        except Exception as exc:
+            logger.warning("Could not read hourly obs cache (%s) — re-fetching all", exc)
+            existing = None
+            existing_stations = set()
+
+    to_fetch = [s for s in STATIONS if force_fetch or s not in existing_stations]
+
+    if not to_fetch:
+        logger.info("All stations in cache — skipping IEM fetch")
+        return existing
+
+    logger.info("Fetching %d station(s) from IEM: %s", len(to_fetch), to_fetch)
+
+    new_frames: list[pd.DataFrame] = []
+    for station in to_fetch:
+        df = fetch_hourly_asos(station, START_DATE, END_DATE)
+        if df is not None and not df.empty:
+            new_frames.append(df)
+        time.sleep(2)   # be polite to IEM
+
+    if not new_frames and existing is not None:
+        logger.warning("IEM fetch produced no new data — returning cached data only")
+        return existing
+
+    parts = ([existing] if existing is not None else []) + new_frames
+    if not parts:
+        raise RuntimeError(
+            "No hourly obs data available — IEM fetch failed for all stations"
+        )
+
+    combined = pd.concat(parts, ignore_index=True)
+
+    # Drop duplicates (same station + timestamp) that can appear if a station
+    # was partially cached and then re-fetched with --force-fetch.
+    combined = combined.drop_duplicates(subset=["station", "valid_local"])
+
+    combined.to_parquet(HOURLY_OBS_PARQUET, index=False)
+    logger.info(
+        "Saved hourly_obs.parquet: %d rows, %d stations",
+        len(combined), combined["station"].nunique(),
+    )
+    return combined
+
+
 # ---------------------------------------------------------------------------
-# Peak hour computation
+# Daily peak-hour extraction
 # ---------------------------------------------------------------------------
 
-def compute_peak_hours(hourly_df: pd.DataFrame, station: str) -> pd.DataFrame:
+def _extract_daily_peaks(hourly_all: pd.DataFrame, station: str) -> pd.DataFrame:
     """
-    For each (station, month) combination, compute the local hour by which
-    PERCENTILE% of historical days have already reached their daily max.
+    For each calendar day in hourly_all for a given station, determine the
+    local hour at which the daily maximum temperature FIRST occurred.
 
-    Returns DataFrame:
-        station | month | p50_peak_hour | p90_peak_hour | n_days | month_name
+    Returns DataFrame with columns [date, doy, peak_hour]:
+        date      : calendar date (datetime.date)
+        doy       : day-of-year 1–365 (leap day 366 clamped to 365)
+        peak_hour : local hour (0–23) when daily max was first reached
     """
-    df = hourly_df.copy()
+    df = hourly_all[hourly_all["station"] == station].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["date", "doy", "peak_hour"])
+
     df["date"]  = df["valid_local"].dt.date
-    df["month"] = df["valid_local"].dt.month
     df["hour"]  = df["valid_local"].dt.hour
+    # Clamp leap-year DOY 366 to 365 so the index stays 1-365
+    df["doy"]   = df["valid_local"].dt.day_of_year.clip(upper=365).astype(int)
 
+    records = []
+    for day, day_df in df.groupby("date"):
+        if len(day_df) < MIN_HOURLY_OBS_PER_DAY:
+            continue
+        max_temp = day_df["tmpf"].max()
+        # First hour at which max was reached
+        peak_row = day_df[day_df["tmpf"] == max_temp].iloc[0]
+        records.append({
+            "date":      day,
+            "doy":       int(peak_row["doy"]),
+            "peak_hour": int(peak_row["hour"]),
+        })
+
+    return pd.DataFrame(records)
+
+
+# ---------------------------------------------------------------------------
+# DOY-smoothed peak hour curve
+# ---------------------------------------------------------------------------
+
+def compute_peak_hours_doy(daily_peaks: pd.DataFrame, station: str) -> pd.DataFrame:
+    """
+    Build the DOY-smoothed p90 seasonal curve for a station.
+
+    For each DOY 1–365, gathers all historical days that fall within
+    ±WINDOW_DAYS of that DOY (wrapping around the year boundary) and
+    computes the p50 and p90 of the daily peak heating hours.
+
+    The ±30-day window means each point draws from ~61 calendar days across
+    ~15 years, providing ~900 obs per DOY — enough for stable p90 estimates.
+
+    Returns DataFrame: [station, doy, p50_peak_hour, p90_peak_hour, n_days]
+    """
     results = []
 
-    for month in range(1, 13):
-        month_df = df[df["month"] == month].copy()
+    for doy in range(1, 366):
+        lo = doy - WINDOW_DAYS
+        hi = doy + WINDOW_DAYS
 
-        if len(month_df) < 30:
-            logger.warning("%s month=%d: too few obs (%d)", station, month, len(month_df))
+        # Year-wrap: DOY 1 wraps back to DOY 336–365 of the previous year
+        if lo < 1 and hi > 365:
+            mask = pd.Series(True, index=daily_peaks.index)
+        elif lo < 1:
+            # Window clips past Jan 1 → wrap to end of year
+            mask = (daily_peaks["doy"] <= hi) | (daily_peaks["doy"] >= (365 + lo))
+        elif hi > 365:
+            # Window clips past Dec 31 → wrap to start of year
+            mask = (daily_peaks["doy"] >= lo) | (daily_peaks["doy"] <= (hi - 365))
+        else:
+            mask = (daily_peaks["doy"] >= lo) & (daily_peaks["doy"] <= hi)
+
+        window = daily_peaks[mask]
+
+        if len(window) < MIN_WINDOW_OBS:
+            logger.debug("%s DOY %3d: %d obs in window — below minimum, skipping",
+                         station, doy, len(window))
             continue
 
-        # For each day, find the hour at which the daily max occurred
-        daily_max_hours = []
-
-        for day, day_df in month_df.groupby("date"):
-            if len(day_df) < 6:   # need at least 6 hourly obs to trust the day
-                continue
-
-            max_temp = day_df["tmpf"].max()
-            # Find the FIRST hour at which max was reached
-            max_hour_row = day_df[day_df["tmpf"] == max_temp].iloc[0]
-            daily_max_hours.append(max_hour_row["hour"])
-
-        if len(daily_max_hours) < 20:
-            logger.warning("%s month=%d: too few valid days (%d)", station, month, len(daily_max_hours))
-            continue
-
-        hours_arr = np.array(daily_max_hours)
-        p50 = int(np.percentile(hours_arr, 50))
-        p90 = int(np.percentile(hours_arr, PERCENTILE))
-
-        # Safety floor: never set cutoff earlier than noon local
-        p90 = max(p90, 12)
+        hours = window["peak_hour"].values
+        p50   = int(np.percentile(hours, 50))
+        p90   = int(np.percentile(hours, PERCENTILE))
+        p90   = max(p90, PEAK_HOUR_FLOOR)   # never before noon
 
         results.append({
             "station":       station,
-            "month":         month,
-            "month_name":    calendar.month_abbr[month],
+            "doy":           doy,
             "p50_peak_hour": p50,
             "p90_peak_hour": p90,
-            "n_days":        len(daily_max_hours),
+            "n_days":        len(window),
         })
-
-        logger.info(
-            "%s %s: p50=%dh p90=%dh (n=%d)",
-            station, calendar.month_abbr[month], p50, p90, len(daily_max_hours),
-        )
 
     return pd.DataFrame(results)
 
 
 # ---------------------------------------------------------------------------
-# Report generator
+# Main entry point
 # ---------------------------------------------------------------------------
 
-def write_report(all_results: pd.DataFrame):
-    """Write a human-readable summary for config.py population."""
-    lines = ["=" * 70]
-    lines.append("PEAK HEATING HOURS — 90th Percentile by Station and Month")
-    lines.append("Use p90_peak_hour as STATION_PEAK_HOURS in config.py")
-    lines.append("=" * 70)
-    lines.append("")
+def build_peak_hours(force_fetch: bool = False) -> None:
+    """
+    Full build:
+      1. Load (or fetch) raw hourly obs → hourly_obs.parquet
+      2. Extract daily peak-hour records per station
+      3. Compute DOY-smoothed p90 curve per station
+      4. Save → peak_hours.parquet
 
-    # Per-station summary: worst-case (latest) p90 by season
-    lines.append("── config.py STATION_PEAK_HOURS (p90, use conservative/latest) ──")
-    lines.append("")
-    lines.append("STATION_PEAK_HOURS = {")
+    After this runs, get_peak_hour() in utils/peak_hours.py will
+    automatically use the new parquet on next call (or after invalidate_cache()).
+    """
+    logger.info(
+        "build_peak_hours start  window=±%d days  p%d  floor=%dh",
+        WINDOW_DAYS, PERCENTILE, PEAK_HOUR_FLOOR,
+    )
+    logger.info("Stations (%d): %s", len(STATIONS), STATIONS)
+    logger.info("Date range: %s → %s", START_DATE, END_DATE)
 
-    for station in STATIONS:
-        sdf = all_results[all_results["station"] == station]
-        if len(sdf) == 0:
-            continue
+    hourly_all = load_or_fetch_hourly_obs(force_fetch=force_fetch)
 
-        # Build month dict
-        month_dict = {}
-        for _, row in sdf.iterrows():
-            month_dict[int(row["month"])] = int(row["p90_peak_hour"])
-
-        # Fill any missing months with 15 (3 PM) as safe default
-        full_dict = {m: month_dict.get(m, 15) for m in range(1, 13)}
-
-        lines.append(f'    "{station}": {{')
-        month_strs = [f"{m}: {h}" for m, h in full_dict.items()]
-        lines.append("        " + ", ".join(month_strs[:6]))
-        lines.append("        " + ", ".join(month_strs[6:]))
-        lines.append("    },")
-
-    lines.append("}")
-    lines.append("")
-
-    # Detailed table per station
-    for station in STATIONS:
-        sdf = all_results[all_results["station"] == station]
-        if len(sdf) == 0:
-            continue
-
-        lines.append(f"\n── {station} ─────────────────────────────────────────")
-        lines.append(f"{'Month':<8} {'p50':>6} {'p90':>6} {'n_days':>8}")
-        lines.append("-" * 32)
-
-        for _, row in sdf.sort_values("month").iterrows():
-            lines.append(
-                f"{row['month_name']:<8} {row['p50_peak_hour']:>6} "
-                f"{row['p90_peak_hour']:>6} {row['n_days']:>8}"
-            )
-
-    report = "\n".join(lines)
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    with open(OUTPUT_REPORT, "w") as f:
-        f.write(report)
-
-    print("\n" + report)
-    logger.info("Report written to %s", OUTPUT_REPORT)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def build_peak_hours():
-    logger.info("Starting peak hours analysis")
-    logger.info("Stations: %s", STATIONS)
-    logger.info("Date range: %s to %s", START_DATE, END_DATE)
-
-    os.makedirs(DATA_DIR, exist_ok=True)
-    all_results = []
+    all_results: list[pd.DataFrame] = []
 
     for station in STATIONS:
-        logger.info("=" * 50)
-        logger.info("Processing %s", station)
+        logger.info("── %s ──────────────────────────────", station)
 
-        hourly_df = fetch_hourly_asos(station, START_DATE, END_DATE)
-        if hourly_df is None or len(hourly_df) == 0:
-            logger.error("%s: no data — skipping", station)
+        daily = _extract_daily_peaks(hourly_all, station)
+        if daily.empty:
+            logger.warning("%s: no valid daily peaks — skipping", station)
             continue
 
-        station_results = compute_peak_hours(hourly_df, station)
+        logger.info(
+            "%s: %d valid station-days, DOY range %d–%d",
+            station, len(daily), daily["doy"].min(), daily["doy"].max(),
+        )
 
-        if len(station_results) > 0:
-            all_results.append(station_results)
+        doy_df = compute_peak_hours_doy(daily, station)
+        if doy_df.empty:
+            logger.warning("%s: no DOY results produced — skipping", station)
+            continue
 
-        # Be polite to IEM server
-        time.sleep(2)
+        all_results.append(doy_df)
+
+        # Log a seasonal snapshot at four representative DOYs
+        for ref_doy, label in [(15, "Jan"), (105, "Apr"), (196, "Jul"), (288, "Oct")]:
+            row = doy_df[doy_df["doy"] == ref_doy]
+            if not row.empty:
+                r = row.iloc[0]
+                logger.info(
+                    "  %s  DOY %3d (%s):  p50=%02dh  p90=%02dh  n=%d",
+                    station, ref_doy, label,
+                    r["p50_peak_hour"], r["p90_peak_hour"], r["n_days"],
+                )
 
     if not all_results:
-        logger.error("No results produced — check network and IEM availability")
+        logger.error(
+            "No results produced — check IEM connectivity or hourly_obs.parquet"
+        )
         return
 
     combined = pd.concat(all_results, ignore_index=True)
-    combined.to_parquet(OUTPUT_PARQUET, index=False)
-    logger.info("Saved peak_hours.parquet: %d rows", len(combined))
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined.to_parquet(PEAK_HOURS_PARQUET, index=False)
 
-    write_report(combined)
-    logger.info("Done. Copy STATION_PEAK_HOURS from %s into config.py", OUTPUT_REPORT)
+    logger.info(
+        "Saved peak_hours.parquet: %d rows  (%d stations × ≤365 DOYs)",
+        len(combined), combined["station"].nunique(),
+    )
+    logger.info(
+        "Lookup: from utils.peak_hours import get_peak_hour; "
+        "invalidate_cache() if scheduler is already running"
+    )
 
 
 if __name__ == "__main__":
-    build_peak_hours()
+    ap = argparse.ArgumentParser(
+        description="Build DOY-smoothed peak heating hours from IEM hourly ASOS data"
+    )
+    ap.add_argument(
+        "--force-fetch", action="store_true",
+        help="Re-fetch all stations from IEM even if hourly_obs.parquet exists",
+    )
+    args = ap.parse_args()
+    build_peak_hours(force_fetch=args.force_fetch)

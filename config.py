@@ -219,6 +219,9 @@ PATTERNS_PARQUET = os.path.join(DATA_DIR, "pattern_labels.parquet")
 CENTROIDS_PKL    = os.path.join(DATA_DIR, "cluster_centroids.pkl")
 FCST_PARQUET     = os.path.join(DATA_DIR, "model_fcst.parquet")
 BIAS_PARQUET     = os.path.join(DATA_DIR, "bias_table.parquet")
+# Peak heating hours — built by scripts/build_peak_hours.py
+HOURLY_OBS_PARQUET = os.path.join(DATA_DIR, "hourly_obs.parquet")    # raw IEM hourly obs cache
+PEAK_HOURS_PARQUET = os.path.join(DATA_DIR, "peak_hours.parquet")    # DOY-smoothed p90 curve
 
 # ---------------------------------------------------------------------------
 # External API credentials (loaded from .env)

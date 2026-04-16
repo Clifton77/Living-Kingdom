@@ -1,23 +1,26 @@
 """
 Phase 1 pipeline orchestrator.
 
-Runs all 5 historical database build scripts in dependency order.
+Runs all historical database build scripts in dependency order.
 Each script is idempotent — skips if output already exists (unless --force).
 
 Dependency order:
-  Scripts 1, 2, 4  → no dependencies (can run in any order)
-  Script 3         → requires script 2 output (z500_anomaly.parquet)
-  Script 5         → requires scripts 1, 3, 4 outputs
+  obs, 500mb, forecasts  → no dependencies (can run in any order)
+  clusters               → requires 500mb  (z500_anomaly.parquet)
+  bias                   → requires obs, clusters, forecasts
+  peak_hours             → independent (fetches its own IEM hourly data)
 
 Usage:
-  python run_pipeline.py                     # run all missing outputs
-  python run_pipeline.py --force             # re-run everything
-  python run_pipeline.py --only obs          # run only script 1
-  python run_pipeline.py --only 500mb        # run only script 2
-  python run_pipeline.py --only clusters     # run only script 3
-  python run_pipeline.py --only forecasts    # run only script 4
-  python run_pipeline.py --only bias         # run only script 5
-  python run_pipeline.py --skip 500mb        # skip script 2, run others
+  python run_pipeline.py                          # run all missing outputs
+  python run_pipeline.py --force                  # re-run everything
+  python run_pipeline.py --only obs               # run only obs database
+  python run_pipeline.py --only 500mb             # run only 500mb database
+  python run_pipeline.py --only clusters          # run only pattern clusters
+  python run_pipeline.py --only forecasts         # run only forecast archive
+  python run_pipeline.py --only bias              # run only bias table
+  python run_pipeline.py --only peak_hours        # run only peak hours
+  python run_pipeline.py --skip 500mb             # skip 500mb, run others
+  python run_pipeline.py --only peak_hours --force  # re-fetch IEM hourly data
 """
 import os
 import sys
@@ -28,7 +31,7 @@ from datetime import datetime
 
 from config import (
     OBS_PARQUET, Z500_PARQUET, PATTERNS_PARQUET,
-    FCST_PARQUET, BIAS_PARQUET, LOGS_DIR,
+    FCST_PARQUET, BIAS_PARQUET, PEAK_HOURS_PARQUET, LOGS_DIR,
 )
 from utils.logging_config import setup_logging
 
@@ -37,14 +40,15 @@ logger = setup_logging("run_pipeline")
 STEPS = {
     "obs":       {"output": OBS_PARQUET,      "label": "Script 1: Build obs database"},
     "500mb":     {"output": Z500_PARQUET,      "label": "Script 2: Build 500mb database"},
-    "clusters":  {"output": PATTERNS_PARQUET,  "label": "Script 3: Build pattern clusters",
-                  "requires": ["500mb"]},
-    "forecasts": {"output": FCST_PARQUET,      "label": "Script 4: Build forecast archive"},
-    "bias":      {"output": BIAS_PARQUET,      "label": "Script 5: Build bias table",
-                  "requires": ["obs", "clusters", "forecasts"]},
+    "clusters":   {"output": PATTERNS_PARQUET,   "label": "Script 3: Build pattern clusters",
+                   "requires": ["500mb"]},
+    "forecasts":  {"output": FCST_PARQUET,       "label": "Script 4: Build forecast archive"},
+    "bias":       {"output": BIAS_PARQUET,       "label": "Script 5: Build bias table",
+                   "requires": ["obs", "clusters", "forecasts"]},
+    "peak_hours": {"output": PEAK_HOURS_PARQUET, "label": "Script 6: Build peak heating hours"},
 }
 
-RUN_ORDER = ["obs", "500mb", "forecasts", "clusters", "bias"]
+RUN_ORDER = ["obs", "500mb", "forecasts", "clusters", "bias", "peak_hours"]
 
 
 def run_step(name: str, force: bool) -> bool:
@@ -89,6 +93,12 @@ def run_step(name: str, force: bool) -> bool:
         elif name == "bias":
             from scripts.build_bias_table import build_bias_table
             build_bias_table()
+        elif name == "peak_hours":
+            from scripts.build_peak_hours import build_peak_hours
+            from utils.peak_hours import invalidate_cache as _phx
+            # --force on the pipeline re-fetches IEM hourly obs from scratch
+            build_peak_hours(force_fetch=force)
+            _phx()   # clear in-process cache so scheduler picks up new curves
 
         elapsed = time.time() - start
         logger.info("DONE: %s in %.1f seconds", name, elapsed)
