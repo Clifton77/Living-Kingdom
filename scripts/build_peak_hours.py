@@ -59,6 +59,13 @@ logger = setup_logging("build_peak_hours")
 
 IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
+# IEM ASOS overrides for stations whose settlement ICAO is not an airport/ASOS
+# station.  KNYC (Central Park) has no ASOS record on IEM — use JFK airport
+# instead.  Peak-hour TIMING is effectively identical across a metro area.
+_IEM_ASOS_ICAO: dict[str, str] = {
+    "KJFK": "KJFK",   # settlement = KNYC (Central Park) — not in IEM ASOS
+}
+
 # Rolling window half-width in calendar days.
 # ±30 days → each DOY point draws from ~61 calendar days × 15 years ≈ 900 obs days.
 WINDOW_DAYS = 30
@@ -81,75 +88,103 @@ PEAK_HOUR_FLOOR = 12
 # IEM hourly data fetch
 # ---------------------------------------------------------------------------
 
-def fetch_hourly_asos(kalshi_label: str, start: str, end: str) -> pd.DataFrame | None:
+def _fetch_one_year(icao: str, tz: str, year: int) -> pd.DataFrame | None:
     """
-    Fetch routine hourly temperature obs from IEM ASOS for a station.
+    Fetch one calendar year of hourly ASOS obs from IEM for a single station.
 
-    Uses settlement_station() to resolve the correct IEM ICAO code:
-        KJFK → KNYC (Central Park)
-        KORD → KMDW (Midway)
-        others → same ICAO
+    Fetching year-by-year (rather than the full 15-year range in one request)
+    avoids IEM's response-size limit, which silently truncates large queries
+    and returns only a few hundred rows instead of ~8 700 per year.
 
-    Returns DataFrame with columns [station, valid_local, tmpf]:
-        station     : Kalshi label (e.g. "KJFK"), NOT the IEM ICAO
-        valid_local : local-time timestamp, tz-naive (IEM converts to station TZ)
-        tmpf        : temperature in °F
-    Returns None on all-attempts failure.
+    No report_type filter — the filter was excluding most ASOS automated obs
+    and is unnecessary here (we only request tmpf, not SPECI/remarks).
     """
-    icao = settlement_station(kalshi_label)
-    tz   = STATION_TIMEZONES[kalshi_label]
-
     params = {
-        "station":     icao,
-        "data":        "tmpf",
-        "year1":       start[:4],  "month1": start[5:7],  "day1": start[8:10],
-        "year2":       end[:4],    "month2": end[5:7],    "day2": end[8:10],
-        "tz":          tz,
-        "format":      "onlycomma",
-        "latlon":      "no",
-        "missing":     "M",
-        "trace":       "T",
-        "direct":      "no",
-        "report_type": "1",    # routine METAR / ASOS hourly obs only
+        "station":  icao,
+        "data":     "tmpf",
+        "year1":    str(year), "month1": "01", "day1": "01",
+        "year2":    str(year), "month2": "12", "day2": "31",
+        "tz":       tz,
+        "format":   "onlycomma",
+        "latlon":   "no",
+        "missing":  "M",
+        "trace":    "T",
+        "direct":   "no",
     }
 
-    for attempt in range(4):
+    for attempt in range(3):
         try:
-            logger.info("%s (→ %s): fetching hourly ASOS (attempt %d)…",
-                        kalshi_label, icao, attempt + 1)
-            resp = requests.get(IEM_ASOS_URL, params=params, timeout=180)
+            resp = requests.get(IEM_ASOS_URL, params=params, timeout=90)
             resp.raise_for_status()
 
             text = resp.text.strip()
-            if not text or len(text) < 50:
-                logger.warning("%s: IEM returned empty response", kalshi_label)
-                return None
+            if not text or len(text) < 30:
+                return None   # genuinely no data for this year
 
             df = pd.read_csv(StringIO(text), na_values=["M", "T", ""])
 
             if "valid" not in df.columns or "tmpf" not in df.columns:
-                logger.warning("%s: unexpected IEM columns: %s",
-                               kalshi_label, df.columns.tolist())
                 return None
 
             df["valid_local"] = pd.to_datetime(df["valid"], errors="coerce")
             df["tmpf"]        = pd.to_numeric(df["tmpf"], errors="coerce")
             df = df.dropna(subset=["valid_local", "tmpf"])
 
-            result = df[["valid_local", "tmpf"]].copy()
-            result.insert(0, "station", kalshi_label)
-
-            logger.info("%s: fetched %d hourly obs", kalshi_label, len(result))
-            return result
+            return df[["valid_local", "tmpf"]].copy() if not df.empty else None
 
         except Exception as exc:
             wait = 2 ** attempt
-            logger.warning("%s: fetch failed (%s) — retrying in %ds",
-                           kalshi_label, exc, wait)
+            logger.debug("%s %d: attempt %d failed (%s) — retrying in %ds",
+                         icao, year, attempt + 1, exc, wait)
             time.sleep(wait)
 
-    logger.error("%s: all IEM fetch attempts failed", kalshi_label)
     return None
+
+
+def fetch_hourly_asos(kalshi_label: str, start: str, end: str) -> pd.DataFrame | None:
+    """
+    Fetch routine hourly temperature obs from IEM ASOS for a station,
+    requesting one calendar year at a time to stay within IEM's response
+    size limits.
+
+    Station ICAO resolution:
+        - Uses _IEM_ASOS_ICAO override table first (e.g. KJFK stays KJFK,
+          because KNYC/Central Park has no ASOS record on IEM).
+        - Falls back to settlement_station() for all others
+          (KORD → KMDW, rest are direct matches).
+
+    Returns DataFrame with columns [station, valid_local, tmpf]:
+        station     : Kalshi label (e.g. "KJFK"), NOT the IEM ICAO
+        valid_local : local-time timestamp, tz-naive (already in station TZ)
+        tmpf        : temperature °F
+    Returns None if every year failed.
+    """
+    icao = _IEM_ASOS_ICAO.get(kalshi_label) or settlement_station(kalshi_label)
+    tz   = STATION_TIMEZONES[kalshi_label]
+
+    start_year = int(start[:4])
+    end_year   = int(end[:4])
+
+    year_frames: list[pd.DataFrame] = []
+
+    for year in range(start_year, end_year + 1):
+        df = _fetch_one_year(icao, tz, year)
+        if df is not None and not df.empty:
+            year_frames.append(df)
+        # Tiny pause — be polite; also avoids IEM rate-limiting on rapid bursts
+        time.sleep(0.3)
+
+    if not year_frames:
+        logger.error("%s (→ %s): no data returned for any year %d–%d",
+                     kalshi_label, icao, start_year, end_year)
+        return None
+
+    result = pd.concat(year_frames, ignore_index=True)
+    result.insert(0, "station", kalshi_label)
+
+    logger.info("%s (→ %s): fetched %d hourly obs (%d–%d)",
+                kalshi_label, icao, len(result), start_year, end_year)
+    return result
 
 
 def load_or_fetch_hourly_obs(force_fetch: bool = False) -> pd.DataFrame:
