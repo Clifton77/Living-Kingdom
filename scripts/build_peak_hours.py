@@ -59,12 +59,10 @@ logger = setup_logging("build_peak_hours")
 
 IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
-# IEM ASOS overrides for stations whose settlement ICAO is not an airport/ASOS
-# station.  KNYC (Central Park) has no ASOS record on IEM — use JFK airport
-# instead.  Peak-hour TIMING is effectively identical across a metro area.
-_IEM_ASOS_ICAO: dict[str, str] = {
-    "KJFK": "KJFK",   # settlement = KNYC (Central Park) — not in IEM ASOS
-}
+# IEM ASOS station overrides — only needed if a settlement ICAO is absent from
+# IEM's network.  Currently empty: all 20 settlement stations (including KNYC
+# Central Park for KJFK) are present in IEM ASOS.
+_IEM_ASOS_ICAO: dict[str, str] = {}
 
 # Rolling window half-width in calendar days.
 # ±30 days → each DOY point draws from ~61 calendar days × 15 years ≈ 900 obs days.
