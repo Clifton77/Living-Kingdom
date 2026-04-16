@@ -1,19 +1,28 @@
 """
 Multi-tier APScheduler for the weather trading bot.
 
-Tier 1 — every 5 minutes:
-    TAF amendment detector. Checks for AMD flags. If a TAF changes
-    significantly, re-evaluates open positions and re-runs signal.
+Tier 1 — sleep-based, ~5 min after each completion:
+    Main trading engine. Fetches METARs + IEM 1-min running max for all
+    stations.  Executes exits first (stop-loss, overshoot, undershoot,
+    early profit), then entries (fresh Kalshi price vs cached Tier 3
+    distribution — first entries, adjacent-bucket expansions, repositions).
 
-Tier 2 — every 30 minutes:
-    METAR running high tracker. Fetches current obs for each station.
-    Updates P/L on open positions. Evaluates exit conditions.
-    Checks early profit exit if temp is locking into a bucket.
+    Scheduling note: standard ASOS posts at ~:53-:58 past the hour.
+    A fixed IntervalTrigger aligned to :00/:05/... can read obs up to
+    12 min stale.  Instead, Tier 1 self-reschedules via DateTrigger
+    (TIER1_INTERVAL_SECONDS after its own completion).  The loop drifts
+    naturally toward ASOS post times, keeping obs freshness ≤ a few min.
+
+Tier 2 — every 10 minutes (clock-aligned IntervalTrigger):
+    TAF amendment monitor.  Detects AMD flags; if found, regenerates the
+    signal for that station immediately.  If the new signal flips to
+    SKIP/HARD_SKIP or edge on the open bucket inverts, auto-closes the
+    position without waiting for the next Tier 1 cycle.
 
 Tier 3 — every 6 hours (aligned to GFS cycles: 00Z, 06Z, 12Z, 18Z + 30min):
-    Full signal pass. Classifies 500mb pattern, fetches live forecasts,
-    computes bias-adjusted distributions, fetches Kalshi prices, generates
-    trade signals. Places orders for TRADE decisions.
+    Full signal recompute only.  Classifies 500mb pattern, fetches live
+    forecasts, computes bias-adjusted distributions.  Updates
+    _latest_signals for Tier 1 to act on.  No orders placed.
 
 Kill switch halts all tiers immediately. Bot can resume from dashboard.
 """
@@ -97,10 +106,14 @@ _liquidity_retry_counts: dict[str, int] = {}   # key = market_id
 _tier_last_run: dict[str, str] = {
     "tier1":      "never",
     "tier2":      "never",
-    "price_scan": "never",
     "tier3":      "never",
     "settlement": "never",
 }
+
+# Per-station entry lock — prevents Tier 1 from double-entering while a
+# concurrent fill confirmation is in flight.
+_entry_lock         = threading.Lock()
+_entry_in_progress: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -125,51 +138,91 @@ def get_kalshi() -> KalshiClient:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 — TAF amendment monitor (every 5 min)
+# Tier 2 — TAF amendment monitor + auto-close on signal flip (every 10 min)
 # ---------------------------------------------------------------------------
 
-def tier1_taf_monitor():
+def tier2_taf_monitor():
     """
-    Check each station's TAF for amendments.
-    If an AMD is detected on a station with an open position,
-    re-evaluate whether the position still makes sense.
+    Check each station's TAF for amendments every 10 minutes.
+    On AMD detection: immediately regenerate the signal.  If the new
+    signal flips to SKIP/HARD_SKIP, or the edge on an open bucket inverts
+    (model_prob < Kalshi ask), auto-close that position without waiting
+    for the next Tier 1 cycle.
     """
-    _tier_last_run["tier1"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    _tier_last_run["tier2"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
     push_event("tier_heartbeat", _tier_last_run)
-    logger.info("[Tier1] TAF amendment scan")
-    rm = get_risk_manager()
+    logger.info("[Tier2] TAF amendment scan")
+    rm     = get_risk_manager()
+    kalshi = get_kalshi()
 
     if rm.is_halted:
-        logger.info("[Tier1] Bot halted — skipping")
+        logger.info("[Tier2] Bot halted — skipping")
         return
 
     for station in STATIONS:
         try:
             taf = interpret_taf(station)
-            if taf.has_amd:
-                logger.warning("[Tier1] AMD detected at %s — %s", station, taf.summary)
+            if not taf.has_amd:
+                continue
 
-                # Flag any open positions at this station for immediate re-evaluation
-                open_mkt_ids = [
-                    mid for mid, pos in rm.state.positions.items()
-                    if pos.station == station
-                ]
-                if open_mkt_ids:
-                    logger.warning(
-                        "[Tier1] %s has %d open position(s) — triggering Tier3 re-evaluation",
-                        station, len(open_mkt_ids),
+            logger.warning("[Tier2] AMD at %s — %s", station, taf.summary)
+            _single_station_signal_pass(station)
+
+            with _latest_signals_lock:
+                sig = _latest_signals.get(station)
+
+            open_positions = {
+                mid: pos for mid, pos in rm.state.positions.items()
+                if pos.station == station
+            }
+            if not open_positions:
+                continue
+
+            for market_id, pos in open_positions.items():
+                # Skip if already closed by a concurrent Tier 1 run
+                if market_id not in rm.state.positions:
+                    continue
+
+                if sig is None:
+                    continue
+
+                # Close if: weather prohibits trade, or model edge inverted on held bucket
+                skip_signal = sig.decision in ("SKIP", "HARD_SKIP")
+                edge_inverted = (
+                    sig.top_bucket == pos.bucket_lower and sig.top_edge < 0.0
+                )
+
+                if not (skip_signal or edge_inverted):
+                    logger.info(
+                        "[Tier2] %s AMD processed — signal still %s (edge=%+.3f), no auto-close",
+                        station, sig.decision, sig.top_edge,
                     )
-                    # Trigger an immediate mini signal pass for this station
-                    _single_station_signal_pass(station)
+                    continue
+
+                snap = kalshi.get_market_snapshot(
+                    station, date.fromisoformat(pos.event_date), pos.bucket_lower
+                )
+                if snap is None:
+                    logger.warning("[Tier2] Cannot fetch snapshot for %s — skipping auto-close", market_id)
+                    continue
+
+                reason = (
+                    f"TAF AMD auto-close: signal→{sig.decision} "
+                    f"(edge={sig.top_edge:+.3f})"
+                    if skip_signal else
+                    f"TAF AMD auto-close: edge inverted on bucket {pos.bucket_lower}°F "
+                    f"(edge={sig.top_edge:+.3f})"
+                )
+                logger.warning("[Tier2] Auto-closing %s — %s", market_id, reason)
+                _execute_exit(market_id, pos, snap.yes_bid, reason, kalshi, rm)
 
         except Exception as exc:
-            logger.error("[Tier1] Error scanning %s: %s", station, exc)
+            logger.error("[Tier2] Error scanning %s: %s", station, exc)
 
 
 def _single_station_signal_pass(station: str):
-    """Re-run signal generation for one station (called on AMD detection)."""
+    """Re-run signal generation for one station (called on AMD detection or stale signal)."""
     try:
-        import pandas as pd
         from scripts.pattern_classifier import classify_pattern
         from scripts.signal_engine import generate_signal, _load_bias_table
 
@@ -184,132 +237,353 @@ def _single_station_signal_pass(station: str):
         with _latest_signals_lock:
             _latest_signals[station] = sig
 
-        logger.info("[Tier1] %s re-signal: %s | edge=%+.3f", station, sig.decision, sig.top_edge)
+        logger.info("[SignalRefresh] %s: %s | edge=%+.3f", station, sig.decision, sig.top_edge)
 
     except Exception as exc:
-        logger.error("[Tier1] Single-station signal failed for %s: %s", station, exc)
+        logger.error("[SignalRefresh] Failed for %s: %s", station, exc)
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — METAR running high + position management (every 30 min)
+# Tier 1 — METAR + exits + entries (sleep-based, ~5 min after completion)
 # ---------------------------------------------------------------------------
 
-def tier2_metar_and_positions():
+def _reschedule_tier1() -> None:
     """
-    Fetch current METAR obs and IEM 1-min running max for all stations.
-    Update open position P/L and evaluate exit conditions including:
-      - undershoot warning (approaching peak hour, tracking low)
-      - undershoot hard exit (past peak hour, definitive miss)
-      - overshoot exit (before peak hour, running max near bucket upper)
-      - early profit exit (bid ≥ 85¢)
-    Execute exits if triggered. Log warnings for manual review.
-    """
-    _tier_last_run["tier2"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    push_event("tier_heartbeat", _tier_last_run)
-    logger.info("[Tier2] METAR + position update cycle")
-    rm     = get_risk_manager()
-    kalshi = get_kalshi()
+    Schedule the next Tier 1 run for TIER1_INTERVAL_SECONDS from now.
 
-    if rm.is_halted:
-        logger.info("[Tier2] Bot halted — skipping")
+    Called in a finally block so the next fire time is measured from
+    completion, not from a fixed clock.  This drifts naturally toward
+    ASOS post times (~:53-:58) so obs are always close to fresh.
+    """
+    global _scheduler
+    if _scheduler is None or not _scheduler.running:
         return
+    run_at = datetime.now(timezone.utc) + timedelta(seconds=TIER1_INTERVAL_SECONDS)
+    _scheduler.add_job(
+        tier1_metar_entries_exits,
+        trigger=DateTrigger(run_date=run_at, timezone="UTC"),
+        id="tier1_metar",
+        name="METAR + Entries + Exits",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.debug("[Tier1] Next run scheduled for %s UTC", run_at.strftime("%H:%M"))
 
-    for station in STATIONS:
-        try:
-            metar = get_metar(station)
-            obs_temp = metar.temp_f
 
-            # Find any open positions for this station
-            station_positions = {
-                mid: pos for mid, pos in rm.state.positions.items()
-                if pos.station == station
-            }
+def tier1_metar_entries_exits():
+    """
+    ~5 min sleep-based cycle (post-ASOS-aligned):
+      Pass 1 — Exits:  for each open position, evaluate stop-loss / overshoot /
+                        undershoot / early profit using fresh METAR + IEM running max.
+      Pass 2 — Entries: for each station with a TRADE signal and fresh Kalshi
+                        prices, execute first entries, adjacent-bucket expansions,
+                        or repositions as warranted.
 
-            if not station_positions:
-                continue
+    Self-reschedules via _reschedule_tier1().
+    """
+    try:
+        _tier_last_run["tier1"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        push_event("tier_heartbeat", _tier_last_run)
+        logger.info("[Tier1] METAR + entries + exits cycle")
+        rm     = get_risk_manager()
+        kalshi = get_kalshi()
 
-            # Current local hour at this station
-            local_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
-            local_hour = local_now.hour
+        if rm.is_halted:
+            logger.info("[Tier1] Bot halted — skipping")
+            return
 
-            # IEM 1-min running max + METAR confluence
-            rm_data     = running_max_with_confluence(station, date.today())
-            running_max = rm_data["running_max_f"]
-            if not rm_data["in_confluence"]:
-                logger.warning("[Tier2] %s temp confluence issue: %s", station, rm_data["note"])
+        event_date = date.today()
+        now_utc    = datetime.now(timezone.utc)
 
-            for market_id, pos in station_positions.items():
-                # Fetch current market bid/ask
-                snap = kalshi.get_market_snapshot(
-                    station, date.fromisoformat(pos.event_date), pos.bucket_lower
-                )
-                if snap is None:
-                    logger.warning("[Tier2] No snapshot for %s", market_id)
+        # ── Pass 1: exits ────────────────────────────────────────────────────
+        for station in STATIONS:
+            try:
+                metar    = get_metar(station)
+                obs_temp = metar.temp_f
+
+                station_positions = {
+                    mid: pos for mid, pos in rm.state.positions.items()
+                    if pos.station == station
+                }
+                if not station_positions:
                     continue
 
-                # Get current edge from latest signal — re-run if stale
-                with _latest_signals_lock:
-                    sig = _latest_signals.get(station)
+                local_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+                local_hour = local_now.hour
 
-                if sig is not None:
-                    age_hours = (
-                        datetime.now(timezone.utc) - sig.signal_generated_at
-                    ).total_seconds() / 3600
-                    if age_hours > STALE_SIGNAL_HOURS:
-                        logger.info(
-                            "[Tier2] Signal for %s is %.1fh old (> %dh) — refreshing",
-                            station, age_hours, STALE_SIGNAL_HOURS,
-                        )
-                        _single_station_signal_pass(station)
-                        with _latest_signals_lock:
-                            sig = _latest_signals.get(station)
+                rm_data     = running_max_with_confluence(station, date.today())
+                running_max = rm_data["running_max_f"]
+                if not rm_data["in_confluence"]:
+                    logger.warning("[Tier1] %s temp confluence issue: %s", station, rm_data["note"])
 
-                current_edge = sig.top_edge if sig and sig.top_bucket == pos.bucket_lower else 0.0
+                for market_id, pos in station_positions.items():
+                    snap = kalshi.get_market_snapshot(
+                        station, date.fromisoformat(pos.event_date), pos.bucket_lower
+                    )
+                    if snap is None:
+                        logger.warning("[Tier1] No snapshot for %s", market_id)
+                        continue
 
-                # Peak heating hour — DOY-smoothed seasonal curve
-                peak_heating_hour = get_peak_hour(station, date.fromisoformat(pos.event_date))
+                    with _latest_signals_lock:
+                        sig = _latest_signals.get(station)
 
-                # Update position and evaluate exit
-                exit_decision = rm.update_position(
-                    market_id=market_id,
-                    current_bid=snap.yes_bid,
-                    current_ask=snap.yes_ask,
-                    current_edge=current_edge,
-                    current_obs_temp=obs_temp,
-                    running_max=running_max,
-                    local_hour=local_hour,
-                    peak_heating_hour=peak_heating_hour,
-                )
+                    if sig is not None:
+                        age_hours = (
+                            datetime.now(timezone.utc) - sig.signal_generated_at
+                        ).total_seconds() / 3600
+                        if age_hours > STALE_SIGNAL_HOURS:
+                            logger.info(
+                                "[Tier1] Signal for %s is %.1fh old — refreshing",
+                                station, age_hours,
+                            )
+                            _single_station_signal_pass(station)
+                            with _latest_signals_lock:
+                                sig = _latest_signals.get(station)
 
-                log_level = (
-                    logger.warning if exit_decision.urgency in ("immediate", "warning")
-                    else logger.info
-                )
-                log_level(
-                    "[Tier2] %s bid=%.2f P/L=$%+.4f (%.1f%%) | [%s] %s",
-                    market_id, snap.yes_bid,
-                    pos.unrealized_pnl, pos.pnl_pct,
-                    exit_decision.urgency.upper(),
-                    exit_decision.reason,
-                )
+                    current_edge      = sig.top_edge if sig and sig.top_bucket == pos.bucket_lower else 0.0
+                    peak_heating_hour = get_peak_hour(station, date.fromisoformat(pos.event_date))
 
-                if exit_decision.should_exit:
-                    _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
-                elif exit_decision.urgency == "warning":
-                    # Warning surfaced in logs and dashboard — no auto-exit yet.
-                    # Dashboard will show a manual close button on the position card.
-                    logger.warning(
-                        "[Tier2] UNDERSHOOT WARNING on %s — manual close available on dashboard",
-                        market_id,
+                    exit_decision = rm.update_position(
+                        market_id=market_id,
+                        current_bid=snap.yes_bid,
+                        current_ask=snap.yes_ask,
+                        current_edge=current_edge,
+                        current_obs_temp=obs_temp,
+                        running_max=running_max,
+                        local_hour=local_hour,
+                        peak_heating_hour=peak_heating_hour,
                     )
 
-        except Exception as exc:
-            logger.error("[Tier2] Error processing %s: %s", station, exc)
+                    log_level = (
+                        logger.warning if exit_decision.urgency in ("immediate", "warning")
+                        else logger.info
+                    )
+                    log_level(
+                        "[Tier1] %s bid=%.2f P/L=$%+.4f (%.1f%%) | [%s] %s",
+                        market_id, snap.yes_bid,
+                        pos.unrealized_pnl, pos.pnl_pct,
+                        exit_decision.urgency.upper(),
+                        exit_decision.reason,
+                    )
+
+                    if exit_decision.should_exit:
+                        _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
+                    elif exit_decision.urgency == "warning":
+                        logger.warning(
+                            "[Tier1] UNDERSHOOT WARNING on %s — manual close available on dashboard",
+                            market_id,
+                        )
+
+            except Exception as exc:
+                logger.error("[Tier1] Exit pass error at %s: %s", station, exc)
+
+        # ── Pass 2: entries ──────────────────────────────────────────────────
+        entered = 0
+        for station in STATIONS:
+            try:
+                # Entry lock — prevents double-entry if a previous cycle's fill
+                # confirmation is still in flight.
+                with _entry_lock:
+                    if station in _entry_in_progress:
+                        continue
+                    _entry_in_progress.add(station)
+
+                try:
+                    _tier1_entry_pass(
+                        station, event_date, now_utc, rm, kalshi
+                    )
+                finally:
+                    with _entry_lock:
+                        _entry_in_progress.discard(station)
+
+            except Exception as exc:
+                logger.error("[Tier1] Entry pass error at %s: %s", station, exc)
+                with _entry_lock:
+                    _entry_in_progress.discard(station)
+
+        logger.info("[Tier1] Cycle complete")
+
+    finally:
+        _reschedule_tier1()
+
+
+def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
+    """
+    Entry logic for one station in the Tier 1 cycle.
+    Handles first entries, adjacent-bucket expansions, and repositions
+    using the latest signal from _latest_signals (set by Tier 3).
+    """
+    with _latest_signals_lock:
+        sig = _latest_signals.get(station)
+
+    if sig is None:
+        return
+
+    # No trades on weather prohibits or stale model data
+    if sig.decision == "HARD_SKIP":
+        return
+    age_hours = (now_utc - sig.signal_generated_at).total_seconds() / 3600
+    if age_hours > STALE_SIGNAL_HOURS:
+        logger.debug("[Tier1] %s signal %.1fh old — skipping entry", station, age_hours)
+        return
+
+    # No entries if signal doesn't say TRADE
+    if sig.decision != "TRADE":
+        return
+
+    existing = rm.station_positions(station)
+
+    # ── Existing position routing ─────────────────────────────────────────
+    if existing:
+        existing_pos = existing[0]
+        dist = _bucket_distance(existing_pos.bucket_lower, sig.top_bucket)
+
+        if dist == 0:
+            return  # already in this bucket
+
+        market_id = build_market_id(station, event_date, sig.top_bucket)
+
+        snap_check = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
+        if snap_check is None or not snap_check.is_open:
+            return
+
+        if dist == 1:
+            expansion_decision = _evaluate_expansion(
+                existing_pos=existing_pos,
+                new_sig=sig,
+                rm=rm,
+                event_date=event_date,
+            )
+            if expansion_decision["eligible"]:
+                _execute_expansion(existing_pos, sig, market_id, event_date,
+                                   expansion_decision, kalshi, rm)
+            else:
+                logger.info("[Tier1] %s expansion ineligible: %s",
+                            station, expansion_decision["reason"])
+        else:
+            required_edge = (
+                SIGNIFICANT_REPOSITION_EDGE_MIN if dist == 2
+                else MAJOR_REPOSITION_EDGE_MIN
+            )
+            reposition_ok, repo_reason = _evaluate_reposition(
+                existing_pos=existing_pos,
+                new_sig=sig,
+                required_edge=required_edge,
+                rm=rm,
+                event_date=event_date,
+            )
+            if reposition_ok:
+                _execute_reposition(existing_pos, sig, market_id, required_edge,
+                                    dist, event_date, kalshi, rm)
+            else:
+                logger.info("[Tier1] %s reposition blocked (dist=%d): %s",
+                            station, dist, repo_reason)
+        return
+
+    # ── New position — skip if at station limit ───────────────────────────
+    if len(existing) >= MAX_STATION_POSITIONS:
+        return
+
+    snap = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
+    if snap is None or not snap.is_open:
+        return
+
+    # Liquidity guard
+    spread    = snap.yes_ask - snap.yes_bid
+    spread_ok = spread <= MAX_BID_ASK_SPREAD
+    volume_ok = snap.volume >= MIN_MARKET_VOLUME
+
+    if not (spread_ok and volume_ok):
+        issues = []
+        if not spread_ok:
+            issues.append(f"spread={spread:.2f}")
+        if not volume_ok:
+            issues.append(f"vol={snap.volume}")
+        logger.info("[Tier1] %s illiquid (%s) — scheduling liquidity retry",
+                    station, ", ".join(issues))
+        _schedule_liquidity_retry(
+            station, event_date.isoformat(), sig.top_bucket, LIQUIDITY_RETRY_INTERVAL_MIN
+        )
+        return
+
+    # Effective threshold from signal
+    threshold = (
+        sig.threshold_result.threshold
+        if sig.threshold_result
+        else 0.12
+    )
+    fresh_edge = sig.top_model_prob - snap.yes_ask
+    if fresh_edge < threshold:
+        logger.debug("[Tier1] %s edge %+.3f below threshold %.3f — skip",
+                     station, fresh_edge, threshold)
+        return
+
+    ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    if not ok:
+        logger.info("[Tier1] %s risk gate: %s", station, reason)
+        return
+
+    effective_threshold = (
+        sig.threshold_result.effective_threshold
+        if sig.threshold_result else 0.12
+    )
+    max_price = round(sig.top_model_prob - effective_threshold, 4)
+    max_price = max(max_price, snap.yes_ask)
+
+    market_id = build_market_id(station, event_date, sig.top_bucket)
+    result = kalshi.place_order_with_fill_check(
+        market_id=market_id,
+        contracts=sig.kelly_contracts,
+        limit_price=max_price,
+        side="yes",
+    )
+
+    if result.success:
+        rm.open_position(
+            station=station,
+            market_id=market_id,
+            bucket_lower=sig.top_bucket,
+            contracts=sig.kelly_contracts,
+            entry_price=max_price,
+            event_date=event_date,
+        )
+        get_sheets_logger().log_trade_opened(
+            station=station,
+            event_date=event_date,
+            market_id=market_id,
+            bucket_lower=sig.top_bucket,
+            entry_price=max_price,
+            contracts=sig.kelly_contracts,
+            stake_usd=sig.kelly_stake_usd,
+            sig=sig,
+            entry_reason="tier1",
+        )
+        push_event("position_opened", {
+            "market_id":    market_id,
+            "station":      station,
+            "bucket_lower": sig.top_bucket,
+            "entry_price":  max_price,
+            "contracts":    sig.kelly_contracts,
+            "stake_usd":    sig.kelly_stake_usd,
+            "entry_reason": "tier1",
+        })
+        push_event("state_update", rm.summary())
+        logger.info(
+            "[Tier1] Entry: %s | bucket %d | %d contracts @ $%.2f | "
+            "edge %+.3f | stake $%.2f",
+            station, sig.top_bucket, sig.kelly_contracts, max_price,
+            fresh_edge, sig.kelly_stake_usd,
+        )
+    else:
+        logger.error("[Tier1] Order failed for %s bucket %d: %s",
+                     station, sig.top_bucket, result.error)
+        alert_order_failure(station, market_id, result.error or "unknown")
 
 
 def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     """Place sell order and record close."""
-    logger.info("[Tier2] Executing exit: %s | reason: %s", market_id, reason)
+    logger.info("[Exit] Executing: %s | reason: %s", market_id, reason)
 
     result = kalshi.close_position(market_id, pos.contracts, bid_price)
     if result.success:
@@ -319,244 +593,16 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
         get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
         push_event("position_closed", {"market_id": market_id, "realized_pnl": realized, "reason": reason})
         push_event("state_update", rm.summary())
-        logger.info("[Tier2] Exit complete: %s | realized P/L $%+.4f", market_id, realized)
+        logger.info("[Exit] Complete: %s | realized P/L $%+.4f", market_id, realized)
     else:
-        logger.error("[Tier2] Exit order failed for %s: %s", market_id, result.error)
+        logger.error("[Exit] Order failed for %s: %s", market_id, result.error)
         push_alert(f"Exit failed — {market_id}", result.error or "unknown", "ERROR")
 
 
-# ---------------------------------------------------------------------------
-# Price opportunity scanner — every 60 min (configurable)
-#
-# Runs between Tier 3 cycles to catch intraday price drops that create edge.
-# Example: at market open the 80-81° bucket is priced 35¢ (edge below threshold).
-# Two hours later the market re-prices it to 18¢ — our model still says 42%, so
-# edge is now +0.24. This scanner catches that without waiting for the next 6-hour
-# Tier 3 cycle.
-#
-# Design: NO model recomputation. Reuses the probability distribution already
-# computed by Tier 3 (stored in _latest_signals). Just fetches fresh Kalshi prices
-# and recalculates edge. Cheap: 1 API call per station (~8 stations = 8 calls).
-#
-# Weather guard: threshold is already station-specific (weather penalty baked in
-# from when Tier 3 ran). HARD_SKIP stations are always excluded regardless of price.
-# ---------------------------------------------------------------------------
-
-def tier2b_price_opportunity_scan():
-    """
-    Hourly price opportunity scanner.
-
-    For each station without a full position book:
-      1. Load last Tier 3 signal from _latest_signals.
-         - No signal yet → skip (wait for Tier 3).
-         - Signal age > STALE_SIGNAL_HOURS → skip (stale model data, no entry).
-         - HARD_SKIP → always skip (weather prohibits trade regardless of price).
-      2. Fetch fresh Kalshi prices for all buckets (dynamic series-based lookup).
-      3. For each bucket in the signal distribution:
-         fresh_edge = bucket.model_prob - fresh_yes_ask
-      4. If fresh_edge > sig.threshold_result.threshold for any bucket not already held:
-         → check liquidity, check risk, place order.
-         → log to Sheets with entry_reason = "price_scan" for post-session review.
-
-    Expansion / reposition decisions are left to Tier 3. This scanner only adds
-    fresh first-entry positions where edge has materialized since the last Tier 3 run.
-    """
-    _tier_last_run["price_scan"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    push_event("tier_heartbeat", _tier_last_run)
-    logger.info("[PriceScan] Hourly price opportunity scan starting")
-
-    rm     = get_risk_manager()
-    kalshi = get_kalshi()
-
-    if rm.is_halted:
-        logger.info("[PriceScan] Bot halted — skipping")
-        return
-
-    event_date = date.today()
-    now_utc    = datetime.now(timezone.utc)
-    entered    = 0
-
-    for station in STATIONS:
-        try:
-            # ── Skip if station is already at position limit ──────────────
-            existing = rm.station_positions(station)
-            if len(existing) >= MAX_STATION_POSITIONS:
-                logger.debug("[PriceScan] %s at position limit — skipping", station)
-                continue
-
-            # ── Load last signal ──────────────────────────────────────────
-            with _latest_signals_lock:
-                sig = _latest_signals.get(station)
-
-            if sig is None:
-                logger.debug("[PriceScan] %s — no signal yet, skipping", station)
-                continue
-
-            # Hard weather skip: price movement irrelevant when conditions prohibit trading
-            if sig.decision == "HARD_SKIP":
-                logger.debug("[PriceScan] %s — HARD_SKIP, skipping", station)
-                continue
-
-            # Stale signal guard: don't place new entries based on old model data
-            age_hours = (now_utc - sig.signal_generated_at).total_seconds() / 3600
-            if age_hours > STALE_SIGNAL_HOURS:
-                logger.info(
-                    "[PriceScan] %s — signal is %.1fh old (> %dh stale limit), skipping",
-                    station, age_hours, STALE_SIGNAL_HOURS,
-                )
-                continue
-
-            # Effective threshold — already includes weather penalty from Tier 3
-            threshold = (
-                sig.threshold_result.threshold
-                if sig.threshold_result
-                else 0.12
-            )
-
-            # ── Fetch fresh Kalshi prices ─────────────────────────────────
-            fresh_snaps = kalshi.get_all_snapshots(station, event_date)
-            if not fresh_snaps:
-                logger.debug("[PriceScan] %s — no live snapshots available", station)
-                continue
-
-            # Set of bucket_lowers already held at this station
-            held_buckets = {pos.bucket_lower for pos in existing}
-
-            # ── Find best new edge opportunity with fresh prices ──────────
-            best_edge    = 0.0
-            best_bucket  = None
-            best_snap    = None
-            best_model_p = 0.0
-
-            for b in sig.buckets:
-                if b.bucket_lower in held_buckets:
-                    continue   # already in this bucket
-
-                snap = fresh_snaps.get(b.bucket_lower)
-                if snap is None or not snap.is_open:
-                    continue
-
-                fresh_edge = b.model_prob - snap.yes_ask
-
-                if fresh_edge > best_edge:
-                    best_edge    = fresh_edge
-                    best_bucket  = b.bucket_lower
-                    best_snap    = snap
-                    best_model_p = b.model_prob
-
-            if best_bucket is None or best_edge < threshold:
-                logger.debug(
-                    "[PriceScan] %s — best fresh edge %.3f below threshold %.3f",
-                    station, best_edge, threshold,
-                )
-                continue
-
-            logger.info(
-                "[PriceScan] %s bucket %d — fresh edge %+.3f (threshold %.3f) "
-                "model=%.1f%% ask=%.1f%% — attempting entry",
-                station, best_bucket, best_edge, threshold,
-                best_model_p * 100, best_snap.yes_ask * 100,
-            )
-
-            # ── Liquidity guard ───────────────────────────────────────────
-            spread    = best_snap.yes_ask - best_snap.yes_bid
-            spread_ok = spread <= MAX_BID_ASK_SPREAD
-            volume_ok = best_snap.volume >= MIN_MARKET_VOLUME
-
-            if not (spread_ok and volume_ok):
-                issues = []
-                if not spread_ok:
-                    issues.append(f"spread={spread:.2f}")
-                if not volume_ok:
-                    issues.append(f"vol={best_snap.volume}")
-                logger.info(
-                    "[PriceScan] %s bucket %d illiquid (%s) — scheduling liquidity retry",
-                    station, best_bucket, ", ".join(issues),
-                )
-                _schedule_liquidity_retry(
-                    station, event_date.isoformat(), best_bucket, LIQUIDITY_RETRY_INTERVAL_MIN
-                )
-                continue
-
-            # ── Kelly sizing with fresh price ─────────────────────────────
-            # Recalculate stake using fresh ask (price changed since Tier 3 ran).
-            # Kelly: stake = (edge / (1/ask - 1)) * bankroll, capped at MAX_STAKE_PCT.
-            ask = best_snap.yes_ask
-            if ask <= 0 or ask >= 1:
-                continue
-            kelly_raw  = (best_edge / ((1.0 - ask) / ask)) * rm.state.bankroll
-            kelly_usd  = min(kelly_raw, rm.state.bankroll * MAX_STAKE_PCT)
-            contracts  = max(1, round(kelly_usd / ask))
-
-            # ── Risk check ────────────────────────────────────────────────
-            ok, reason = rm.can_open_position(kelly_usd, station=station)
-            if not ok:
-                logger.info("[PriceScan] %s risk gate: %s", station, reason)
-                continue
-
-            # ── Place order ───────────────────────────────────────────────
-            # max_price: most we'll pay and still retain edge ≥ threshold
-            max_price = round(best_model_p - threshold, 4)
-            max_price = max(max_price, ask)   # never below current ask
-
-            result = kalshi.place_order_with_fill_check(
-                market_id=best_snap.market_id,
-                contracts=contracts,
-                limit_price=max_price,
-                side="yes",
-            )
-
-            if result.success:
-                rm.open_position(
-                    station=station,
-                    market_id=best_snap.market_id,
-                    bucket_lower=best_bucket,
-                    contracts=contracts,
-                    entry_price=max_price,
-                    event_date=event_date,
-                )
-                get_sheets_logger().log_trade_opened(
-                    station=station,
-                    event_date=event_date,
-                    market_id=best_snap.market_id,
-                    bucket_lower=best_bucket,
-                    entry_price=max_price,
-                    contracts=contracts,
-                    stake_usd=kelly_usd,
-                    sig=sig,
-                    entry_reason="price_scan",   # distinguish from Tier 3 entries in log
-                )
-                push_event("position_opened", {
-                    "market_id":   best_snap.market_id,
-                    "station":     station,
-                    "bucket_lower": best_bucket,
-                    "entry_price": max_price,
-                    "contracts":   contracts,
-                    "stake_usd":   kelly_usd,
-                    "entry_reason": "price_scan",
-                })
-                push_event("state_update", rm.summary())
-                logger.info(
-                    "[PriceScan] Entry: %s | bucket %d | %d contracts @ $%.2f | "
-                    "edge %+.3f | stake $%.2f",
-                    station, best_bucket, contracts, max_price, best_edge, kelly_usd,
-                )
-                entered += 1
-            else:
-                logger.error(
-                    "[PriceScan] Order failed for %s bucket %d: %s",
-                    station, best_bucket, result.error,
-                )
-                alert_order_failure(station, best_snap.market_id, result.error or "unknown")
-
-        except Exception as exc:
-            logger.error("[PriceScan] Error at %s: %s", station, exc)
-
-    logger.info("[PriceScan] Scan complete — %d new entr%s", entered, "y" if entered == 1 else "ies")
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — Full signal pass + order execution (every 6 hours)
+# Tier 3 — Full signal recompute only (every 6 hours, no order execution)
 # ---------------------------------------------------------------------------
 
 def _tier3_day1_market_open():
@@ -570,8 +616,9 @@ def _tier3_day1_market_open():
 
 def tier3_full_signal_pass(event_date: date | None = None):
     """
-    Full signal generation for all stations.
-    Places orders for TRADE decisions that pass risk checks.
+    Full signal recompute for all stations.  Updates _latest_signals so
+    Tier 1 can act on fresh distributions at the next 5-min cycle.
+    No orders are placed here — all trade execution is Tier 1's job.
 
     event_date defaults to today. The Day-1 market-open trigger passes tomorrow.
 
@@ -580,13 +627,11 @@ def tier3_full_signal_pass(event_date: date | None = None):
          schedule a retry job and return — don't run on stale data.
       2. Check daily loss limit alert threshold.
     """
-    logger.info("[Tier3] Full signal pass starting")
-    rm     = get_risk_manager()
-    kalshi = get_kalshi()
+    logger.info("[Tier3] Full signal recompute starting")
+    rm = get_risk_manager()
 
     if rm.is_halted:
-        logger.info("[Tier3] Bot halted — skipping signal pass")
-        # Fire daily loss limit alert if that's why we're halted
+        logger.info("[Tier3] Bot halted — skipping signal recompute")
         if not rm.state.kill_switch_active:
             limit = rm.state.bankroll * DAILY_LOSS_LIMIT_PCT
             alert_daily_loss_limit(rm.state.daily_pnl, limit)
@@ -614,205 +659,20 @@ def tier3_full_signal_pass(event_date: date | None = None):
             _tier3_retry_counts.pop(event_date.isoformat(), None)
         return
 
-    # Reset retry counter on successful data availability
     _tier3_retry_counts.pop(event_date.isoformat(), None)
     _tier_last_run["tier3"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
     push_event("tier_heartbeat", _tier_last_run)
 
-    signals    = run_signal_pass(event_date=event_date, bankroll=rm.state.bankroll)
+    signals = run_signal_pass(event_date=event_date, bankroll=rm.state.bankroll)
 
-    # Update shared signal store and push to dashboard
+    # Store updated distributions — Tier 1 reads these on every 5-min cycle
     with _latest_signals_lock:
         _latest_signals.update(signals)
     for station, sig in signals.items():
         push_event("signal_update", {"station": station, "decision": sig.decision,
                                      "top_edge": sig.top_edge, "top_bucket": sig.top_bucket})
 
-    # ── Priority queue: rank TRADE signals by edge, best first ───────────
-    trade_signals = [
-        sig for sig in signals.values()
-        if sig.decision == "TRADE"
-    ]
-    trade_signals.sort(key=lambda s: s.top_edge, reverse=True)
-
-    for sig in trade_signals:
-        station   = sig.station
-        market_id = build_market_id(station, event_date, sig.top_bucket)
-
-        # Skip if already have a position in this exact market
-        if market_id in rm.state.positions:
-            logger.info("[Tier3] Already in %s — skipping", market_id)
-            continue
-
-        # ── Market open + liquidity guards ────────────────────────────────
-        snap_check = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
-        if snap_check is None or not snap_check.is_open:
-            logger.info("[Tier3] Market not open for %s bucket %d — skipping", station, sig.top_bucket)
-            continue
-
-        spread = snap_check.yes_ask - snap_check.yes_bid
-        spread_ok = spread <= MAX_BID_ASK_SPREAD
-        volume_ok = snap_check.volume >= MIN_MARKET_VOLUME
-
-        if not (spread_ok and volume_ok):
-            # Market is young or illiquid right now — don't abandon the signal.
-            # Schedule a retry: recheck liquidity in LIQUIDITY_RETRY_INTERVAL_MIN minutes.
-            # The signal stays valid; we're just waiting for the book to fill in.
-            issues = []
-            if not spread_ok:
-                issues.append(
-                    f"spread {spread:.2f} > {MAX_BID_ASK_SPREAD:.2f} "
-                    f"(bid={snap_check.yes_bid:.2f} ask={snap_check.yes_ask:.2f})"
-                )
-            if not volume_ok:
-                issues.append(f"volume {snap_check.volume} < {MIN_MARKET_VOLUME}")
-            logger.info(
-                "[Tier3] %s bucket %d illiquid (%s) — scheduling liquidity retry in %d min",
-                station, sig.top_bucket, ", ".join(issues), LIQUIDITY_RETRY_INTERVAL_MIN,
-            )
-            _schedule_liquidity_retry(
-                station=station,
-                event_date_iso=event_date.isoformat(),
-                bucket_lower=sig.top_bucket,
-                delay_min=LIQUIDITY_RETRY_INTERVAL_MIN,
-            )
-            continue
-
-        # ── Existing position routing — expansion or reposition ───────────
-        existing = rm.station_positions(station)
-        if existing:
-            existing_pos = existing[0]
-            dist = _bucket_distance(existing_pos.bucket_lower, sig.top_bucket)
-
-            if dist == 0:
-                # Same bucket — already in this position, nothing to do
-                logger.info("[Tier3] Already in bucket %d at %s — skipping", sig.top_bucket, station)
-                continue
-
-            elif dist == 1:
-                # Adjacent bucket — evaluate expansion (hold both)
-                expansion_decision = _evaluate_expansion(
-                    existing_pos=existing_pos,
-                    new_sig=sig,
-                    rm=rm,
-                    event_date=event_date,
-                )
-                if expansion_decision["eligible"]:
-                    _execute_expansion(
-                        existing_pos=existing_pos,
-                        sig=sig,
-                        market_id=market_id,
-                        event_date=event_date,
-                        expansion_decision=expansion_decision,
-                        kalshi=kalshi,
-                        rm=rm,
-                    )
-                else:
-                    logger.info(
-                        "[Tier3] %s expansion ineligible: %s",
-                        station, expansion_decision["reason"],
-                    )
-                continue
-
-            else:
-                # 2-step or 3+ step shift — significant or major reposition
-                required_edge = (
-                    SIGNIFICANT_REPOSITION_EDGE_MIN if dist == 2
-                    else MAJOR_REPOSITION_EDGE_MIN
-                )
-                reposition_ok, repo_reason = _evaluate_reposition(
-                    existing_pos=existing_pos,
-                    new_sig=sig,
-                    required_edge=required_edge,
-                    rm=rm,
-                    event_date=event_date,
-                )
-                if reposition_ok:
-                    _execute_reposition(
-                        existing_pos=existing_pos,
-                        new_sig=sig,
-                        new_market_id=market_id,
-                        required_edge=required_edge,
-                        dist=dist,
-                        event_date=event_date,
-                        kalshi=kalshi,
-                        rm=rm,
-                    )
-                else:
-                    logger.info(
-                        "[Tier3] %s reposition blocked (dist=%d): %s",
-                        station, dist, repo_reason,
-                    )
-                continue
-
-        # ── Normal new-position entry ─────────────────────────────────────
-        ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
-        if not ok:
-            if "exposure" in reason.lower() or "insufficient" in reason.lower():
-                sig.decision = "CONSTRAINED"
-                logger.warning(
-                    "[Tier3] %s CONSTRAINED (edge=%+.3f stake=$%.2f) — %s",
-                    station, sig.top_edge, sig.kelly_stake_usd, reason,
-                )
-            else:
-                logger.warning("[Tier3] Risk check failed for %s: %s", station, reason)
-            get_sheets_logger().log_skipped_signal(sig, reason)
-            with _latest_signals_lock:
-                _latest_signals[station] = sig
-            continue
-
-        # Derive max price from edge math: model_prob - threshold = most we'll pay
-        # This lets us fill at any ask ≤ max_price (capturing better entries)
-        # while ensuring edge is always ≥ threshold at the fill price.
-        effective_threshold = (
-            sig.threshold_result.effective_threshold
-            if sig.threshold_result else 0.12
-        )
-        max_price = round(sig.top_model_prob - effective_threshold, 4)
-        max_price = max(max_price, sig.top_yes_ask)   # never below current ask
-
-        result = kalshi.place_order_with_fill_check(
-            market_id=market_id,
-            contracts=sig.kelly_contracts,
-            limit_price=max_price,
-            side="yes",
-        )
-
-        if result.success:
-            rm.open_position(
-                station=station,
-                market_id=market_id,
-                bucket_lower=sig.top_bucket,
-                contracts=sig.kelly_contracts,
-                entry_price=max_price,
-                event_date=event_date,
-            )
-            get_sheets_logger().log_trade_opened(
-                station=station,
-                event_date=event_date,
-                market_id=market_id,
-                bucket_lower=sig.top_bucket,
-                entry_price=max_price,
-                contracts=sig.kelly_contracts,
-                stake_usd=sig.kelly_stake_usd,
-                sig=sig,
-            )
-            push_event("position_opened", {"market_id": market_id, "station": station,
-                                           "bucket_lower": sig.top_bucket, "entry_price": max_price,
-                                           "contracts": sig.kelly_contracts, "stake_usd": sig.kelly_stake_usd})
-            push_event("state_update", rm.summary())
-            logger.info(
-                "[Tier3] Order filled: %s | %d contracts @ $%.2f | stake $%.2f",
-                market_id, sig.kelly_contracts, max_price, sig.kelly_stake_usd,
-            )
-        else:
-            logger.error("[Tier3] Order failed for %s: %s", market_id, result.error)
-            alert_order_failure(station, market_id, result.error or "unknown error")
-            push_alert(f"Order failed — {station}", result.error or "unknown", "ERROR")
-            # TODO (kalshi_client): add fill-retry with fresh edge check
-            # retry up to ORDER_FILL_RETRY_MAX times with ORDER_FILL_RETRY_WAIT_SEC gap
-
-    # Log all WATCH/SKIP decisions that made it through the loop without trading
+    # Log WATCH/SKIP/HARD_SKIP decisions to Sheets for review
     sheets = get_sheets_logger()
     for sig in signals.values():
         if sig.decision in ("WATCH", "SKIP", "HARD_SKIP"):
@@ -820,9 +680,12 @@ def tier3_full_signal_pass(event_date: date | None = None):
 
     summary = rm.summary()
     sheets.update_dashboard(summary, mode="DEMO" if USE_DEMO else "LIVE")
+    trade_count = sum(1 for s in signals.values() if s.decision == "TRADE")
     logger.info(
-        "[Tier3] Cycle complete | bankroll=$%.2f | open=%d | daily P/L=$%+.2f",
-        summary["bankroll"], summary["open_positions"], summary["daily_pnl"],
+        "[Tier3] Recompute complete | %d TRADE / %d total | "
+        "bankroll=$%.2f | open=%d | Tier 1 will act within ~5 min",
+        trade_count, len(signals),
+        summary["bankroll"], summary["open_positions"],
     )
 
 
@@ -1500,14 +1363,14 @@ def _run_startup_reconciliation():
 
 def start_scheduler() -> BackgroundScheduler:
     """
-    Initialize and start the APScheduler with all three tiers plus
-    market-open trigger, settlement sweep, and startup reconciliation.
+    Initialize and start the APScheduler with all tiers plus market-open
+    trigger, settlement sweep, and startup reconciliation.
 
     Schedule summary (all UTC):
-      Tier 1  — every 5 min         — TAF amendment monitor
-      Tier 2  — every 30 min        — METAR running high + position management
-      Tier 3  — 00:30 / 06:30 / 12:30 / 18:30  — GFS-aligned signal pass
-      Tier 3  — 14:05               — Kalshi Day-1 market open (5 min after open)
+      Tier 1  — sleep-based ~5 min   — METAR + exits + entries (post-ASOS-aligned)
+      Tier 2  — every 10 min         — TAF amendments + auto-close on flip
+      Tier 3  — 00:30 / 06:30 / 12:30 / 18:30  — GFS-aligned signal recompute
+      Tier 3  — 14:05               — Kalshi Day-1 market open (signal recompute only)
       Sweep   — 09:00               — Morning settlement sweep
     """
     global _scheduler, _risk_manager, _kalshi
@@ -1515,45 +1378,36 @@ def start_scheduler() -> BackgroundScheduler:
     _risk_manager = RiskManager()
     _kalshi       = KalshiClient(demo=USE_DEMO)
 
-    # Register shutdown handlers — fire on Ctrl+C or system SIGTERM (VPS stop/reboot)
     signal.signal(signal.SIGINT,  _graceful_shutdown)
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
     scheduler = BackgroundScheduler(timezone="UTC")
 
-    # Tier 1 — every 5 minutes
+    # Tier 1 — sleep-based: first run fires 10 s after startup, then
+    # self-reschedules TIER1_INTERVAL_SECONDS after each completion.
+    # Drifts toward ASOS post times (~:53-:58) to keep obs fresh.
     scheduler.add_job(
-        tier1_taf_monitor,
-        trigger=IntervalTrigger(seconds=TIER1_INTERVAL_SECONDS),
-        id="tier1_taf",
+        tier1_metar_entries_exits,
+        trigger=DateTrigger(
+            run_date=datetime.now(timezone.utc) + timedelta(seconds=10),
+            timezone="UTC",
+        ),
+        id="tier1_metar",
+        name="METAR + Entries + Exits",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Tier 2 — TAF amendment monitor, clock-aligned every 10 min.
+    # TAFs update on a schedule (not ASOS cadence), so clock alignment is fine.
+    scheduler.add_job(
+        tier2_taf_monitor,
+        trigger=IntervalTrigger(seconds=TIER2_INTERVAL_SECONDS),
+        id="tier2_taf",
         name="TAF Amendment Monitor",
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=60,
-    )
-
-    # Tier 2 — every 30 minutes
-    scheduler.add_job(
-        tier2_metar_and_positions,
-        trigger=IntervalTrigger(seconds=TIER2_INTERVAL_SECONDS),
-        id="tier2_metar",
-        name="METAR + Position Manager",
-        max_instances=1,
-        coalesce=True,
         misfire_grace_time=120,
-    )
-
-    # Price opportunity scanner — every PRICE_SCAN_INTERVAL_MIN minutes (default 60 min)
-    # Catches intraday price drops that create edge opportunities between Tier 3 cycles.
-    # Reuses last Tier 3 signal's probability distribution — no model recomputation.
-    scheduler.add_job(
-        tier2b_price_opportunity_scan,
-        trigger=IntervalTrigger(minutes=PRICE_SCAN_INTERVAL_MIN),
-        id="price_scan",
-        name="Price Opportunity Scanner",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=300,
     )
 
     # Tier 3 — GFS cycle aligned: 00:30, 06:30, 12:30, 18:30 UTC
@@ -1562,16 +1416,13 @@ def start_scheduler() -> BackgroundScheduler:
             tier3_full_signal_pass,
             trigger=CronTrigger(hour=hour, minute=30, timezone="UTC"),
             id=f"tier3_{hour:02d}z",
-            name=f"Full Signal Pass {hour:02d}Z+30",
+            name=f"Signal Recompute {hour:02d}Z+30",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=300,
         )
 
     # Tier 3 — Kalshi Day-1 market open: fires at 14:05 UTC every day
-    # Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC).
-    # We wait 5 minutes to let the book settle before scanning.
-    # Uses _tier3_day1_market_open() wrapper so event_date = tomorrow at runtime.
     scheduler.add_job(
         _tier3_day1_market_open,
         trigger=CronTrigger(
@@ -1580,7 +1431,7 @@ def start_scheduler() -> BackgroundScheduler:
             timezone="UTC",
         ),
         id="tier3_market_open",
-        name=f"Full Signal Pass — Market Open {MARKET_OPEN_UTC_HOUR:02d}:{MARKET_OPEN_UTC_MINUTE:02d}Z",
+        name=f"Signal Recompute — Market Open {MARKET_OPEN_UTC_HOUR:02d}:{MARKET_OPEN_UTC_MINUTE:02d}Z",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=300,
@@ -1594,17 +1445,17 @@ def start_scheduler() -> BackgroundScheduler:
         name="Morning Settlement Sweep",
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=600,   # 10-min grace — LCD sometimes publishes late
+        misfire_grace_time=600,
     )
 
     scheduler.start()
     _scheduler = scheduler
 
     logger.info(
-        "Scheduler started | Tier1=5min | Tier2=30min | PriceScan=%dmin | "
+        "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
         "Tier3=00/06/12/18Z+30 + %02d:%02dZ market-open | "
         "Settlement=%02d:00Z | mode=%s",
-        PRICE_SCAN_INTERVAL_MIN,
+        TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
         MARKET_OPEN_UTC_HOUR, MARKET_OPEN_UTC_MINUTE,
         SETTLEMENT_SWEEP_UTC_HOUR,
         "DEMO" if USE_DEMO else "LIVE",
