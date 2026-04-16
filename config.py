@@ -224,13 +224,48 @@ HOURLY_OBS_PARQUET = os.path.join(DATA_DIR, "hourly_obs.parquet")    # raw IEM h
 PEAK_HOURS_PARQUET = os.path.join(DATA_DIR, "peak_hours.parquet")    # DOY-smoothed p90 curve
 
 # ---------------------------------------------------------------------------
+# Trading mode
+# ---------------------------------------------------------------------------
+USE_DEMO = True   # True = paper trading on demo.kalshi.co, False = live trading
+
+# ---------------------------------------------------------------------------
 # External API credentials (loaded from .env)
+#
+# Kalshi demo and live are SEPARATE accounts with separate credentials.
+# Set USE_DEMO above, then provide the matching keys below.
+#
+# Demo credentials  → created at https://demo.kalshi.co → Settings → API Keys
+# Live credentials  → created at https://kalshi.com     → Settings → API Keys
+#
+# Preferred: use mode-specific keys so flipping USE_DEMO switches everything:
+#   KALSHI_DEMO_API_KEY, KALSHI_DEMO_PRIVATE_KEY_PATH
+#   KALSHI_LIVE_API_KEY, KALSHI_LIVE_PRIVATE_KEY_PATH
+#
+# Fallback: if mode-specific keys are absent, KALSHI_API_KEY /
+#   KALSHI_PRIVATE_KEY_PATH are used (single-credential setup).
 # ---------------------------------------------------------------------------
 NOAA_CDO_TOKEN = os.getenv("NOAA_CDO_TOKEN", "")
-KALSHI_API_KEY         = os.getenv("KALSHI_API_KEY", "")          # key ID (UUID)
-KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "")  # path to RSA .pem file
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")  # path to service account JSON
+
+if USE_DEMO:
+    KALSHI_API_KEY = (
+        os.getenv("KALSHI_DEMO_API_KEY")
+        or os.getenv("KALSHI_API_KEY", "")
+    )
+    KALSHI_PRIVATE_KEY_PATH = (
+        os.getenv("KALSHI_DEMO_PRIVATE_KEY_PATH")
+        or os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+    )
+else:
+    KALSHI_API_KEY = (
+        os.getenv("KALSHI_LIVE_API_KEY")
+        or os.getenv("KALSHI_API_KEY", "")
+    )
+    KALSHI_PRIVATE_KEY_PATH = (
+        os.getenv("KALSHI_LIVE_PRIVATE_KEY_PATH")
+        or os.getenv("KALSHI_PRIVATE_KEY_PATH", "")
+    )
 
 # ---------------------------------------------------------------------------
 # NCEP/NCAR Reanalysis OPeNDAP
@@ -445,11 +480,6 @@ STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
     "KSEA": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
     "KSFO": {1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 15, 7: 15, 8: 15, 9: 15, 10: 15, 11: 15, 12: 15},
 }
-
-# ---------------------------------------------------------------------------
-# Trading mode
-# ---------------------------------------------------------------------------
-USE_DEMO = True   # True = paper trading, False = live trading
 
 # ---------------------------------------------------------------------------
 # Edge threshold — hybrid weather penalty system
