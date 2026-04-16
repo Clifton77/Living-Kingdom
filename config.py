@@ -508,6 +508,8 @@ TIER1_INTERVAL_SECONDS = 300    # 5 min — METAR + exits + entries (sleep-based
 TIER2_INTERVAL_SECONDS = 600    # 10 min — TAF amendments + auto-close on signal flip
 # Tier 3 runs on GFS cycle alignment (every 6hrs + 30min offset); no order execution
 
+SNAPSHOT_INTERVAL_MIN = 15      # how often to log an intraday position snapshot while a trade is open
+
 # ---------------------------------------------------------------------------
 # Google Sheets tab names
 # ---------------------------------------------------------------------------
@@ -517,6 +519,7 @@ SHEET_TABS = {
     "skipped":        "Skipped Signals",
     "model_accuracy": "Model Accuracy",
     "eod_summary":    "EOD Summary",
+    "snapshots":      "Position Snapshots",
 }
 
 # ---------------------------------------------------------------------------

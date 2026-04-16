@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from utils.logging_config import setup_logging
-from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS
+from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS, SNAPSHOT_INTERVAL_MIN
 
 logger = setup_logging("sheets")
 
@@ -65,6 +65,12 @@ _HEADERS = {
         "Daily P&L ($)", "Total Trades", "Wins", "Losses",
         "Win Rate (%)", "Best Trade ($)", "Worst Trade ($)",
         "Open Positions at Close",
+    ]],
+    SHEET_TABS["snapshots"]: [[
+        "Timestamp (UTC)", "Station", "Market ID", "Bucket (°F)",
+        "Local Hour", "Obs Temp (°F)", "Running Max (°F)",
+        "Yes Bid", "Yes Ask", "Edge", "Unrealized P/L ($)", "P/L (%)",
+        "Hours Since Entry",
     ]],
 }
 
@@ -321,6 +327,42 @@ class GoogleSheetsLogger:
             self._append(SHEET_TABS["model_accuracy"], row)
         except Exception as exc:
             logger.warning("log_model_accuracy failed: %s", exc)
+
+    def log_position_snapshot(
+        self,
+        station: str,
+        market_id: str,
+        bucket_lower: int,
+        local_hour: int,
+        obs_temp: float,
+        running_max: float,
+        yes_bid: float,
+        yes_ask: float,
+        edge: float,
+        unrealized_pnl: float,
+        pnl_pct: float,
+        hours_since_entry: float,
+    ):
+        """Append a row to Position Snapshots (called every SNAPSHOT_INTERVAL_MIN while trade is open)."""
+        try:
+            row = [[
+                self._now(),
+                station,
+                market_id,
+                bucket_lower,
+                local_hour,
+                round(obs_temp, 1),
+                round(running_max, 1),
+                round(yes_bid, 4),
+                round(yes_ask, 4),
+                round(edge, 4),
+                round(unrealized_pnl, 4),
+                round(pnl_pct, 2),
+                round(hours_since_entry, 2),
+            ]]
+            self._append(SHEET_TABS["snapshots"], row)
+        except Exception as exc:
+            logger.warning("log_position_snapshot failed: %s", exc)
 
     def log_eod_summary(self, summary: dict, session_date: str, mode: str = "DEMO"):
         """Append an end-of-day summary row."""

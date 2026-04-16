@@ -84,6 +84,7 @@ from config import (
     MAX_STAKE_PCT,
     USE_DEMO,
     STARTING_BANKROLL,
+    SNAPSHOT_INTERVAL_MIN,
 )
 
 logger = setup_logging("scheduler")
@@ -114,6 +115,10 @@ _tier_last_run: dict[str, str] = {
 # concurrent fill confirmation is in flight.
 _entry_lock         = threading.Lock()
 _entry_in_progress: set[str] = set()
+
+# Tracks when each open position last had a snapshot logged to Google Sheets.
+# Key = market_id, value = UTC datetime of last snapshot write.
+_last_snapshot_time: dict[str, datetime] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +389,36 @@ def tier1_metar_entries_exits():
 
                     if exit_decision.should_exit:
                         _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
-                    elif exit_decision.urgency == "warning":
-                        logger.warning(
-                            "[Tier1] UNDERSHOOT WARNING on %s — manual close available on dashboard",
-                            market_id,
-                        )
+                        _last_snapshot_time.pop(market_id, None)
+                    else:
+                        if exit_decision.urgency == "warning":
+                            logger.warning(
+                                "[Tier1] UNDERSHOOT WARNING on %s — manual close available on dashboard",
+                                market_id,
+                            )
+                        # Log intraday snapshot if SNAPSHOT_INTERVAL_MIN has elapsed
+                        last_snap = _last_snapshot_time.get(market_id)
+                        if last_snap is None or (now_utc - last_snap).total_seconds() >= SNAPSHOT_INTERVAL_MIN * 60:
+                            hours_held = (
+                                (now_utc - datetime.fromisoformat(pos.entry_time)).total_seconds() / 3600
+                                if pos.entry_time
+                                else 0.0
+                            )
+                            get_sheets_logger().log_position_snapshot(
+                                station=station,
+                                market_id=market_id,
+                                bucket_lower=pos.bucket_lower,
+                                local_hour=local_hour,
+                                obs_temp=obs_temp,
+                                running_max=running_max,
+                                yes_bid=snap.yes_bid,
+                                yes_ask=snap.yes_ask,
+                                edge=current_edge,
+                                unrealized_pnl=pos.unrealized_pnl,
+                                pnl_pct=pos.pnl_pct,
+                                hours_since_entry=hours_held,
+                            )
+                            _last_snapshot_time[market_id] = now_utc
 
             except Exception as exc:
                 logger.error("[Tier1] Exit pass error at %s: %s", station, exc)
