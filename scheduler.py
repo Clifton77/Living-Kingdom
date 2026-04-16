@@ -197,6 +197,21 @@ def tier2_taf_monitor():
                         "[Tier2] %s AMD processed — signal still %s (edge=%+.3f), no auto-close",
                         station, sig.decision, sig.top_edge,
                     )
+                    # If AMD strengthened or confirmed a TRADE signal, attempt
+                    # entry immediately rather than waiting for the next Tier 1 cycle.
+                    if sig.decision == "TRADE":
+                        with _entry_lock:
+                            if station not in _entry_in_progress:
+                                _entry_in_progress.add(station)
+                                try:
+                                    _tier1_entry_pass(
+                                        station, date.fromisoformat(pos.event_date),
+                                        datetime.now(timezone.utc), rm, kalshi,
+                                    )
+                                except Exception as e_exc:
+                                    logger.error("[Tier2] Entry pass after AMD failed for %s: %s", station, e_exc)
+                                finally:
+                                    _entry_in_progress.discard(station)
                     continue
 
                 snap = kalshi.get_market_snapshot(
