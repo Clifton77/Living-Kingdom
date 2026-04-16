@@ -142,6 +142,16 @@ def all_bucket_lowers() -> list[int]:
     return [KALSHI_BUCKET_LOWER_TAIL] + KALSHI_BUCKET_STARTS + [KALSHI_BUCKET_UPPER_TAIL]
 
 
+def build_market_id(station: str, event_date: date, bucket_lower: int) -> str:
+    """
+    Construct the Kalshi market ticker from its components.
+    e.g. build_market_id("KLAX", date(2026,4,14), 80) → "KXHIGHLAX-26APR14-B80"
+    """
+    series = get_series_ticker(station)
+    center = KALSHI_BUCKET_CENTERS.get(bucket_lower, str(bucket_lower))
+    return f"{series}-{_date_tag(event_date)}-B{center}"
+
+
 def bucket_label(lower: int) -> str:
     """Human-readable bucket label from lower bound (legacy fallback)."""
     if lower == KALSHI_BUCKET_LOWER_TAIL:
