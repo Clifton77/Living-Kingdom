@@ -425,10 +425,11 @@ def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, 
     if afm is not None:
         return afm, mos, "IEM_AFM"
 
-    # AFM unavailable — fall back to Open-Meteo, use ERA5 bias distribution
+    # AFM unavailable — fall back to Open-Meteo; use IEM_AFM bias rows (GFS-based,
+    # better calibrated than ERA5 which has extreme outliers in the bias table)
     om = _fetch_openmeteo_live(station, target_date)
     if om is not None:
-        return om, mos, "ERA5"
+        return om, mos, "IEM_AFM"
 
     # Last resort: most recent row from historical parquet
     try:
