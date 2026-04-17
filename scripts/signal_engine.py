@@ -744,7 +744,7 @@ def _build_reasoning(
     # ── Data sources ──────────────────────────────────────────────────────
     mos_src_str = f"GFS-MOS {mos_forecast_raw:.0f}°F" if mos_forecast_raw is not None else "unavailable"
     data_sources = {
-        "pattern":  f"{'Live GFS 00Z via NOMADS' if 'gfs' in data_source.lower() else 'Reanalysis fallback'}",
+        "pattern":  f"{'Live Open-Meteo 500hPa' if data_source == 'openmeteo' else 'Reanalysis fallback'}",
         "forecast": f"{src_label} (primary) | GFS-MOS: {mos_src_str}",
         "bias":     f"{bias_src} — {n_obs} obs (model_source={model_source_used})",
         "taf":      f"aviationweather.gov ({taf.fetched_utc})",
