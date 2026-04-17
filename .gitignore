@@ -5,6 +5,7 @@ logs/
 *.pyc
 __pycache__/
 .env
+*.pem
 credentials.json
 token.json
 *.egg-info/
