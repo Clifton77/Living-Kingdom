@@ -6,8 +6,13 @@ cluster_centroids.pkl and classifies today's 500mb geopotential
 height anomaly field.
 
 Live data source (priority order):
-  1. NOMADS GFS 0.25° analysis (00Z) via OPeNDAP  — real-time
-  2. Most recent row of z500_anomaly.parquet       — fallback (1-2 day lag)
+  1. Open-Meteo pressure-level forecast API  — real-time, no auth
+  2. Most recent row of z500_anomaly.parquet  — fallback (1-2 day lag)
+
+Open-Meteo replaced NOMADS GFS OPeNDAP after NOAA retired the /dods/
+endpoint (SCN 25-81). Open-Meteo returns 500hPa geopotential height
+on a global grid; we sample the same 2.5° NCEP grid points used during
+training and compute anomalies the same way.
 
 Output dict matches the schema used in pattern_labels.parquet:
   {date, season, cluster_id, distance_to_centroid, confidence}
@@ -26,7 +31,7 @@ from utils.logging_config import setup_logging
 from config import (
     CLUSTER_PKL,
     Z500_PARQUET,
-    NOMADS_GFS_URL,
+    OPEN_METEO_FORECAST_URL,
     LAT_BOUNDS,
     LON_BOUNDS,
     SEASONS,
@@ -56,55 +61,66 @@ def assign_season(dt: date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Live 500mb fetch — NOMADS GFS OPeNDAP
+# Live 500mb fetch — Open-Meteo pressure level API
 # ---------------------------------------------------------------------------
 
-def _fetch_nomads_z500(target_date: date) -> pd.Series | None:
+def _fetch_openmeteo_z500(target_date: date) -> pd.Series | None:
     """
-    Fetch today's 500mb geopotential height field from NOMADS GFS.
-    Uses the 00Z analysis (forecast hour 0 = analysis).
-    Returns a pandas Series with column names matching z500_anomaly.parquet.
+    Fetch 500mb geopotential height from Open-Meteo pressure-level forecast API.
+    Queries the same 2.5-degree grid used by the NCEP reanalysis training data
+    (LAT_BOUNDS/LON_BOUNDS in config). Returns a pd.Series with column names
+    matching z500_anomaly.parquet (lat_{:.1f}_lon_{:.1f}, 0-360 lon convention).
     """
     try:
-        import netCDF4 as nc  # noqa: F401 — verify available
-        date_str = target_date.strftime("%Y%m%d")
-        url = NOMADS_GFS_URL.format(date=date_str)
-        logger.info("Fetching live z500 from NOMADS: %s", url)
+        # Build 2.5-degree grid matching NCEP reanalysis
+        lats = np.arange(LAT_BOUNDS[0], LAT_BOUNDS[1] + 0.01, 2.5)
+        lons_360 = np.arange(LON_BOUNDS[0], LON_BOUNDS[1] + 0.01, 2.5)
+        lons_api = lons_360 - 360.0  # Open-Meteo uses -180/180
 
-        ds = nc.Dataset(url)
+        grid = [
+            (float(la), float(lo_api), float(lo_360))
+            for la in lats
+            for lo_api, lo_360 in zip(lons_api, lons_360)
+        ]
 
-        lats = ds.variables["lat"][:]
-        lons = ds.variables["lon"][:]
-        hgt  = ds.variables["hgtprs"]  # shape: (time, lev, lat, lon)
+        date_str = target_date.isoformat()
+        BATCH = 100
+        results: dict[str, float] = {}
 
-        # Pressure levels
-        levs = ds.variables["lev"][:]
-        p500_idx = int(np.argmin(np.abs(np.array(levs) - 500.0)))
+        for i in range(0, len(grid), BATCH):
+            chunk = grid[i : i + BATCH]
+            lat_str = ",".join(f"{p[0]:.1f}" for p in chunk)
+            lon_str = ",".join(f"{p[1]:.1f}" for p in chunk)
+            url = (
+                f"{OPEN_METEO_FORECAST_URL}"
+                f"?latitude={lat_str}&longitude={lon_str}"
+                f"&hourly=geopotential_height_500hPa"
+                f"&start_date={date_str}&end_date={date_str}"
+            )
+            logger.debug("Open-Meteo z500 batch %d–%d", i, i + len(chunk) - 1)
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
 
-        # Hour 0 (analysis)
-        time_idx = 0
+            # Multi-location → list; single location → dict
+            locations = data if isinstance(data, list) else [data]
+            for loc_idx, loc in enumerate(locations):
+                la, _, lo_360 = chunk[loc_idx]
+                vals = loc.get("hourly", {}).get("geopotential_height_500hPa", [])
+                col = f"lat_{la:.1f}_lon_{lo_360:.1f}"
+                results[col] = float(vals[0]) if vals else float("nan")
 
-        # Subset domain
-        lat_mask = (lats >= LAT_BOUNDS[0]) & (lats <= LAT_BOUNDS[1])
-        lon_mask = (lons >= LON_BOUNDS[0]) & (lons <= LON_BOUNDS[1])
+        series = pd.Series(results)
+        n_nan = int(series.isna().sum())
+        if n_nan > len(series) * 0.10:
+            logger.warning("Open-Meteo z500: %d/%d NaN — falling back", n_nan, len(series))
+            return None
 
-        lat_sub = lats[lat_mask]
-        lon_sub = lons[lon_mask]
-        hgt_sub = np.array(hgt[time_idx, p500_idx, :, :])[np.ix_(lat_mask, lon_mask)]
-
-        ds.close()
-
-        # Build Series with column names matching training data
-        cols, vals = [], []
-        for i, la in enumerate(lat_sub):
-            for j, lo in enumerate(lon_sub):
-                cols.append(f"lat_{la:.2f}_lon_{lo:.2f}")
-                vals.append(float(hgt_sub[i, j]))
-
-        return pd.Series(vals, index=cols)
+        logger.info("Open-Meteo z500 fetched: %d grid points for %s", len(series), target_date)
+        return series
 
     except Exception as exc:
-        logger.warning("NOMADS z500 fetch failed: %s", exc)
+        logger.warning("Open-Meteo z500 fetch failed: %s", exc)
         return None
 
 
@@ -129,7 +145,7 @@ def _fallback_z500() -> tuple[pd.Series, date]:
 
 
 # ---------------------------------------------------------------------------
-# Anomaly computation for live NOMADS data
+# Anomaly computation for live Open-Meteo data
 # ---------------------------------------------------------------------------
 
 def _compute_anomaly(raw_series: pd.Series, season: str) -> pd.Series | None:
@@ -137,7 +153,7 @@ def _compute_anomaly(raw_series: pd.Series, season: str) -> pd.Series | None:
     Compute anomaly for a raw height field by subtracting the climatological
     mean from the training z500 data for the matching season.
 
-    This aligns live NOMADS data with the anomaly-based training features.
+    This aligns live Open-Meteo data with the anomaly-based training features.
     """
     try:
         z500_df = pd.read_parquet(Z500_PARQUET)
@@ -145,17 +161,14 @@ def _compute_anomaly(raw_series: pd.Series, season: str) -> pd.Series | None:
         # Load pattern labels to get season membership
         from config import PATTERNS_PARQUET
         pat_df = pd.read_parquet(PATTERNS_PARQUET)[["date", "season"]]
-        z500_df["date"] = pd.read_parquet(Z500_PARQUET).index if "date" not in z500_df.columns else z500_df["date"]
+        if "date" not in z500_df.columns:
+            z500_df["date"] = pd.to_datetime(z500_df.index)
 
         # Filter to matching season rows
-        if "date" in z500_df.columns:
-            z500_df = z500_df.merge(pat_df, on="date", how="left")
-            season_df = z500_df[z500_df["season"] == season]
-            feature_cols = [c for c in z500_df.columns if c not in ("date", "season", "cluster_id")]
-            climo_mean = season_df[feature_cols].mean()
-        else:
-            climo_mean = z500_df.mean()
-            feature_cols = list(z500_df.columns)
+        z500_df = z500_df.merge(pat_df, on="date", how="left")
+        season_df = z500_df[z500_df["season"] == season]
+        feature_cols = [c for c in z500_df.columns if c not in ("date", "season", "cluster_id")]
+        climo_mean = season_df[feature_cols].mean()
 
         # Align raw_series to feature_cols, compute anomaly
         common_cols = [c for c in feature_cols if c in raw_series.index]
@@ -187,7 +200,7 @@ def classify_pattern(target_date: date | None = None) -> dict:
         cluster_id      : int
         distance        : float   — distance to nearest centroid in scaled space
         confidence      : str     — "high" / "medium" / "low"
-        data_source     : str     — "nomads" or "reanalysis_fallback"
+        data_source     : str     — "openmeteo" or "reanalysis_fallback"
     """
     if target_date is None:
         target_date = date.today()
@@ -207,11 +220,11 @@ def classify_pattern(target_date: date | None = None) -> dict:
     feature_cols = cluster_models[season]["feature_cols"]
 
     # ── Fetch live z500 ───────────────────────────────────────────────────
-    data_source = "nomads"
-    raw = _fetch_nomads_z500(target_date)
+    data_source = "openmeteo"
+    raw = _fetch_openmeteo_z500(target_date)
 
     if raw is not None:
-        # NOMADS gives raw heights — compute anomaly to match training
+        # Open-Meteo gives raw heights — compute anomaly to match training
         feature_row = _compute_anomaly(raw, season)
         if feature_row is None:
             raw = None  # anomaly failed, fall to reanalysis

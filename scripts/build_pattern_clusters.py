@@ -127,7 +127,7 @@ def build_pattern_clusters() -> None:
         logger.info("Processing season: %s", season)
 
         scaler, km, best_k = fit_seasonal_clusters(anomaly_df, season, K_RANGE)
-        centroids[season] = {"scaler": scaler, "model": km, "k": best_k}
+        centroids[season] = {"scaler": scaler, "model": km, "k": best_k, "feature_cols": feat_cols}
 
         # Predict labels for all dates in this season
         season_mask = assign_season(anomaly_df["date"]) == season
