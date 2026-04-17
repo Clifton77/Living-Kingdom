@@ -151,6 +151,16 @@ def bucket_label(lower: int) -> str:
     return f"{lower}° to {lower + 1}°"
 
 
+def build_market_id(station: str, event_date: date, bucket_lower: int) -> str:
+    """
+    Build a Kalshi market ticker from components.
+    e.g. build_market_id("KLAX", date(2026,4,14), 80) → "KXHIGHLAX-26APR14-B80.5"
+    """
+    series = get_series_ticker(station)
+    center = bucket_lower_to_center(bucket_lower)
+    return f"{series}-{_date_tag(event_date)}-B{center}"
+
+
 # ---------------------------------------------------------------------------
 # API client
 # ---------------------------------------------------------------------------
