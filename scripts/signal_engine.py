@@ -809,9 +809,16 @@ def generate_signal(
         )
 
     # ── 3. Bias lookup (filtered to the model source used) ───────────────
+    # When z500 classification fell back to stale reanalysis the cluster
+    # assignment is unreliable — skip cluster-specific bias and use the
+    # broader station/month average instead (pass invalid cluster_id=-1).
+    effective_cluster = (
+        -1 if pattern.get("data_source") == "reanalysis_fallback"
+        else pattern["cluster_id"]
+    )
     bias_info = lookup_bias(
         bias_df, station, event_date,
-        pattern["cluster_id"], pattern["season"], forecast_raw,
+        effective_cluster, pattern["season"], forecast_raw,
         model_source=model_source_used,
     )
     bias_mean        = bias_info["bias_mean"]

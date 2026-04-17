@@ -322,8 +322,8 @@ def tier1_metar_entries_exits():
                 metar    = get_metar(station)
                 obs_temp = metar.temp_f
 
-                if obs_temp <= -50.0:
-                    logger.warning("[Tier1] %s METAR failed (temp=%.1f) — skipping exit pass", station, obs_temp)
+                if obs_temp is None or obs_temp <= -50.0:
+                    logger.warning("[Tier1] %s METAR failed (temp=%s) — skipping exit pass", station, obs_temp)
                     continue
 
                 station_positions = {

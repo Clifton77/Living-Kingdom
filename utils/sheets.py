@@ -281,7 +281,7 @@ class GoogleSheetsLogger:
                 round(sig.top_model_prob * 100, 1),
                 round(sig.top_kalshi_prob * 100, 1),
                 round(sig.top_edge, 4),
-                round(thr.effective_threshold, 4) if thr else "",
+                round(thr.threshold, 4) if thr else "",
                 thr.weather_condition if thr else "",
                 sig.decision,
                 skip_reason,
