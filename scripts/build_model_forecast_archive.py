@@ -105,8 +105,8 @@ def _fetch_afm_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     params = {
         "pil":   pil,
         "fmt":   "json",
-        "sdate": f"{start_str}T00:00Z",
-        "edate": f"{end_str}T23:59Z",
+        "sdate": f"{start_str}T00:00:00Z",
+        "edate": f"{end_str}T23:59:59Z",
         "limit": 500,
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
@@ -182,8 +182,8 @@ def _fetch_mos_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     params = {
         "pil":   pil,
         "fmt":   "json",
-        "sdate": f"{start_str}T00:00Z",
-        "edate": f"{end_str}T23:59Z",
+        "sdate": f"{start_str}T00:00:00Z",
+        "edate": f"{end_str}T23:59:59Z",
         "limit": 500,
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)

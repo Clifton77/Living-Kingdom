@@ -300,8 +300,8 @@ def _fetch_live_afos(pil: str, target_date: date) -> list[dict]:
     params = {
         "pil":   pil,
         "fmt":   "json",
-        "sdate": f"{date_str}T00:00Z",
-        "edate": f"{date_str}T23:59Z",
+        "sdate": f"{date_str}T00:00:00Z",
+        "edate": f"{date_str}T23:59:59Z",
         "limit": 10,
     }
     resp = requests.get(_AFOS_URL, params=params, timeout=20)
