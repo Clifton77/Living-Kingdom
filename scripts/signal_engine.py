@@ -293,20 +293,16 @@ def lookup_bias(
 _AFOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
 
 
-def _fetch_live_afos(pil: str, target_date: date) -> list[dict]:
-    """Fetch the most recent AFOS product for today."""
+def _fetch_live_afos(pil: str, target_date: date) -> str | None:
+    """Fetch the most recent AFOS product text (IEM dropped fmt=json support in 2026)."""
     import requests
-    date_str = target_date.strftime("%Y-%m-%d")
-    params = {
-        "pil":   pil,
-        "fmt":   "json",
-        "sdate": f"{date_str}T00:00Z",
-        "edate": f"{date_str}T23:59Z",
-        "limit": 10,
-    }
-    resp = requests.get(_AFOS_URL, params=params, timeout=20)
+    resp = requests.get(
+        _AFOS_URL,
+        params={"pil": pil, "fmt": "text", "limit": 1},
+        timeout=20,
+    )
     resp.raise_for_status()
-    return resp.json().get("data", [])
+    return resp.text or None
 
 
 def fetch_live_afm_forecast(station: str, target_date: date) -> float | None:
@@ -315,27 +311,18 @@ def fetch_live_afm_forecast(station: str, target_date: date) -> float | None:
     Returns °F or None on failure.
     """
     from config import WFO_MAP
-    from scripts.build_model_forecast_archive import (
-        _parse_afm_max_temp, _issue_time_to_valid_date,
-    )
+    from scripts.build_model_forecast_archive import _parse_afm_max_temp
     wfo = WFO_MAP.get(station)
     if not wfo:
         return None
     try:
-        products = _fetch_live_afos(f"AFM{wfo}", target_date)
-        # Take the most recent product that parses cleanly
-        for product in reversed(products):
-            text       = product.get("data", "")
-            issue_time = product.get("utc_valid", "")
-            if not text:
-                continue
-            valid_date = _issue_time_to_valid_date(issue_time)
-            if valid_date != target_date:
-                continue
-            tmax = _parse_afm_max_temp(text, station)
-            if tmax is not None:
-                logger.info("%s live AFM forecast: %.1f°F", station, tmax)
-                return tmax
+        text = _fetch_live_afos(f"AFM{wfo}", target_date)
+        if not text:
+            return None
+        tmax = _parse_afm_max_temp(text, station)
+        if tmax is not None:
+            logger.info("%s live AFM forecast: %.1f°F", station, tmax)
+            return tmax
     except Exception as exc:
         logger.warning("%s live AFM fetch failed: %s", station, exc)
     return None
@@ -347,26 +334,18 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
     Returns °F or None on failure.
     """
     from config import WFO_MAP
-    from scripts.build_model_forecast_archive import (
-        _parse_mos_max_temp, _issue_time_to_valid_date,
-    )
+    from scripts.build_model_forecast_archive import _parse_mos_max_temp
     wfo = WFO_MAP.get(station)
     if not wfo:
         return None
     try:
-        products = _fetch_live_afos(f"MAV{wfo}", target_date)
-        for product in reversed(products):
-            text       = product.get("data", "")
-            issue_time = product.get("utc_valid", "")
-            if not text:
-                continue
-            valid_date = _issue_time_to_valid_date(issue_time)
-            if valid_date != target_date:
-                continue
-            tmax = _parse_mos_max_temp(text, station)
-            if tmax is not None:
-                logger.info("%s live GFS-MOS forecast: %.1f°F", station, tmax)
-                return tmax
+        text = _fetch_live_afos(f"MAV{wfo}", target_date)
+        if not text:
+            return None
+        tmax = _parse_mos_max_temp(text, station)
+        if tmax is not None:
+            logger.info("%s live GFS-MOS forecast: %.1f°F", station, tmax)
+            return tmax
     except Exception as exc:
         logger.warning("%s live GFS-MOS fetch failed: %s", station, exc)
     return None
