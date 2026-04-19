@@ -105,8 +105,8 @@ def _fetch_afm_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     params = {
         "pil":   pil,
         "fmt":   "json",
-        "sdate": f"{start_str}T00:00:00Z",
-        "edate": f"{end_str}T23:59:59Z",
+        "sdate": f"{start_str}T00:00Z",
+        "edate": f"{end_str}T23:59Z",
         "limit": 500,
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
@@ -118,38 +118,31 @@ def _fetch_afm_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
 def _parse_afm_max_temp(text: str, station: str) -> float | None:
     """
     Parse Day-1 max temperature from AFM fixed-width text.
-    Returns °F or None if not parseable.
+
+    AFM format: zone name line appears BEFORE the Max/Min data row.
+    Strategy: find a line containing the station name, then scan forward
+    up to 20 lines for a Max/Min row and return the first valid temperature.
     """
     search_names = STATION_AFM_NAMES.get(station, [])
-    lines = text.upper().split("\n")
+    lines = text.split("\n")
 
-    max_col = None
-    header_line_idx = None
     for i, line in enumerate(lines):
-        if re.search(r"\bMAX\b", line) and re.search(r"\bMIN\b", line):
-            match = re.search(r"\bMAX\b", line)
-            if match:
-                max_col = match.start()
-                header_line_idx = i
-                break
-
-    if max_col is None:
-        return None
-
-    for i in range(header_line_idx + 1, min(header_line_idx + 30, len(lines))):
-        line = lines[i].upper()
-        if any(name in line for name in search_names):
-            window_start = max(0, max_col - 4)
-            window_end   = min(len(line), max_col + 10)
-            window = lines[i][window_start:window_end]
-            nums = re.findall(r"\d{2,3}", window)
-            if nums:
-                try:
-                    val = float(nums[0])
-                    if -20 <= val <= 130:
-                        return val
-                except ValueError:
-                    pass
+        line_up = line.upper()
+        if not any(name in line_up for name in search_names):
+            continue
+        # Found a zone line matching this station — scan forward for Max/Min
+        for j in range(i + 1, min(i + 20, len(lines))):
+            jline = lines[j]
+            if re.search(r"\bMax/Min\b|\bMAX/MIN\b|\bMin/Max\b|\bMIN/MAX\b", jline, re.I):
+                nums = re.findall(r"\d{2,3}", jline)
+                for n in nums:
+                    try:
+                        val = float(n)
+                        if 32 <= val <= 130:   # plausible high temp
+                            return val
+                    except ValueError:
+                        pass
+                break  # found the row but no valid number
     return None
 
 
@@ -182,8 +175,8 @@ def _fetch_mos_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     params = {
         "pil":   pil,
         "fmt":   "json",
-        "sdate": f"{start_str}T00:00:00Z",
-        "edate": f"{end_str}T23:59:59Z",
+        "sdate": f"{start_str}T00:00Z",
+        "edate": f"{end_str}T23:59Z",
         "limit": 500,
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
@@ -219,22 +212,27 @@ def _parse_mos_max_temp(text: str, station: str) -> float | None:
     if station_line_idx is None:
         return None
 
-    # Scan up to 35 lines after the station identifier for the MAX/MIN row
+    # Scan up to 35 lines after the station identifier for the N/X (max/min) row.
+    # GFS-MOS uses "N/X" label; values alternate overnight-low, day-high, ...
+    # Take the highest plausible high-temp value (>= 32°F) which is the day max.
     for i in range(station_line_idx + 1, min(station_line_idx + 35, len(lines))):
         line = lines[i]
-        if "MAX/MIN" in line:
+        if re.match(r"\s*N/X\b", line, re.I) or "MAX/MIN" in line.upper():
             nums = re.findall(r"\d{2,3}", line)
-            if nums:
+            candidates = []
+            for n in nums:
                 try:
-                    val = float(nums[0])
-                    if -20 <= val <= 130:
-                        return val
+                    val = float(n)
+                    if 32 <= val <= 130:
+                        candidates.append(val)
                 except ValueError:
                     pass
-            return None  # found MAX/MIN line but couldn't parse it
+            if candidates:
+                return max(candidates)
+            return None
         # Stop if we hit another station section (4-letter K-code on its own line)
         stripped = line.strip()
-        if len(stripped) == 4 and stripped.isalpha() and stripped.startswith("K"):
+        if len(stripped) == 4 and stripped.isalpha() and stripped.upper().startswith("K"):
             break
 
     return None

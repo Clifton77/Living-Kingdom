@@ -514,15 +514,15 @@ class KalshiClient:
         # ("0.0300" = $0.03 = 3¢ = 3% implied probability)
         # Fall back to integer cent fields if _dollars fields are absent.
         if "yes_ask_dollars" in raw:
-            yes_bid = float(raw.get("yes_bid_dollars", "0"))
-            yes_ask = float(raw.get("yes_ask_dollars", "1"))
-            no_bid  = float(raw.get("no_bid_dollars",  "0"))
-            no_ask  = float(raw.get("no_ask_dollars",  "1"))
+            yes_bid = float(raw.get("yes_bid_dollars") or "0")
+            yes_ask = float(raw.get("yes_ask_dollars") or "1")
+            no_bid  = float(raw.get("no_bid_dollars")  or "0")
+            no_ask  = float(raw.get("no_ask_dollars")  or "1")
         else:
-            yes_bid = raw.get("yes_bid", 0)   / 100.0
-            yes_ask = raw.get("yes_ask", 100) / 100.0
-            no_bid  = raw.get("no_bid",  0)   / 100.0
-            no_ask  = raw.get("no_ask",  100) / 100.0
+            yes_bid = (raw.get("yes_bid") or 0)   / 100.0
+            yes_ask = (raw.get("yes_ask") or 100) / 100.0
+            no_bid  = (raw.get("no_bid")  or 0)   / 100.0
+            no_ask  = (raw.get("no_ask")  or 100) / 100.0
 
         # ── Volume ────────────────────────────────────────────────────────
         # API v2: "volume_fp" (string float). Legacy: "volume" (int).

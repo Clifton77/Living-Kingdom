@@ -236,16 +236,16 @@
             </div>
             <div class="d-flex align-items-start gap-2">
               {% if sig and sig.metar %}
-              {% set wx_cond = (sig.taf.weather_condition if sig.taf else 'clear') | replace(' ', '_') %}
-              {% set temp_val = sig.metar.temp_f | int %}
+              {% set wx_cond = (sig.taf.condition if sig.taf else 'clear') | replace(' ', '_') %}
+              {% set temp_val = sig.metar.temp_f | default(0) | int %}
               {% set temp_cls = 'cold' if temp_val < 45 else ('warm' if temp_val > 80 else ('hot' if temp_val > 95 else 'mild')) %}
               <div class="wb-weather-expanded">
                 <div class="wb-wx-icon wb-wx-{{ wx_cond }} mb-1"></div>
                 <div class="wb-wx-grid">
                   <span class="wb-wx-temp wb-temp-{{ temp_cls }}">{{ temp_val }}°F</span>
-                  <span class="wb-wx-badge">{{ sig.taf.ceiling_category if sig.taf else sig.metar.sky_condition }}</span>
-                  <span class="wb-wx-wind">{{ sig.metar.wind_speed_kt | int }}kt</span>
-                  <span class="wb-wx-badge">DP {{ sig.metar.dewpoint_f | int }}°F</span>
+                  <span class="wb-wx-badge">{{ sig.taf.sky_cover if sig.taf else sig.metar.sky_cover }}</span>
+                  <span class="wb-wx-wind">{{ sig.metar.wind_kt | default(0) | int }}kt</span>
+                  <span class="wb-wx-badge">DP {{ sig.metar.dewpoint_f | default(0) | int }}°F</span>
                 </div>
               </div>
               {% endif %}
@@ -415,8 +415,8 @@
                 <div class="text-muted small">
                   Temp {{ sig.metar.temp_f }}°F &nbsp;·&nbsp;
                   Dewpoint {{ sig.metar.dewpoint_f }}°F &nbsp;·&nbsp;
-                  Wind {{ sig.metar.wind_dir }}° @ {{ sig.metar.wind_speed_kt }}kt &nbsp;·&nbsp;
-                  Sky {{ sig.metar.sky_condition }}
+                  Wind {{ sig.metar.wind_dir }}° @ {{ sig.metar.wind_kt }}kt &nbsp;·&nbsp;
+                  Sky {{ sig.metar.sky_cover }}
                   {% if sig.metar.raw %}<br><span class="font-monospace opacity-50 small">{{ sig.metar.raw }}</span>{% endif %}
                 </div>
               </div>
@@ -425,10 +425,10 @@
               <div class="wb-reasoning-block">
                 <div class="wb-reasoning-label">TAF Highlights</div>
                 <div class="text-muted small">
-                  Ceiling: {{ sig.taf.ceiling_category }} &nbsp;·&nbsp;
-                  Condition: {{ sig.taf.weather_condition }}
+                  Ceiling: {{ sig.taf.sky_cover }} &nbsp;·&nbsp;
+                  Condition: {{ sig.taf.condition }}
                   {% if sig.taf.has_amd %}<span class="badge bg-warning text-dark ms-1">AMD</span>{% endif %}
-                  {% if sig.taf.hard_skip %}<span class="badge bg-danger ms-1">HARD SKIP</span>{% endif %}
+                  {% if sig.taf.condition == 'hard_skip' %}<span class="badge bg-danger ms-1">HARD SKIP</span>{% endif %}
                   {% if sig.taf.summary %}<br><span class="opacity-75" data-taf-station="{{ station }}">{{ sig.taf.summary }}</span>{% endif %}
                 </div>
               </div>
@@ -437,15 +437,15 @@
               <div class="wb-reasoning-block mt-2">
                 <div class="wb-reasoning-label">Threshold Checks</div>
                 <div class="d-flex flex-wrap gap-1 mt-1">
-                  <span class="badge {% if sig.threshold_result.weather_condition == 'clear' %}bg-success{% elif sig.threshold_result.weather_condition in ['precip','hard_skip'] %}bg-danger{% else %}bg-warning text-dark{% endif %}">
-                    {{ sig.threshold_result.weather_condition }}
+                  <span class="badge {% if sig.threshold_result.taf_condition == 'clear' %}bg-success{% elif sig.threshold_result.taf_condition in ['precip','hard_skip'] %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+                    {{ sig.threshold_result.taf_condition }}
                   </span>
                   <span class="badge bg-secondary">
-                    threshold {{ "%.2f"|format(sig.threshold_result.effective_threshold) }}
+                    threshold {{ "%.2f"|format(sig.threshold_result.threshold) }}
                   </span>
-                  <span class="badge {% if sig.top_edge >= sig.threshold_result.effective_threshold %}bg-success{% else %}bg-secondary{% endif %}">
+                  <span class="badge {% if sig.top_edge >= sig.threshold_result.threshold %}bg-success{% else %}bg-secondary{% endif %}">
                     edge {{ "%+.2f"|format(sig.top_edge) }}
-                    {% if sig.top_edge >= sig.threshold_result.effective_threshold %}✓{% else %}✗{% endif %}
+                    {% if sig.top_edge >= sig.threshold_result.threshold %}✓{% else %}✗{% endif %}
                   </span>
                 </div>
               </div>

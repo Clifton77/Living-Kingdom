@@ -425,7 +425,7 @@ def tier1_metar_entries_exits():
                             _last_snapshot_time[market_id] = now_utc
 
             except Exception as exc:
-                logger.error("[Tier1] Exit pass error at %s: %s", station, exc)
+                logger.error("[Tier1] Exit pass error at %s: %s", station, exc, exc_info=True)
 
         # ── Pass 2: entries ──────────────────────────────────────────────────
         entered = 0
@@ -491,11 +491,11 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         if dist == 0:
             return  # already in this bucket
 
-        market_id = build_market_id(station, event_date, sig.top_bucket)
-
         snap_check = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
         if snap_check is None or not snap_check.is_open:
             return
+
+        market_id = snap_check.market_id  # use API ticker (avoids B68 vs T68 mismatch)
 
         if dist == 1:
             expansion_decision = _evaluate_expansion(
@@ -574,13 +574,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         return
 
     effective_threshold = (
-        sig.threshold_result.effective_threshold
+        sig.threshold_result.threshold
         if sig.threshold_result else 0.12
     )
     max_price = round(sig.top_model_prob - effective_threshold, 4)
     max_price = max(max_price, snap.yes_ask)
 
-    market_id = build_market_id(station, event_date, sig.top_bucket)
+    market_id = snap.market_id  # use API ticker (avoids B68 vs T68 mismatch)
     result = kalshi.place_order_with_fill_check(
         market_id=market_id,
         contracts=sig.kelly_contracts,
@@ -945,7 +945,7 @@ def _execute_reposition(
         return
 
     effective_threshold = (
-        new_sig.threshold_result.effective_threshold
+        new_sig.threshold_result.threshold
         if new_sig.threshold_result else required_edge
     )
     max_price = round(new_sig.top_model_prob - effective_threshold, 4)
@@ -1181,13 +1181,14 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
         return
 
     effective_threshold = (
-        sig.threshold_result.effective_threshold if sig.threshold_result else 0.12
+        sig.threshold_result.threshold if sig.threshold_result else 0.12
     )
     max_price = round(sig.top_model_prob - effective_threshold, 4)
     max_price = max(max_price, snap.yes_ask)
 
+    real_market_id = snap.market_id  # use API ticker (avoids B68 vs T68 mismatch)
     result = kalshi.place_order_with_fill_check(
-        market_id=market_id,
+        market_id=real_market_id,
         contracts=sig.kelly_contracts,
         limit_price=max_price,
         side="yes",
@@ -1196,7 +1197,7 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
     if result.success:
         rm.open_position(
             station=station,
-            market_id=market_id,
+            market_id=real_market_id,
             bucket_lower=bucket_lower,
             contracts=sig.kelly_contracts,
             entry_price=max_price,
@@ -1205,7 +1206,7 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
         get_sheets_logger().log_trade_opened(
             station=station,
             event_date=event_date,
-            market_id=market_id,
+            market_id=real_market_id,
             bucket_lower=bucket_lower,
             entry_price=max_price,
             contracts=sig.kelly_contracts,
@@ -1214,7 +1215,7 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
         )
         logger.info(
             "[LiqRetry] Entry complete: %s | %d contracts @ $%.2f",
-            market_id, sig.kelly_contracts, max_price,
+            real_market_id, sig.kelly_contracts, max_price,
         )
     else:
         logger.error("[LiqRetry] Order failed: %s — %s", market_id, result.error)
@@ -1523,12 +1524,21 @@ def start_scheduler() -> BackgroundScheduler:
 
 
 def _run_initial_pass():
-    """Run Tier 3 immediately on startup in a background thread."""
+    """Run Tier 3 immediately on startup in a background thread. Retries once."""
     def _run():
-        try:
-            tier3_full_signal_pass()
-        except Exception as exc:
-            logger.error("Initial signal pass failed: %s", exc)
+        for attempt in range(2):
+            try:
+                tier3_full_signal_pass()
+                return
+            except Exception as exc:
+                logger.error(
+                    "Initial signal pass failed (attempt %d/2): %s",
+                    attempt + 1, exc, exc_info=True,
+                )
+                if attempt == 0:
+                    import time as _time
+                    logger.info("Retrying initial signal pass in 30s…")
+                    _time.sleep(30)
 
     t = threading.Thread(target=_run, daemon=True, name="initial_signal_pass")
     t.start()

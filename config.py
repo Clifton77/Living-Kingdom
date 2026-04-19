@@ -394,7 +394,7 @@ STARTING_BANKROLL        = 100.0   # paper trading bankroll in USD
 DAILY_LOSS_LIMIT_PCT     = 0.10    # halt bot if daily loss exceeds 10%
 MAX_STAKE_PCT            = 0.02    # max 2% of bankroll per trade (fractional Kelly)
 MAX_EXPOSURE_PCT         = 0.50    # max 50% of bankroll in open positions
-STOP_LOSS_PCT            = 0.40    # close position if value falls to 40% of entry
+STOP_LOSS_PCT            = 0.65    # close position if value falls to 65% of entry
 REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-enter
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
@@ -509,6 +509,40 @@ TIER2_INTERVAL_SECONDS = 600    # 10 min — TAF amendments + auto-close on sign
 # Tier 3 runs on GFS cycle alignment (every 6hrs + 30min offset); no order execution
 
 SNAPSHOT_INTERVAL_MIN = 15      # how often to log an intraday position snapshot while a trade is open
+
+# ---------------------------------------------------------------------------
+# Startup config validation — fail fast if a station is missing from any dict
+# ---------------------------------------------------------------------------
+def _validate_config():
+    # Dicts keyed by Kalshi-side station label
+    kalshi_keyed = {
+        "KALSHI_SETTLEMENT_STATION": KALSHI_SETTLEMENT_STATION,
+        "STATION_CITY_NAMES":        STATION_CITY_NAMES,
+        "STATION_TIMEZONES":         STATION_TIMEZONES,
+        "WFO_MAP":                   WFO_MAP,
+        "KALSHI_STATION_SERIES":     KALSHI_STATION_SERIES,
+        "STATION_PEAK_HOURS":        STATION_PEAK_HOURS,
+    }
+    for dict_name, d in kalshi_keyed.items():
+        missing = [s for s in STATIONS if s not in d]
+        if missing:
+            raise RuntimeError(
+                f"config.py: {dict_name} is missing entries for: {missing}"
+            )
+    # Dicts keyed by settlement station (KALSHI_SETTLEMENT_STATION values)
+    settlement_stations = set(KALSHI_SETTLEMENT_STATION.values())
+    settlement_keyed = {
+        "GHCND_IDS":      GHCND_IDS,
+        "STATION_COORDS": STATION_COORDS,
+    }
+    for dict_name, d in settlement_keyed.items():
+        missing = [s for s in settlement_stations if s not in d]
+        if missing:
+            raise RuntimeError(
+                f"config.py: {dict_name} is missing entries for settlement stations: {missing}"
+            )
+
+_validate_config()
 
 # ---------------------------------------------------------------------------
 # Google Sheets tab names

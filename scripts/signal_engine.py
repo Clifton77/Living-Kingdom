@@ -294,19 +294,44 @@ _AFOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
 
 
 def _fetch_live_afos(pil: str, target_date: date) -> list[dict]:
-    """Fetch the most recent AFOS product for today."""
-    import requests
+    """
+    Fetch AFOS products from IEM using fmt=text (fmt=json was removed Apr 2026).
+    Returns list of {"data": text, "utc_valid": iso_string} to match old schema.
+    """
+    import requests, re
+    from datetime import datetime, timezone as _tz
+
     date_str = target_date.strftime("%Y-%m-%d")
     params = {
         "pil":   pil,
-        "fmt":   "json",
-        "sdate": f"{date_str}T00:00:00Z",
-        "edate": f"{date_str}T23:59:59Z",
+        "fmt":   "text",
+        "sdate": f"{date_str}T00:00Z",
+        "edate": f"{date_str}T23:59Z",
         "limit": 10,
     }
     resp = requests.get(_AFOS_URL, params=params, timeout=20)
     resp.raise_for_status()
-    return resp.json().get("data", [])
+
+    raw = resp.text
+    if "ERROR:" in raw or not raw.strip():
+        return []
+
+    products = []
+    for block in raw.split("\x01"):
+        block = block.strip()
+        if not block:
+            continue
+        # Extract issue time from WMO header e.g. "FOUS51 KOKX 191820" → day=19 hh=18 mm=20
+        m = re.search(r"^[A-Z]{4}\d{2}\s+[A-Z]{4}\s+(\d{2})(\d{2})(\d{2})", block, re.MULTILINE)
+        if not m:
+            continue
+        day, hh, mm = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            dt = datetime(target_date.year, target_date.month, day, hh, mm, tzinfo=_tz.utc)
+            products.append({"data": block, "utc_valid": dt.isoformat()})
+        except Exception:
+            continue
+    return products
 
 
 def fetch_live_afm_forecast(station: str, target_date: date) -> float | None:
@@ -354,7 +379,11 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
     if not wfo:
         return None
     try:
-        products = _fetch_live_afos(f"MAV{wfo}", target_date)
+        from scripts.build_model_forecast_archive import STATION_MOS_IDS
+        primary_id = STATION_MOS_IDS.get(station, [station])[0]  # e.g. KNYC for KJFK
+        mos_pil    = f"MAV{primary_id[1:]}"                       # KNYC → MAVNYC
+        products = _fetch_live_afos(mos_pil, target_date)
+        # First pass: exact valid_date match
         for product in reversed(products):
             text       = product.get("data", "")
             issue_time = product.get("utc_valid", "")
@@ -367,6 +396,17 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
             if tmax is not None:
                 logger.info("%s live GFS-MOS forecast: %.1f°F", station, tmax)
                 return tmax
+        # Fallback: use most recent product regardless of valid_date
+        # (GFS-MOS only runs 00Z/12Z; 12Z product valid_date = tomorrow but
+        #  still contains useful calibration data during intraday operation)
+        for product in reversed(products):
+            text = product.get("data", "")
+            if not text:
+                continue
+            tmax = _parse_mos_max_temp(text, station)
+            if tmax is not None:
+                logger.info("%s live GFS-MOS forecast (fallback date): %.1f°F", station, tmax)
+                return tmax
     except Exception as exc:
         logger.warning("%s live GFS-MOS fetch failed: %s", station, exc)
     return None
@@ -376,20 +416,28 @@ def _fetch_openmeteo_live(station: str, target_date: date) -> float | None:
     """Open-Meteo current forecast — fallback when IEM products unavailable."""
     import requests
     lat, lon = STATION_COORDS[settlement_station(station)]
+    import time as _time
+    params = {
+        "latitude":         lat,
+        "longitude":        lon,
+        "daily":            "temperature_2m_max",
+        "temperature_unit": "fahrenheit",
+        "forecast_days":    3,
+        "timezone":         "UTC",
+    }
     try:
-        resp = requests.get(
-            OPEN_METEO_FORECAST_URL,
-            params={
-                "latitude":         lat,
-                "longitude":        lon,
-                "daily":            "temperature_2m_max",
-                "temperature_unit": "fahrenheit",
-                "forecast_days":    3,
-                "timezone":         "UTC",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
+        for attempt in range(4):
+            resp = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=10)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning("%s Open-Meteo rate limited — waiting %ds", station, wait)
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            logger.warning("%s Open-Meteo rate limited after 4 attempts", station)
+            return None
         data     = resp.json()
         dates    = data["daily"]["time"]
         temps    = data["daily"]["temperature_2m_max"]

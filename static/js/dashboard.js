@@ -541,9 +541,15 @@ function updateTimestamp() {
   if (el) el.textContent = `Updated: ${nowStr()}`;
 }
 
+// ── Periodic page reload ──────────────────────────────────────
+function startAutoRefresh(intervalMs = 5 * 60 * 1000) {
+  setInterval(() => location.reload(), intervalMs);
+}
+
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   applyLocalTimes();
   initSSE();
   updateTimestamp();
+  startAutoRefresh();
 });

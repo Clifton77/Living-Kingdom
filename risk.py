@@ -137,6 +137,11 @@ def evaluate_exit(
     local_hour        : current local hour at the station (0–23, optional)
     peak_heating_hour : station/month 90th-pct peak hour from STATION_PEAK_HOURS (optional)
     """
+    if current_bid is None or current_edge is None:
+        return ExitDecision(False, "Missing market data — hold", "none")
+    if not pos.entry_price:
+        return ExitDecision(False, "Position entry_price missing — hold", "none")
+
     bucket_lo = pos.bucket_lower
     bucket_hi = bucket_lo + 2    # 2°F wide bin
 
@@ -278,7 +283,26 @@ class RiskManager:
                 with open(STATE_FILE, "r") as f:
                     data = json.load(f)
                 positions = {
-                    k: OpenPosition(**v)
+                    k: OpenPosition(
+                        station       = v.get("station", ""),
+                        market_id     = v.get("market_id", k),
+                        bucket_lower  = int(v.get("bucket_lower", 0)),
+                        contracts     = int(v.get("contracts", 0)),
+                        entry_price   = float(v.get("entry_price") or 0.0),
+                        entry_usd     = float(v.get("entry_usd") or 0.0),
+                        entry_time    = v.get("entry_time", ""),
+                        event_date    = v.get("event_date", ""),
+                        current_bid   = float(v.get("current_bid") or 0.0),
+                        current_ask   = float(v.get("current_ask") or 0.0),
+                        unrealized_pnl= float(v.get("unrealized_pnl") or 0.0),
+                        pnl_pct       = float(v.get("pnl_pct") or 0.0),
+                        exit_value    = float(v.get("exit_value") or 0.0),
+                        last_edge     = float(v.get("last_edge") or 0.0),
+                        stop_loss_triggered  = bool(v.get("stop_loss_triggered", False)),
+                        reversal_triggered   = bool(v.get("reversal_triggered", False)),
+                        early_exit_triggered = bool(v.get("early_exit_triggered", False)),
+                        manually_closed      = bool(v.get("manually_closed", False)),
+                    )
                     for k, v in data.pop("positions", {}).items()
                 }
                 state = RiskState(**data)
@@ -483,11 +507,13 @@ class RiskManager:
         pos = self.state.positions.get(market_id)
         if pos is None:
             return ExitDecision(False, "Position not found", "none")
+        if current_bid is None or current_ask is None:
+            return ExitDecision(False, "No market snapshot data — hold", "none")
 
         pos.current_bid      = current_bid
         pos.current_ask      = current_ask
-        pos.last_edge        = current_edge
-        pos.unrealized_pnl   = round((current_bid - pos.entry_price) * pos.contracts, 4)
+        pos.last_edge        = current_edge if current_edge is not None else 0.0
+        pos.unrealized_pnl   = round((current_bid - (pos.entry_price or 0.0)) * pos.contracts, 4)
         pos.pnl_pct          = round(pos.unrealized_pnl / pos.entry_usd * 100, 2) if pos.entry_usd else 0.0
         pos.exit_value       = round(current_bid * pos.contracts, 4)
 

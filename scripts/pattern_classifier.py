@@ -98,9 +98,20 @@ def _fetch_openmeteo_z500(target_date: date) -> pd.Series | None:
                 f"&start_date={date_str}&end_date={date_str}"
             )
             logger.debug("Open-Meteo z500 batch %d–%d", i, i + len(chunk) - 1)
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
+            for attempt in range(4):
+                resp = requests.get(url, timeout=30)
+                if resp.status_code == 429:
+                    wait = 2 ** attempt
+                    logger.warning("Open-Meteo z500 rate limited — waiting %ds", wait)
+                    import time as _time; _time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                raise RuntimeError("Open-Meteo z500 rate limited after 4 attempts")
             data = resp.json()
+            if i + BATCH < len(grid):
+                import time as _time; _time.sleep(1.0)  # stay within free-tier burst limit
 
             # Multi-location → list; single location → dict
             locations = data if isinstance(data, list) else [data]
@@ -241,10 +252,13 @@ def classify_pattern(target_date: date | None = None) -> dict:
             "data mismatch between live and training grid"
         )
 
-    X = feature_row[feature_cols].values.reshape(1, -1)
-    X_scaled = scaler.transform(X)
+    X = feature_row[feature_cols].values.reshape(1, -1).astype(np.float64)
+    X_scaled = scaler.transform(X).astype(np.float64)
 
     # ── Classify ──────────────────────────────────────────────────────────
+    # Ensure model centroids are float64 (old pkl files may be float32)
+    if kmeans.cluster_centers_.dtype != np.float64:
+        kmeans.cluster_centers_ = kmeans.cluster_centers_.astype(np.float64)
     cluster_id = int(kmeans.predict(X_scaled)[0])
     centroid   = kmeans.cluster_centers_[cluster_id]
     distance   = float(np.linalg.norm(X_scaled - centroid))
