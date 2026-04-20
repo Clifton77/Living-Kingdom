@@ -152,7 +152,12 @@ def _worst_sky(taf_upper: str) -> str:
 
 
 def _taf_ddhh_to_utc(dd: int, hh: int, ref_utc: datetime) -> datetime:
-    """Resolve a TAF day+hour (UTC) to an absolute datetime using ref_utc's month/year."""
+    """Resolve a TAF day+hour (UTC) to an absolute datetime using ref_utc's month/year.
+    TAFs use 2400 to mean midnight end-of-day; normalize to 00:00 next day."""
+    if hh == 24:
+        # Advance day by 1, use hh=0
+        base = _taf_ddhh_to_utc(dd, 0, ref_utc)
+        return base + timedelta(days=1)
     year, month = ref_utc.year, ref_utc.month
     try:
         return datetime(year, month, dd, hh, 0, tzinfo=timezone.utc)
