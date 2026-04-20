@@ -712,6 +712,21 @@ def tier3_full_signal_pass(event_date: date | None = None):
     logger.info("[Tier3] Full signal recompute starting")
     rm = get_risk_manager()
 
+    # Sync bankroll from live Kalshi balance — picks up deposits/withdrawals
+    # without requiring a bot restart.
+    try:
+        kalshi = get_kalshi()
+        live_balance = kalshi.get_balance()
+        if live_balance > 0 and abs(live_balance - rm.state.bankroll) > 0.01:
+            logger.info(
+                "[Tier3] Bankroll synced from Kalshi: $%.2f → $%.2f",
+                rm.state.bankroll, live_balance,
+            )
+            rm.state.bankroll = live_balance
+            rm._save_state()
+    except Exception as exc:
+        logger.warning("[Tier3] Bankroll sync failed: %s", exc)
+
     if rm.is_halted:
         logger.info("[Tier3] Bot halted — skipping signal recompute")
         if not rm.state.kill_switch_active:
