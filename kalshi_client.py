@@ -769,6 +769,10 @@ class KalshiClient:
         if not result.success or not result.order_id:
             return result
 
+        # Dry run orders have a fake ID — skip real API fill check
+        if result.order_id.startswith("dryrun-"):
+            return result
+
         filled, filled_count = self.wait_for_fill(result.order_id, timeout_seconds=fill_timeout)
         if not filled:
             cancelled = self.cancel_order(result.order_id)
