@@ -1322,6 +1322,39 @@ def _obs_incremental_update():
 
 
 # ---------------------------------------------------------------------------
+# Monthly z500 pipeline — keeps pattern clusters and bias table current
+# Runs on the 1st of each month at 02:00 UTC (NCEP reanalysis ~2 month lag)
+# Chain: build_500mb_database → build_pattern_clusters → build_bias_table
+# ---------------------------------------------------------------------------
+
+def _monthly_z500_pipeline():
+    """Rebuild z500 anomalies, pattern clusters, and bias table."""
+    logger.info("[Z500Pipeline] Starting monthly z500 + cluster + bias rebuild")
+    try:
+        from scripts.build_500mb_database import build_500mb_database
+        build_500mb_database()
+        logger.info("[Z500Pipeline] z500 anomalies updated")
+    except Exception as exc:
+        logger.error("[Z500Pipeline] z500 step failed: %s", exc, exc_info=True)
+        return
+
+    try:
+        from scripts.build_pattern_clusters import build_pattern_clusters
+        build_pattern_clusters()
+        logger.info("[Z500Pipeline] Pattern clusters rebuilt")
+    except Exception as exc:
+        logger.error("[Z500Pipeline] Cluster step failed: %s", exc, exc_info=True)
+        return
+
+    try:
+        from scripts.build_bias_table import build_bias_table
+        build_bias_table()
+        logger.info("[Z500Pipeline] Bias table rebuilt — monthly pipeline complete")
+    except Exception as exc:
+        logger.error("[Z500Pipeline] Bias table step failed: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # NWS retry scheduler — fires when Tier 3 couldn't get forecast data
 # ---------------------------------------------------------------------------
 
@@ -1524,13 +1557,26 @@ def start_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
+    # Monthly z500 pipeline — 1st of month at 02:00 UTC
+    # Rebuilds z500 anomalies, pattern clusters, and bias table in sequence.
+    # NCEP reanalysis has a ~2 month lag so monthly is sufficient.
+    scheduler.add_job(
+        _monthly_z500_pipeline,
+        trigger=CronTrigger(day=1, hour=2, minute=0, timezone="UTC"),
+        id="monthly_z500_pipeline",
+        name="Monthly Z500 + Cluster + Bias Rebuild",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     scheduler.start()
     _scheduler = scheduler
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
         "Tier3=00/06/12/18Z+30 + %02d:%02dZ market-open | "
-        "Settlement=%02d:00Z | ObsUpdate=10:00Z | mode=%s",
+        "Settlement=%02d:00Z | ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
         MARKET_OPEN_UTC_HOUR, MARKET_OPEN_UTC_MINUTE,
         SETTLEMENT_SWEEP_UTC_HOUR,
