@@ -45,6 +45,7 @@ from utils.logging_config import setup_logging
 from utils.asos_live import running_max_with_confluence
 from utils.sheets import get_sheets_logger
 from utils.events import push_event, push_alert
+from utils.dryrun_journal import log_entry as journal_entry, log_snapshot as journal_snapshot, log_exit as journal_exit
 from utils.alerting import (
     alert_order_failure,
     alert_reconciliation_mismatch,
@@ -422,6 +423,17 @@ def tier1_metar_entries_exits():
                                 pnl_pct=pos.pnl_pct,
                                 hours_since_entry=hours_held,
                             )
+                            journal_snapshot(
+                                station=station,
+                                market_id=market_id,
+                                bucket_lower=pos.bucket_lower,
+                                yes_bid=snap.yes_bid,
+                                yes_ask=snap.yes_ask,
+                                model_prob=sig.top_model_prob if sig and sig.top_bucket == pos.bucket_lower else 0.0,
+                                edge=current_edge,
+                                running_max=running_max,
+                                local_hour=local_hour,
+                            )
                             _last_snapshot_time[market_id] = now_utc
 
             except Exception as exc:
@@ -608,6 +620,18 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             sig=sig,
             entry_reason="tier1",
         )
+        journal_entry(
+            station=station,
+            market_id=market_id,
+            bucket_lower=sig.top_bucket,
+            entry_price=max_price,
+            contracts=sig.kelly_contracts,
+            stake_usd=sig.kelly_stake_usd,
+            model_prob=sig.top_model_prob,
+            edge=fresh_edge,
+            forecast_adjusted=sig.forecast_adjusted,
+            sig=sig,
+        )
         push_event("position_opened", {
             "market_id":    market_id,
             "station":      station,
@@ -638,6 +662,15 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     if result.success:
         realized = rm.close_position(market_id, bid_price, reason)
         get_sheets_logger().log_trade_closed(market_id, bid_price, realized, reason)
+        journal_exit(
+            station=pos.station,
+            market_id=market_id,
+            bucket_lower=pos.bucket_lower,
+            exit_price=bid_price,
+            entry_price=pos.entry_price,
+            contracts=pos.contracts,
+            reason=reason,
+        )
         mode = "DEMO" if USE_DEMO else "LIVE"
         get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
         push_event("position_closed", {"market_id": market_id, "realized_pnl": realized, "reason": reason})
