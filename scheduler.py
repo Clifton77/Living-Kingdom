@@ -671,7 +671,6 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             contracts=sig.kelly_contracts,
             stake_usd=sig.kelly_stake_usd,
             sig=sig,
-            entry_reason="tier1",
         )
         journal_entry(
             station=station,
