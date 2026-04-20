@@ -217,6 +217,9 @@ function updateSummaryStrip(s) {
   const haltBadge = document.getElementById('halt-badge');
   if (haltBadge) haltBadge.classList.toggle('d-none', !s.is_halted);
 
+  const resetBtn = document.getElementById('btn-reset-pnl');
+  if (resetBtn) resetBtn.style.display = s.is_halted ? '' : 'none';
+
   const ksLabel = document.getElementById('ks-label');
   if (ksLabel) ksLabel.textContent = s.kill_switch ? 'Full Stop' : 'Active';
 }
@@ -424,6 +427,17 @@ async function setKillSwitch(activate) {
     const data = await res.json();
     const label = activate ? 'Full Stop' : 'Active';
     showToast('Kill Switch', `Bot is now: ${label}`, activate ? 'danger' : 'success');
+  } catch (err) {
+    showToast('Error', err.message, 'danger');
+  }
+}
+
+async function resetDailyPnl() {
+  if (!confirm('Reset today\'s P&L and resume trading?')) return;
+  try {
+    const res  = await fetch('/api/reset-daily-pnl', { method: 'POST' });
+    const data = await res.json();
+    showToast('Day Reset', 'Daily P&L cleared — bot is now active', 'success');
   } catch (err) {
     showToast('Error', err.message, 'danger');
   }

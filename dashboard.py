@@ -233,6 +233,24 @@ def kill_switch_deactivate():
     return jsonify({"ok": True, "is_halted": False})
 
 
+@app.route("/api/reset-daily-pnl", methods=["POST"])
+@_require_auth
+def reset_daily_pnl():
+    from scheduler import get_risk_manager
+    import datetime
+    rm = get_risk_manager()
+    rm.state.daily_pnl = 0.0
+    rm.state.realized_pnl = 0.0
+    rm.state.session_date = datetime.date.today().isoformat()
+    rm.state.trade_count_today = 0
+    rm.state.wins_today = 0
+    rm.state.losses_today = 0
+    rm.state.reversal_blocked = []
+    rm._save_state()
+    push_event("state_update", rm.summary())
+    return jsonify({"ok": True, "is_halted": rm.is_halted})
+
+
 @app.route("/api/signal-pass", methods=["POST"])
 @_require_auth
 def manual_signal_pass():

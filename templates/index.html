@@ -38,6 +38,14 @@
       </ul>
     </div>
 
+    <!-- Reset daily P&L (only shown when halted by loss limit) -->
+    <button class="btn btn-sm btn-outline-warning" id="btn-reset-pnl"
+            onclick="resetDailyPnl()"
+            title="Clear today's P&L and resume trading"
+            {% if not initial_state.is_halted %}style="display:none"{% endif %}>
+      ↺ Reset Day
+    </button>
+
     <!-- Run signal -->
     <button class="btn btn-sm btn-outline-primary" id="btn-signal" onclick="runSignalPass()">
       ↻ Run Signal
