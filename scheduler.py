@@ -489,13 +489,33 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         logger.debug("[Tier1] %s signal %.1fh old — skipping entry", station, age_hours)
         return
 
-    # No entries if signal doesn't say TRADE
-    if sig.decision != "TRADE":
+    # SKIP and CONSTRAINED are never actionable
+    if sig.decision in ("SKIP", "CONSTRAINED"):
         return
 
     existing = rm.station_positions(station)
 
-    # ── Existing position routing ─────────────────────────────────────────
+    # WATCH promotion — fetch a live Kalshi price and check whether edge has
+    # crossed the threshold since the last Tier 3 run. Kalshi prices move
+    # continuously; waiting up to 6h for the next Tier 3 means we miss
+    # intraday opportunities. New positions only — no expansions from WATCH.
+    if sig.decision == "WATCH":
+        if existing:
+            return  # don't expand or reposition from a WATCH signal
+        threshold = sig.threshold_result.threshold if sig.threshold_result else 0.12
+        snap_pre = kalshi.get_market_snapshot(station, event_date, sig.top_bucket)
+        if snap_pre is None or not snap_pre.is_open:
+            return
+        fresh_edge = sig.top_model_prob - snap_pre.yes_ask
+        if fresh_edge < threshold:
+            return  # still below threshold — remain WATCH
+        logger.info(
+            "[Tier1] %s WATCH promoted: live edge=%+.3f ≥ threshold=%.3f — entering",
+            station, fresh_edge, threshold,
+        )
+        # Fall through to new-position entry logic below
+
+    # ── Existing position routing (TRADE signals only) ────────────────────
     if existing:
         existing_pos = existing[0]
         dist = _bucket_distance(existing_pos.bucket_lower, sig.top_bucket)
