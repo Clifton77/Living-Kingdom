@@ -146,7 +146,7 @@ def _get_full_state() -> dict:
         "signals":      signals_out,
         "alerts":       get_alert_history(),
         "tier_status":  dict(_tier_last_run),
-        "mode":         "DEMO" if cfg.USE_DEMO else "LIVE",
+        "mode":         "DEMO" if cfg.USE_DEMO else ("LIVE (dry run)" if cfg.DRY_RUN else "LIVE"),
         "is_halted":    summary["is_halted"],
         "kill_switch":  summary["kill_switch"],
         "settings":     settings_current,

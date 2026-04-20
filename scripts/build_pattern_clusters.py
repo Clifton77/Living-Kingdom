@@ -86,7 +86,7 @@ def fit_seasonal_clusters(
     subset = anomaly_df[season_mask].copy()
 
     feat_cols = [c for c in subset.columns if c.startswith("lat_")]
-    X_raw = subset[feat_cols].values.astype(np.float32)
+    X_raw = subset[feat_cols].values.astype(np.float64)
 
     logger.info("Season %s: %d samples, %d features", season, X_raw.shape[0], X_raw.shape[1])
 
@@ -132,7 +132,7 @@ def build_pattern_clusters() -> None:
         # Predict labels for all dates in this season
         season_mask = assign_season(anomaly_df["date"]) == season
         subset = anomaly_df[season_mask].copy()
-        X_raw = subset[feat_cols].values.astype(np.float32)
+        X_raw = subset[feat_cols].values.astype(np.float64)
         X_scaled = scaler.transform(X_raw)
         labels = km.predict(X_scaled)
 
@@ -146,7 +146,7 @@ def build_pattern_clusters() -> None:
         # Save silhouette scores log
         sil_path = os.path.join(LOGS_DIR, f"silhouette_scores_{season}.csv")
         _, scores = tune_k(
-            scaler.transform(subset[feat_cols].values.astype(np.float32)),
+            scaler.transform(subset[feat_cols].values.astype(np.float64)),
             K_RANGE, f"{season}_verify"
         )
         pd.Series(scores, name="silhouette").to_csv(sil_path)

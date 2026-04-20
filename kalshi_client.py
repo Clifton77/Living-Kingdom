@@ -38,6 +38,7 @@ from config import (
     KALSHI_DEMO_URL,
     KALSHI_LIVE_URL,
     USE_DEMO,
+    DRY_RUN,
     KALSHI_STATION_SERIES,
     KALSHI_BUCKET_CENTERS,
     KALSHI_BUCKET_LOWER_TAIL,
@@ -582,6 +583,23 @@ class KalshiClient:
         """
         price_cents = round(limit_price * 100)
 
+        if DRY_RUN:
+            import uuid
+            fake_id = f"dryrun-{uuid.uuid4().hex[:8]}"
+            logger.info(
+                "[DRY RUN] Order skipped | %s | %d contracts @ %.2f | fake_id=%s",
+                market_id, contracts, limit_price, fake_id,
+            )
+            return OrderResult(
+                success=True,
+                order_id=fake_id,
+                market_id=market_id,
+                side=side,
+                contracts=contracts,
+                price=limit_price,
+                error=None,
+            )
+
         body = {
             "ticker":  market_id,
             "action":  "buy",
@@ -627,6 +645,23 @@ class KalshiClient:
         """
         Exit an open position by placing a sell limit order at the current bid.
         """
+        if DRY_RUN:
+            import uuid
+            fake_id = f"dryrun-{uuid.uuid4().hex[:8]}"
+            logger.info(
+                "[DRY RUN] Close skipped | %s | %d contracts @ %.2f | fake_id=%s",
+                market_id, contracts, bid_price, fake_id,
+            )
+            return OrderResult(
+                success=True,
+                order_id=fake_id,
+                market_id=market_id,
+                side="yes",
+                contracts=contracts,
+                price=bid_price,
+                error=None,
+            )
+
         body = {
             "ticker":    market_id,
             "action":    "sell",
