@@ -37,8 +37,8 @@ def _kill_existing() -> None:
         os.kill(old_pid, signal.SIGTERM)
         logger.info("Killed existing instance (PID %d)", old_pid)
         import time; time.sleep(2)
-    except (ProcessLookupError, ValueError):
-        pass  # already dead
+    except (ProcessLookupError, ValueError, OSError):
+        pass  # already dead or Windows signal error
     finally:
         try:
             os.remove(_PID_FILE)
