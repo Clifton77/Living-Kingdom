@@ -400,6 +400,7 @@ STOP_LOSS_PCT            = 0.65    # close position if value falls to 65% of ent
 REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-enter
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
+MIN_PROB_RATIO           = 0.75   # bucket must have ≥75% of peak model prob to be eligible
 
 # Confidence-scaled Kelly: scale stake down when pattern match is uncertain
 CONFIDENCE_KELLY_SCALE = {

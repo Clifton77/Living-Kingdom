@@ -46,6 +46,7 @@ from config import (
     MIN_N_OBS,
     EDGE_THRESHOLD_BASE,
     CONFIDENCE_KELLY_SCALE,
+    MIN_PROB_RATIO,
 )
 
 logger = setup_logging("signal_engine")
@@ -1066,10 +1067,26 @@ def generate_signal(
         return _skip_signal(station, event_date, local_time_str, taf, metar,
                             pattern, "No bucket overlap between model and Kalshi")
 
-    # Best edge bucket (highest positive edge only)
-    positive_buckets = [b for b in bucket_analyses if b.edge > 0]
+    # Best edge bucket — only consider buckets with meaningful model probability.
+    # Prevents edge-optimizing on cheap tail bets when the forecast is far away
+    # (e.g., forecast=76°F but Kalshi misprices ≤72 tail at 5¢ → apparent edge
+    # but the tail is 4°F below the forecast and unlikely to win).
+    peak_prob = max(b.model_prob for b in bucket_analyses)
+    min_prob  = peak_prob * MIN_PROB_RATIO
+    eligible  = [b for b in bucket_analyses if b.model_prob >= min_prob]
+    if not eligible:
+        eligible = bucket_analyses  # safety fallback (shouldn't happen)
+
+    filtered_labels = [b.bucket_label for b in bucket_analyses if b.model_prob < min_prob]
+    if filtered_labels:
+        logger.info(
+            "%s — filtered low-prob buckets (peak=%.1f%%, min=%.1f%%): %s",
+            station, peak_prob * 100, min_prob * 100, filtered_labels,
+        )
+
+    positive_buckets = [b for b in eligible if b.edge > 0]
     if not positive_buckets:
-        top = max(bucket_analyses, key=lambda b: b.edge)
+        top = max(eligible, key=lambda b: b.edge)
         decision = "SKIP"
     else:
         top = max(positive_buckets, key=lambda b: b.edge)
