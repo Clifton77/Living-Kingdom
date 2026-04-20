@@ -324,16 +324,22 @@ function appendTradeHistoryRow(d) {
   const placeholder = tbody.querySelector('td[colspan]');
   if (placeholder) placeholder.closest('tr').remove();
 
-  const pnlClass = (d.realized_pnl || 0) >= 0 ? 'text-success' : 'text-danger';
-  const sign = (d.realized_pnl || 0) >= 0 ? '+' : '';
+  const pnl = d.realized_pnl || 0;
+  const pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
+  const sign = pnl >= 0 ? '+' : '';
+
+  const bucket = d.bucket_lower != null ? `${d.bucket_lower}°F` : '—';
+  const entry  = d.entry_price  != null ? `$${(d.entry_price * 100).toFixed(0)}¢` : '—';
+  const exit   = d.exit_price   != null ? `$${(d.exit_price  * 100).toFixed(0)}¢` : '—';
+
   const row = document.createElement('tr');
   row.innerHTML = `
     <td>${nowStr()}</td>
-    <td>—</td>
-    <td>—</td>
-    <td>—</td>
-    <td>—</td>
-    <td class="${pnlClass} fw-bold">$${sign}${(d.realized_pnl || 0).toFixed(4)}</td>
+    <td>${d.station || '—'}</td>
+    <td>${bucket}</td>
+    <td>${entry}</td>
+    <td>${exit}</td>
+    <td class="${pnlClass} fw-bold">$${sign}${pnl.toFixed(2)}</td>
     <td class="d-none d-md-table-cell text-muted small">${d.reason || '—'}</td>`;
   tbody.prepend(row);
 }

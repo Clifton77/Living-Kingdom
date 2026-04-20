@@ -726,7 +726,16 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
         )
         mode = "DEMO" if USE_DEMO else "LIVE"
         get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
-        push_event("position_closed", {"market_id": market_id, "realized_pnl": realized, "reason": reason})
+        push_event("position_closed", {
+            "market_id":    market_id,
+            "station":      pos.station,
+            "bucket_lower": pos.bucket_lower,
+            "contracts":    pos.contracts,
+            "entry_price":  pos.entry_price,
+            "exit_price":   bid_price,
+            "realized_pnl": realized,
+            "reason":       reason,
+        })
         push_event("state_update", rm.summary())
         logger.info("[Exit] Complete: %s | realized P/L $%+.4f", market_id, realized)
     else:
