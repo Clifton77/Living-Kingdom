@@ -760,7 +760,9 @@ def _build_reasoning(
     lo1 = forecast_adjusted - bias_std
     hi1 = forecast_adjusted + bias_std
 
-    if bias_src == "cluster_match":
+    if bias_src == "nws_fixed":
+        obs_desc = "NWS forecast is already human-calibrated — no bias correction applied"
+    elif bias_src == "cluster_match":
         obs_desc = f"Based on {n_obs} similar days in this exact pattern during the same month"
     elif bias_src == "station_month_fallback":
         obs_desc = f"Cluster data was sparse — using {n_obs} days across all patterns for this station and month"
