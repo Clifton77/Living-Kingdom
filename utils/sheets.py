@@ -226,7 +226,7 @@ class GoogleSheetsLogger:
                 sig.cluster_id,
                 sig.season,
                 sig.pattern_confidence,
-                thr.weather_condition if thr else "",
+                thr.taf_condition if thr else "",
                 round(sig.top_edge, 4),
                 round(sig.forecast_adjusted, 1),
                 round(sig.bias_std, 2),
@@ -282,7 +282,7 @@ class GoogleSheetsLogger:
                 round(sig.top_kalshi_prob * 100, 1),
                 round(sig.top_edge, 4),
                 round(thr.threshold, 4) if thr else "",
-                thr.weather_condition if thr else "",
+                thr.taf_condition if thr else "",
                 sig.decision,
                 skip_reason,
             ]]
