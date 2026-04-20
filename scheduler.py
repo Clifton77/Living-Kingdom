@@ -246,7 +246,7 @@ def _single_station_signal_pass(station: str):
         from scripts.pattern_classifier import classify_pattern
         from scripts.signal_engine import generate_signal, _load_bias_table
 
-        event_date = date.today()
+        event_date = date.today() + timedelta(days=1)
         bias_df    = _load_bias_table()
         pattern    = classify_pattern(event_date)
         kalshi     = get_kalshi()
@@ -313,7 +313,7 @@ def tier1_metar_entries_exits():
             logger.info("[Tier1] Bot halted — skipping")
             return
 
-        event_date = date.today()
+        event_date = date.today() + timedelta(days=1)
         now_utc    = datetime.now(timezone.utc)
 
         # ── Pass 1: exits ────────────────────────────────────────────────────
@@ -687,7 +687,7 @@ def tier3_full_signal_pass(event_date: date | None = None):
         return
 
     if event_date is None:
-        event_date = date.today()
+        event_date = date.today() + timedelta(days=1)
 
     # ── Forecast availability probe ───────────────────────────────────────
     avail = check_forecast_availability(event_date)
@@ -1307,6 +1307,21 @@ def tier_settlement_sweep():
 
 
 # ---------------------------------------------------------------------------
+# Daily obs update — keeps obs_daily.parquet current (runs at 10:00 UTC)
+# ---------------------------------------------------------------------------
+
+def _obs_incremental_update():
+    """Append yesterday's observed tmax for all stations to obs_daily.parquet."""
+    logger.info("[ObsUpdate] Starting incremental obs update")
+    try:
+        from scripts.build_obs_database import build_obs_database
+        build_obs_database(incremental=True)
+        logger.info("[ObsUpdate] Incremental obs update complete")
+    except Exception as exc:
+        logger.error("[ObsUpdate] Failed: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # NWS retry scheduler — fires when Tier 3 couldn't get forecast data
 # ---------------------------------------------------------------------------
 
@@ -1498,13 +1513,24 @@ def start_scheduler() -> BackgroundScheduler:
         misfire_grace_time=600,
     )
 
+    # Daily obs update — 10:00 UTC (6 AM ET), after CDO overnight publish
+    scheduler.add_job(
+        _obs_incremental_update,
+        trigger=CronTrigger(hour=10, minute=0, timezone="UTC"),
+        id="obs_daily_update",
+        name="Daily Obs Incremental Update",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
     scheduler.start()
     _scheduler = scheduler
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
         "Tier3=00/06/12/18Z+30 + %02d:%02dZ market-open | "
-        "Settlement=%02d:00Z | mode=%s",
+        "Settlement=%02d:00Z | ObsUpdate=10:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
         MARKET_OPEN_UTC_HOUR, MARKET_OPEN_UTC_MINUTE,
         SETTLEMENT_SWEEP_UTC_HOUR,

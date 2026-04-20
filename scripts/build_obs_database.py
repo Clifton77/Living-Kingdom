@@ -8,6 +8,7 @@ Sources:
 Output: data/obs_daily.parquet
   {station, date, tmax_observed_f, source_flag}
 """
+import argparse
 import os
 import sys
 import time
@@ -132,9 +133,8 @@ def fetch_noaa_cdo(station: str, start_year: int, end_year: int) -> pd.DataFrame
 
             results = data.get("results", [])
             for rec in results:
-                # TMAX in tenths of °C → °F
-                tmax_c = rec["value"] / 10.0
-                tmax_f = tmax_c * 9.0 / 5.0 + 32.0
+                # units=standard → CDO returns whole-degree Fahrenheit directly
+                tmax_f = float(rec["value"])
                 all_rows.append({
                     "date": rec["date"][:10],
                     "tmax_f": tmax_f,
@@ -160,26 +160,50 @@ def fetch_noaa_cdo(station: str, start_year: int, end_year: int) -> pd.DataFrame
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def build_obs_database() -> None:
+def build_obs_database(incremental: bool = False) -> None:
     os.makedirs(RAW_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
 
-    start_year = int(START_DATE[:4])
-    end_year   = int(END_DATE[:4])
+    # Incremental mode: compute per-station fetch start from existing parquet.
+    # Each station only fetches from (its last date + 1) forward — avoids
+    # re-fetching the full 2010-present archive on daily runs.
+    if incremental and os.path.exists(OBS_PARQUET):
+        existing = pd.read_parquet(OBS_PARQUET)
+        existing["date"] = pd.to_datetime(existing["date"])
+        max_dates = existing.groupby("station")["date"].max()
+        per_station_start = {
+            st: (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            for st, dt in max_dates.items()
+        }
+        logger.info("Incremental mode: fetching from per-station cutoffs")
+    else:
+        per_station_start = {}
+        existing = pd.DataFrame()
+        if incremental:
+            logger.info("Incremental mode: no existing parquet — running full build")
 
     all_dfs = []
     missing_log = []
 
     for station in STATIONS:
+        fetch_start = per_station_start.get(station, START_DATE)
+
+        if fetch_start > END_DATE:
+            logger.info("%s already up to date (last=%s)", station, fetch_start)
+            continue
+
+        fetch_start_year = int(fetch_start[:4])
+        end_year         = int(END_DATE[:4])
+
         # Use the NWS settlement station for data fetching (may differ from Kalshi label).
         # KJFK → fetch KNYC (Central Park), KORD → fetch KMDW (Midway), others unchanged.
         # Results are stored under the original Kalshi label so downstream joins work.
         settle = settlement_station(station)
-        logger.info("Processing station: %s (settlement: %s)", station, settle)
+        logger.info("Processing station: %s (settlement: %s, from: %s)", station, settle, fetch_start)
 
         # --- IEM ---
         try:
-            iem_df = fetch_iem_daily(settle, START_DATE, END_DATE)
+            iem_df = fetch_iem_daily(settle, fetch_start, END_DATE)
             iem_df["station"] = station   # relabel KNYC→KJFK, KMDW→KORD, etc.
         except Exception as e:
             logger.error("IEM fetch failed for %s: %s", station, e)
@@ -187,7 +211,7 @@ def build_obs_database() -> None:
 
         # --- CDO ---
         try:
-            cdo_df = fetch_noaa_cdo(settle, start_year, end_year)
+            cdo_df = fetch_noaa_cdo(settle, fetch_start_year, end_year)
             cdo_df["station"] = station   # relabel
         except Exception as e:
             logger.error("CDO fetch failed for %s: %s", station, e)
@@ -202,14 +226,26 @@ def build_obs_database() -> None:
             missing_log.append({"station": station, "date": row["date"]})
 
         all_dfs.append(validated)
-        logger.info("%s: %d records, %d missing", station, len(validated), len(missing))
+        logger.info("%s: %d new records, %d missing", station, len(validated), len(missing))
 
-    combined = pd.concat(all_dfs, ignore_index=True)
-    combined["date"] = pd.to_datetime(combined["date"])
+    if not all_dfs:
+        logger.info("All stations up to date — nothing to fetch")
+        return
 
-    # Save
+    new_data = pd.concat(all_dfs, ignore_index=True)
+    new_data["date"] = pd.to_datetime(new_data["date"])
+
+    if incremental and len(existing) > 0:
+        # Drop any overlapping rows from existing (safety net for partial re-runs)
+        min_new_date = new_data["date"].min()
+        existing = existing[existing["date"] < min_new_date]
+        combined = pd.concat([existing, new_data], ignore_index=True)
+        combined = combined.sort_values(["station", "date"]).reset_index(drop=True)
+    else:
+        combined = new_data
+
     combined.to_parquet(OBS_PARQUET, index=False)
-    logger.info("Saved obs_daily.parquet: %d rows", len(combined))
+    logger.info("Saved obs_daily.parquet: %d total rows (+%d new)", len(combined), len(new_data))
 
     # Save missing log
     if missing_log:
@@ -218,21 +254,30 @@ def build_obs_database() -> None:
         missing_df.to_csv(missing_path, index=False)
         logger.warning("Missing obs logged to %s (%d rows)", missing_path, len(missing_df))
 
-    # Sanity check
-    expected_rows = len(STATIONS) * (end_year - start_year + 1) * 365
-    actual_rows = len(combined)
-    ratio = actual_rows / expected_rows
-    if ratio < 0.90:
-        logger.error(
-            "Row count sanity check FAILED: expected ~%d got %d (%.1f%%)",
-            expected_rows, actual_rows, ratio * 100
-        )
-    else:
-        logger.info(
-            "Row count sanity check passed: %d rows (%.1f%% of expected)",
-            actual_rows, ratio * 100
-        )
+    # Sanity check (full build only — incremental adds too few rows to check ratio)
+    if not incremental:
+        start_year   = int(START_DATE[:4])
+        end_year     = int(END_DATE[:4])
+        expected_rows = len(STATIONS) * (end_year - start_year + 1) * 365
+        actual_rows   = len(combined)
+        ratio = actual_rows / expected_rows
+        if ratio < 0.90:
+            logger.error(
+                "Row count sanity check FAILED: expected ~%d got %d (%.1f%%)",
+                expected_rows, actual_rows, ratio * 100
+            )
+        else:
+            logger.info(
+                "Row count sanity check passed: %d rows (%.1f%% of expected)",
+                actual_rows, ratio * 100
+            )
 
 
 if __name__ == "__main__":
-    build_obs_database()
+    parser = argparse.ArgumentParser(description="Build or update obs_daily.parquet")
+    parser.add_argument(
+        "--incremental", action="store_true",
+        help="Only fetch dates newer than the last row in the existing parquet",
+    )
+    args = parser.parse_args()
+    build_obs_database(incremental=args.incremental)

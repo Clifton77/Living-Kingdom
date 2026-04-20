@@ -3,6 +3,7 @@ Central configuration for the weather trading bot.
 All credentials are loaded from .env — never hardcoded here.
 """
 import os
+from datetime import date as _date, timedelta as _timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -203,7 +204,7 @@ WFO_MAP = {
 # Historical data range (15 years)
 # ---------------------------------------------------------------------------
 START_DATE = "2010-01-01"
-END_DATE   = "2024-12-31"
+END_DATE   = (_date.today() - _timedelta(days=1)).isoformat()  # yesterday, updated at runtime
 
 # ---------------------------------------------------------------------------
 # Data paths
@@ -226,7 +227,8 @@ PEAK_HOURS_PARQUET = os.path.join(DATA_DIR, "peak_hours.parquet")    # DOY-smoot
 # ---------------------------------------------------------------------------
 # Trading mode
 # ---------------------------------------------------------------------------
-USE_DEMO = True   # True = paper trading on demo.kalshi.co, False = live trading
+USE_DEMO = os.getenv("USE_DEMO", "true").lower() != "false"   # True = paper trading on demo.kalshi.co
+DRY_RUN  = os.getenv("DRY_RUN",  "false").lower() == "true"  # True = live API, no order placement
 
 # ---------------------------------------------------------------------------
 # External API credentials (loaded from .env)

@@ -167,6 +167,7 @@ def _bucket_bounds(lower: int) -> tuple[float, float]:
 def build_probability_distribution(
     forecast_adjusted: float,
     bias_std: float,
+    live_buckets: list[int] | None = None,
 ) -> dict[int, float]:
     """
     Model the temperature outcome as a normal distribution:
@@ -174,6 +175,10 @@ def build_probability_distribution(
       std  = bias_std  (captures residual uncertainty after bias correction)
 
     Integrate over each Kalshi bucket to get P(bucket).
+    live_buckets: sorted list of bucket_lower values from the live Kalshi market.
+                  When provided, the min bucket is treated as the lower tail and
+                  the max bucket as the upper tail — which varies by station/season.
+                  Falls back to the hardcoded config constants if None.
     Returns dict: {bucket_lower: probability}
     """
     mu    = forecast_adjusted
@@ -181,11 +186,23 @@ def build_probability_distribution(
 
     dist = scipy_stats.norm(loc=mu, scale=sigma)
 
-    buckets = all_bucket_lowers()
-    probs   = {}
+    buckets = live_buckets if live_buckets is not None else all_bucket_lowers()
 
+    if live_buckets is not None and len(live_buckets) >= 2:
+        live_lower_tail = live_buckets[0]
+        live_upper_tail = live_buckets[-1]
+    else:
+        live_lower_tail = KALSHI_BUCKET_LOWER_TAIL
+        live_upper_tail = KALSHI_BUCKET_UPPER_TAIL
+
+    probs = {}
     for lower in buckets:
-        lo, hi = _bucket_bounds(lower)
+        if lower == live_lower_tail:
+            lo, hi = -math.inf, lower + 0.5
+        elif lower == live_upper_tail:
+            lo, hi = lower - 0.5, math.inf
+        else:
+            lo, hi = lower - 0.5, lower + 1.5
         p = dist.cdf(hi) - dist.cdf(lo)
         probs[lower] = float(np.clip(p, 0.0, 1.0))
 
@@ -233,15 +250,20 @@ def lookup_bias(
     has_source_col = "model_source" in bias_df.columns
 
     # Primary lookup: exact regime match
-    mask = (
+    base_mask = (
         (bias_df["station"]    == station) &
         (bias_df["month"]      == month)   &
         (bias_df["season"]     == season)  &
         (bias_df["cluster_id"] == cluster_id)
     )
+    mask = base_mask.copy()
     if has_source_col:
         mask &= (bias_df["model_source"] == model_source)
     subset = bias_df[mask]
+
+    # If no rows for the requested source, try any source for this cluster regime
+    if len(subset) == 0 and has_source_col:
+        subset = bias_df[base_mask]
 
     if len(subset) > 0:
         subset = subset.copy()
@@ -249,22 +271,34 @@ def lookup_bias(
         best = subset.loc[subset["bin_dist"].idxmin()]
 
         if best["n_obs"] >= MIN_N_OBS:
+            raw_std = best["bias_std"]
             return {
                 "bias_mean": float(best["bias_mean"]),
-                "bias_std":  float(best["bias_std"]),
+                "bias_std":  float(raw_std) if pd.notna(raw_std) else 4.0,
                 "n_obs":     int(best["n_obs"]),
                 "model_bin": float(best["model_bin"]),
                 "source":    "cluster_match",
             }
 
     # Fallback: station/month average (ignore cluster)
-    fallback_mask = (
+    base_fallback_mask = (
         (bias_df["station"] == station) &
         (bias_df["month"]   == month)
     )
+    fallback_mask = base_fallback_mask.copy()
     if has_source_col:
         fallback_mask &= (bias_df["model_source"] == model_source)
     fallback = bias_df[fallback_mask]
+
+    # If no rows for requested model_source, use any available source for this station/month
+    if len(fallback) == 0 and has_source_col:
+        fallback = bias_df[base_fallback_mask]
+        if len(fallback) > 0:
+            actual_src = fallback["model_source"].iloc[0]
+            logger.warning(
+                "%s month=%d — no bias rows for model_source=%s, using %s rows as fallback",
+                station, month, model_source, actual_src,
+            )
 
     if len(fallback) > 0:
         return {
@@ -412,8 +446,72 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
     return None
 
 
+def _fetch_nws_forecast(station: str, target_date: date) -> float | None:
+    """
+    Fetch today's max temperature from NWS api.weather.gov gridded forecast.
+    Primary source: official NWS point forecast, no auth, no rate limits,
+    updated hourly. Returns None on any failure so callers can fall through.
+    """
+    import requests
+    lat, lon = STATION_COORDS[settlement_station(station)]
+    try:
+        # Step 1: resolve grid coordinates (cached in practice by HTTP layer)
+        meta = requests.get(
+            f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}",
+            headers={"User-Agent": "WeatherBot/1.0 (cliftonmitchell77@gmail.com)"},
+            timeout=15,
+        )
+        meta.raise_for_status()
+        props        = meta.json()["properties"]
+        forecast_url = props["forecast"]
+
+        # Step 2: fetch daily forecast periods
+        fcst = requests.get(
+            forecast_url,
+            headers={"User-Agent": "WeatherBot/1.0 (cliftonmitchell77@gmail.com)"},
+            timeout=15,
+        )
+        fcst.raise_for_status()
+        periods = fcst.json()["properties"]["periods"]
+
+        date_str   = target_date.isoformat()
+        next_day   = (target_date + __import__("datetime").timedelta(days=1)).isoformat()
+        daytime_periods = [p for p in periods if p.get("isDaytime", False)]
+
+        # Prefer today's daytime period; fall back to tomorrow if today has expired
+        chosen = None
+        for p in daytime_periods:
+            if p.get("startTime", "")[:10] == date_str:
+                chosen = p
+                break
+        if chosen is None:
+            for p in daytime_periods:
+                if p.get("startTime", "")[:10] == next_day:
+                    chosen = p
+                    logger.info("%s NWS: today expired, using tomorrow's daytime period", station)
+                    break
+        if chosen is None and daytime_periods:
+            chosen = daytime_periods[0]
+            logger.info("%s NWS: using nearest available daytime period (%s)",
+                        station, chosen.get("startTime", "")[:10])
+
+        if chosen is not None:
+            temp = chosen["temperature"]
+            unit = chosen.get("temperatureUnit", "F")
+            if unit == "C":
+                temp = temp * 9 / 5 + 32
+            logger.info("%s NWS forecast: %.1f°F (period: %s)",
+                        station, float(temp), chosen.get("startTime", "")[:10])
+            return float(temp)
+
+        logger.warning("%s NWS forecast: no daytime periods available", station)
+    except Exception as exc:
+        logger.warning("%s NWS forecast fetch failed: %s", station, exc)
+    return None
+
+
 def _fetch_openmeteo_live(station: str, target_date: date) -> float | None:
-    """Open-Meteo current forecast — fallback when IEM products unavailable."""
+    """Open-Meteo current forecast — fallback when NWS and IEM unavailable."""
     import requests
     lat, lon = STATION_COORDS[settlement_station(station)]
     import time as _time
@@ -457,38 +555,52 @@ def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, 
     Fetch today's max temperature forecast.
 
     Priority:
-      1. IEM AFM (NWS human-adjusted) → model_source='IEM_AFM'
-      2. Open-Meteo GFS forecast       → model_source='ERA5' (same bias distribution)
+      1. NWS api.weather.gov gridded forecast  → model_source='IEM_AFM' (same bias dist)
+      2. IEM AFM (NWS human-adjusted)          → model_source='IEM_AFM'
+      3. Open-Meteo GFS forecast               → model_source='ERA5'
+      4. Historical parquet (CDO/ERA5 actuals) → last resort, ≤30 days old only
 
-    Also attempts GFS-MOS separately for divergence calculation.
+    MOS is fetched independently for divergence signaling (not used as primary).
 
-    Returns: (afm_forecast, mos_forecast, model_source_used)
-      afm_forecast   : primary forecast for bias lookup and distribution
-      mos_forecast   : GFS-MOS forecast for divergence (may be None)
-      model_source_used : 'IEM_AFM' | 'ERA5'
+    Returns: (primary_forecast, mos_forecast, model_source_used)
     """
-    afm = fetch_live_afm_forecast(station, target_date)
     mos = fetch_live_mos_forecast(station, target_date)
 
+    # 1. NWS gridded — primary: official, no auth, no rate limits, hourly updates
+    nws = _fetch_nws_forecast(station, target_date)
+    if nws is not None:
+        return nws, mos, "IEM_AFM"
+
+    # 2. IEM AFM — human NWS forecaster output
+    afm = fetch_live_afm_forecast(station, target_date)
     if afm is not None:
         return afm, mos, "IEM_AFM"
 
-    # AFM unavailable — fall back to Open-Meteo, use ERA5 bias distribution
+    # 3. Open-Meteo — third-party GFS model, rate-limited on free tier
     om = _fetch_openmeteo_live(station, target_date)
     if om is not None:
         return om, mos, "ERA5"
 
-    # Last resort: most recent row from historical parquet
+    # Last resort: most recent row from historical parquet — only if recent (≤30 days old)
     try:
         fcst_df = pd.read_parquet(FCST_PARQUET)
+        src_col = "model_source" if "model_source" in fcst_df.columns else "source"
         subset  = fcst_df[
             (fcst_df["station"] == station) &
-            (fcst_df.get("model_source", fcst_df.get("source", pd.Series(dtype=str))) == "IEM_AFM")
-        ] if "model_source" in fcst_df.columns else fcst_df[fcst_df["station"] == station]
+            (fcst_df[src_col].isin(["IEM_AFM", "CDO_OBS", "ERA5"]))
+        ] if src_col in fcst_df.columns else fcst_df[fcst_df["station"] == station]
         if len(subset) > 0:
-            val = float(subset.sort_values("date").iloc[-1]["forecast_tmax_f"])
-            logger.warning("%s using historical parquet fallback: %.1f°F", station, val)
-            return val, mos, "IEM_AFM"
+            last_row  = subset.sort_values("date").iloc[-1]
+            last_date = pd.to_datetime(last_row["date"]).date()
+            staleness = (target_date - last_date).days
+            if staleness <= 30:
+                val = float(last_row["forecast_tmax_f"])
+                logger.warning("%s using historical parquet fallback: %.1f°F (data from %s, %d days old)",
+                               station, val, last_date, staleness)
+                return val, mos, "IEM_AFM"
+            else:
+                logger.warning("%s parquet fallback too stale (%d days old, last=%s) — skipping",
+                               station, staleness, last_date)
     except Exception:
         pass
 
@@ -856,21 +968,32 @@ def generate_signal(
             station, forecast_raw, mos_forecast_raw, model_divergence_f,
         )
 
-    # ── 3. Bias lookup (filtered to the model source used) ───────────────
-    # When z500 classification fell back to stale reanalysis the cluster
-    # assignment is unreliable — skip cluster-specific bias and use the
-    # broader station/month average instead (pass invalid cluster_id=-1).
-    effective_cluster = (
-        -1 if pattern.get("data_source") == "reanalysis_fallback"
-        else pattern["cluster_id"]
-    )
-    bias_info = lookup_bias(
-        bias_df, station, event_date,
-        effective_cluster, pattern["season"], forecast_raw,
-        model_source=model_source_used,
-    )
-    bias_mean        = bias_info["bias_mean"]
-    bias_std         = bias_info["bias_std"]
+    # ── 3. Bias correction ───────────────────────────────────────────────
+    # NWS forecasts are already human-calibrated — no systematic bias to correct.
+    # Use a fixed uncertainty of 3.5°F (typical NWS day-ahead error).
+    # ERA5/MOS sources still go through the bias table.
+    NWS_SIGMA = 3.5
+    if model_source_used == "IEM_AFM":
+        bias_info = {
+            "bias_mean": 0.0,
+            "bias_std":  NWS_SIGMA,
+            "n_obs":     0,
+            "model_bin": float(forecast_raw),
+            "source":    "nws_fixed",
+        }
+        logger.info("%s NWS source — using fixed sigma=%.1f°F, no bias correction", station, NWS_SIGMA)
+    else:
+        effective_cluster = (
+            -1 if pattern.get("data_source") == "reanalysis_fallback"
+            else pattern["cluster_id"]
+        )
+        bias_info = lookup_bias(
+            bias_df, station, event_date,
+            effective_cluster, pattern["season"], forecast_raw,
+            model_source=model_source_used,
+        )
+    bias_mean         = bias_info["bias_mean"]
+    bias_std          = bias_info["bias_std"]
     forecast_adjusted = forecast_raw + bias_mean
 
     # ── 4. Weather penalty threshold ─────────────────────────────────────
@@ -884,10 +1007,7 @@ def generate_signal(
 
     effective_threshold = threshold_result.threshold
 
-    # ── 5. Probability distribution ──────────────────────────────────────
-    model_probs = build_probability_distribution(forecast_adjusted, bias_std)
-
-    # ── 6. Kalshi snapshots ───────────────────────────────────────────────
+    # ── 5. Kalshi snapshots (fetch first — needed for live bucket bounds) ───
     snapshots: dict[int, MarketSnapshot] = kalshi.get_all_snapshots(station, event_date)
 
     if not snapshots:
@@ -895,10 +1015,16 @@ def generate_signal(
         return _skip_signal(station, event_date, local_time_str, taf, metar,
                             pattern, "No Kalshi market data")
 
+    # ── 6. Probability distribution over live Kalshi buckets ─────────────
+    live_buckets = sorted(snapshots.keys())
+    model_probs = build_probability_distribution(
+        forecast_adjusted, bias_std, live_buckets=live_buckets
+    )
+
     # ── 7. Edge per bucket ────────────────────────────────────────────────
     bucket_analyses: list[BucketAnalysis] = []
 
-    for lower in all_bucket_lowers():
+    for lower in live_buckets:
         model_p  = model_probs.get(lower, 0.0)
         snap     = snapshots.get(lower)
         if snap is None:
@@ -1069,21 +1195,38 @@ def check_forecast_availability(event_date: date, probe_station: str = STATIONS[
         details   : str    — human-readable status for logging
     """
     import requests as req
+    import time as _time
     lat, lon = STATION_COORDS[settlement_station(probe_station)]
     try:
-        resp = req.get(
-            OPEN_METEO_FORECAST_URL,
-            params={
-                "latitude":         lat,
-                "longitude":        lon,
-                "daily":            "temperature_2m_max",
-                "temperature_unit": "fahrenheit",
-                "forecast_days":    3,
-                "timezone":         "UTC",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
+        for attempt in range(3):
+            resp = req.get(
+                OPEN_METEO_FORECAST_URL,
+                params={
+                    "latitude":         lat,
+                    "longitude":        lon,
+                    "daily":            "temperature_2m_max",
+                    "temperature_unit": "fahrenheit",
+                    "forecast_days":    3,
+                    "timezone":         "UTC",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 429:
+                # Rate limited — proceed anyway; per-station fallback handles it
+                logger.warning(
+                    "Forecast probe 429 (attempt %d/3) — proceeding with parquet fallback", attempt + 1
+                )
+                _time.sleep(5 * (attempt + 1))
+                if attempt == 2:
+                    return {
+                        "available": True,
+                        "source":    "fallback",
+                        "details":   "Open-Meteo rate limited — using parquet fallback per station",
+                    }
+                continue
+            resp.raise_for_status()
+            break
+
         data     = resp.json()
         dates    = data.get("daily", {}).get("time", [])
         temps    = data.get("daily", {}).get("temperature_2m_max", [])
@@ -1097,17 +1240,20 @@ def check_forecast_availability(event_date: date, probe_station: str = STATIONS[
                     "source":    "live",
                     "details":   f"Open-Meteo has fresh data for {event_date} at {probe_station}",
                 }
+        # Date missing from Open-Meteo (late in day or model lag) — NWS is primary, proceed
         return {
-            "available": False,
+            "available": True,
             "source":    "fallback",
-            "details":   f"Open-Meteo response did not include {event_date} — model run may be delayed",
+            "details":   f"Open-Meteo lacks {event_date} data — NWS primary will handle per station",
         }
 
     except Exception as exc:
+        # Only gate on total network failure — NWS may still be reachable
+        logger.warning("Forecast probe exception: %s — proceeding anyway", exc)
         return {
-            "available": False,
-            "source":    "none",
-            "details":   f"Open-Meteo unreachable: {exc}",
+            "available": True,
+            "source":    "fallback",
+            "details":   f"Open-Meteo probe failed ({exc}) — proceeding with NWS/CDO fallbacks",
         }
 
 
@@ -1137,7 +1283,9 @@ def run_signal_pass(
 
     signals: dict[str, TradeSignal] = {}
 
-    for station in STATIONS:
+    for idx, station in enumerate(STATIONS):
+        if idx > 0:
+            import time as _time; _time.sleep(3)  # pace Open-Meteo free-tier (20 req/min limit)
         try:
             sig = generate_signal(
                 station, event_date, kalshi, bias_df, pattern, bankroll
