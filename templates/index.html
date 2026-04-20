@@ -282,7 +282,7 @@
           </div>
 
           <!-- ── Intraday tracking ── -->
-          {% if sig.metar %}
+          {% if sig.metar and sig.metar.temp_f is not none %}
           {% set obs_t = sig.metar.temp_f | float %}
           {% set div_f = obs_t - sig.forecast_adjusted | float %}
           {% set div_cls = 'hot' if div_f > 4 else ('cold' if div_f < -4 else 'ok') %}
