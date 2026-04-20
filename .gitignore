@@ -5,7 +5,10 @@ logs/
 *.pyc
 __pycache__/
 .env
+*.env
 *.pem
+*.pid
+Weatherbot.txt
 credentials.json
 token.json
 *.egg-info/
