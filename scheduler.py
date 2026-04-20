@@ -167,7 +167,21 @@ def tier2_taf_monitor():
 
     for station in STATIONS:
         try:
-            taf = interpret_taf(station)
+            # For stations with open positions, fetch TAF with peak-window context
+            open_positions = {
+                mid: pos for mid, pos in rm.state.positions.items()
+                if pos.station == station
+            }
+
+            if open_positions:
+                # Use the event date from the first open position
+                sample_pos = next(iter(open_positions.values()))
+                event_date = date.fromisoformat(sample_pos.event_date)
+                peak_hour_local = get_peak_hour(station, event_date)
+                taf = interpret_taf(station, event_date=event_date, peak_hour_local=peak_hour_local)
+            else:
+                taf = interpret_taf(station)
+
             if not taf.has_amd:
                 continue
 
@@ -177,10 +191,6 @@ def tier2_taf_monitor():
             with _latest_signals_lock:
                 sig = _latest_signals.get(station)
 
-            open_positions = {
-                mid: pos for mid, pos in rm.state.positions.items()
-                if pos.station == station
-            }
             if not open_positions:
                 continue
 
@@ -192,11 +202,26 @@ def tier2_taf_monitor():
                 if sig is None:
                     continue
 
-                # Close if: weather prohibits trade, or model edge inverted on held bucket
-                skip_signal = sig.decision in ("SKIP", "HARD_SKIP")
+                # Check peak-window TAF condition for in-trade protection
+                # peak_window_utc is (start, end) or (None, None) when unavailable
+                has_peak_window = bool(taf.peak_window_utc and taf.peak_window_utc[0])
+                peak_window_dangerous = (
+                    has_peak_window
+                    and taf.condition in ("hard_skip", "precip", "convective")
+                )
+
+                # Close if: peak-window weather dangerous, signal prohibits trade,
+                # or model edge inverted on held bucket
+                skip_signal = sig.decision in ("SKIP", "HARD_SKIP") or peak_window_dangerous
                 edge_inverted = (
                     sig.top_bucket == pos.bucket_lower and sig.top_edge < 0.0
                 )
+
+                if peak_window_dangerous:
+                    logger.warning(
+                        "[Tier2] %s AMD: dangerous peak-window condition '%s' detected — auto-close",
+                        station, taf.condition,
+                    )
 
                 if not (skip_signal or edge_inverted):
                     logger.info(
@@ -227,13 +252,21 @@ def tier2_taf_monitor():
                     logger.warning("[Tier2] Cannot fetch snapshot for %s — skipping auto-close", market_id)
                     continue
 
-                reason = (
-                    f"TAF AMD auto-close: signal→{sig.decision} "
-                    f"(edge={sig.top_edge:+.3f})"
-                    if skip_signal else
-                    f"TAF AMD auto-close: edge inverted on bucket {pos.bucket_lower}°F "
-                    f"(edge={sig.top_edge:+.3f})"
-                )
+                if peak_window_dangerous:
+                    reason = (
+                        f"TAF AMD auto-close: peak-window condition='{taf.condition}' "
+                        f"detected near forecast high (edge={sig.top_edge:+.3f})"
+                    )
+                elif skip_signal:
+                    reason = (
+                        f"TAF AMD auto-close: signal→{sig.decision} "
+                        f"(edge={sig.top_edge:+.3f})"
+                    )
+                else:
+                    reason = (
+                        f"TAF AMD auto-close: edge inverted on bucket {pos.bucket_lower}°F "
+                        f"(edge={sig.top_edge:+.3f})"
+                    )
                 logger.warning("[Tier2] Auto-closing %s — %s", market_id, reason)
                 _execute_exit(market_id, pos, snap.yes_bid, reason, kalshi, rm)
 

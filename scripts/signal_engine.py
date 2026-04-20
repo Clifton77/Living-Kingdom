@@ -959,7 +959,9 @@ def generate_signal(
     local_time_str = now_loc.strftime("%I:%M %p %Z")
 
     # ── 1. TAF + METAR ───────────────────────────────────────────────────
-    taf   = interpret_taf(station)
+    from utils.peak_hours import get_peak_hour
+    peak_hour_local = get_peak_hour(station, event_date)
+    taf   = interpret_taf(station, event_date=event_date, peak_hour_local=peak_hour_local)
     metar = get_metar(station)
 
     # ── 2. Live forecast (AFM primary, MOS cross-check) ─────────────────

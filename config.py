@@ -492,7 +492,11 @@ STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
 # ---------------------------------------------------------------------------
 EDGE_THRESHOLD_BASE = 0.12   # base edge required with no weather penalty
 
-# TAF weather penalty multipliers (worst condition in 12Z-00Z window)
+# Peak-window TAF scoring — how far around the expected high-temp hour to check
+TAF_PRE_PEAK_WINDOW_HOURS  = 3   # hours before peak to include (approaching storm matters)
+TAF_POST_PEAK_WINDOW_HOURS = 1   # hours after peak to include
+
+# TAF weather penalty multipliers (worst condition in peak window)
 WEATHER_PENALTY = {
     "clear":       1.0,   # SKC / CLR / FEW
     "scattered":   1.2,   # SCT only, no precip
