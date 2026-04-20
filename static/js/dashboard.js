@@ -128,8 +128,20 @@ function initSSE() {
       d.realized_pnl >= 0 ? 'success' : 'danger');
   });
 
+  // If page loaded with no cards (bot was initializing), reload once signals arrive
+  const _noCardsOnLoad = document.querySelectorAll('#signal-cards [data-station]').length === 0;
+  let _reloadScheduled = false;
+
   src.addEventListener('signal_update', e => {
     const d = JSON.parse(e.data);
+
+    if (_noCardsOnLoad && !_reloadScheduled) {
+      _reloadScheduled = true;
+      // Wait 4s so Tier 3 finishes pushing all station updates before we reload
+      setTimeout(() => location.reload(), 4000);
+      return;
+    }
+
     flashSignalCard(d.station, d.decision);
     const el = document.querySelector(`[data-station="${d.station}"] .wb-decision-badge`);
     if (el) {
