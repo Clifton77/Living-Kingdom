@@ -47,6 +47,7 @@ from config import (
     EDGE_THRESHOLD_BASE,
     CONFIDENCE_KELLY_SCALE,
     MIN_PROB_RATIO,
+    EDGE_BLEND_WEIGHT,
 )
 
 logger = setup_logging("signal_engine")
@@ -1088,10 +1089,15 @@ def generate_signal(
 
     positive_buckets = [b for b in eligible if b.edge > 0]
     if not positive_buckets:
-        top = max(eligible, key=lambda b: b.edge)
+        # No edge anywhere — show the most probable bucket for context
+        top = max(eligible, key=lambda b: b.model_prob)
         decision = "SKIP"
     else:
-        top = max(positive_buckets, key=lambda b: b.edge)
+        # Blend probability and edge so the selection favours likely outcomes
+        # while still rewarding genuine mispricing.
+        # score = model_prob + EDGE_BLEND_WEIGHT × edge
+        # To beat a bucket that is 5% more probable you need 10% more edge (at 0.5 weight).
+        top = max(positive_buckets, key=lambda b: b.model_prob + EDGE_BLEND_WEIGHT * b.edge)
 
         if top.edge >= effective_threshold:
             decision = "TRADE"

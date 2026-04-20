@@ -401,6 +401,9 @@ REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-en
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 MIN_PROB_RATIO           = 0.75   # bucket must have ≥75% of peak model prob to be eligible
+EDGE_BLEND_WEIGHT        = 0.5    # blend weight on edge vs probability in bucket selection
+                                   # score = model_prob + EDGE_BLEND_WEIGHT × edge
+                                   # higher = more edge-driven; lower = more probability-driven
 
 # Confidence-scaled Kelly: scale stake down when pattern match is uncertain
 CONFIDENCE_KELLY_SCALE = {
