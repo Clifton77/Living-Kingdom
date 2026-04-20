@@ -139,6 +139,10 @@ class TradeSignal:
     # Full distribution
     buckets:            list[BucketAnalysis] = field(default_factory=list)
 
+    # Live market tail bounds (vary by station/season — differ from config constants)
+    live_lower_tail:    int = 68
+    live_upper_tail:    int = 77
+
     # Structured reasoning for dashboard card
     reasoning:          Optional[SignalReasoning] = None
 
@@ -301,10 +305,15 @@ def lookup_bias(
             )
 
     if len(fallback) > 0:
+        # Filter to well-sampled cells only — prevents CDO unit-conversion
+        # outliers (n_obs=1) from contaminating the fallback average.
+        reliable = fallback[fallback["n_obs"] >= MIN_N_OBS]
+        if len(reliable) == 0:
+            reliable = fallback   # accept sparse data if nothing else available
         return {
-            "bias_mean": float(fallback["bias_mean"].mean()),
-            "bias_std":  float(fallback["bias_std"].mean()),
-            "n_obs":     int(fallback["n_obs"].sum()),
+            "bias_mean": float(reliable["bias_mean"].mean()),
+            "bias_std":  float(reliable["bias_std"].mean()),
+            "n_obs":     int(reliable["n_obs"].sum()),
             "model_bin": float(raw_bin),
             "source":    "station_month_fallback",
         }
@@ -1022,6 +1031,16 @@ def generate_signal(
     )
 
     # ── 7. Edge per bucket ────────────────────────────────────────────────
+    live_lower_tail = live_buckets[0]  if live_buckets else KALSHI_BUCKET_LOWER_TAIL
+    live_upper_tail = live_buckets[-1] if live_buckets else KALSHI_BUCKET_UPPER_TAIL
+
+    def _live_bucket_label(lower: int) -> str:
+        if lower == live_lower_tail:
+            return f"{lower}° or below"
+        if lower == live_upper_tail:
+            return f"{lower}° or above"
+        return f"{lower}° to {lower + 1}°"
+
     bucket_analyses: list[BucketAnalysis] = []
 
     for lower in live_buckets:
@@ -1035,7 +1054,7 @@ def generate_signal(
 
         bucket_analyses.append(BucketAnalysis(
             bucket_lower=lower,
-            bucket_label=bucket_label(lower),
+            bucket_label=_live_bucket_label(lower),
             model_prob=round(model_p, 4),
             kalshi_prob=round(kalshi_p, 4),
             edge=round(edge, 4),
@@ -1138,6 +1157,8 @@ def generate_signal(
         taf=taf,
         metar=metar,
         buckets=bucket_analyses,
+        live_lower_tail=live_lower_tail,
+        live_upper_tail=live_upper_tail,
         reasoning=reasoning,
     )
 
