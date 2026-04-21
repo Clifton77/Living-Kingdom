@@ -246,6 +246,7 @@ def reset_daily_pnl():
     rm.state.wins_today = 0
     rm.state.losses_today = 0
     rm.state.reversal_blocked = []
+    rm.state.stop_loss_count = {}
     rm._save_state()
     push_event("state_update", rm.summary())
     return jsonify({"ok": True, "is_halted": rm.is_halted})

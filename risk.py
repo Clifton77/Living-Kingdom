@@ -89,10 +89,12 @@ class RiskState:
     trade_count_today:  int            = 0
     wins_today:         int            = 0
     losses_today:       int            = 0
-    # Stations blocked from re-entry today (reversal stop fired)
+    # Stations blocked from re-entry today (reversal stop or stop-loss fired)
     reversal_blocked:   list[str]      = field(default_factory=list)
     # Stations that have already used their one adjacent-bucket expansion today
     expansion_used:     list[str]      = field(default_factory=list)
+    # Stop-loss count per station today — hard cap at 2 regardless of block state
+    stop_loss_count:    dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +339,7 @@ class RiskManager:
             self.state.losses_today      = 0
             self.state.reversal_blocked  = []   # clear reversal blocks each day
             self.state.expansion_used    = []   # clear expansion flags each day
+            self.state.stop_loss_count   = {}   # clear stop-loss counts each day
             self.state.session_date      = today
             self._save_state()
 
@@ -424,6 +427,9 @@ class RiskManager:
 
         if station and self.is_reversal_blocked(station):
             return False, f"{station} blocked from re-entry today (reversal stop fired earlier)"
+
+        if station and self.state.stop_loss_count.get(station, 0) >= 2:
+            return False, f"{station} hard-blocked — 2 stop-losses today"
 
         max_exposure = self.state.bankroll * MAX_EXPOSURE_PCT
         if self.total_exposure() + stake_usd > max_exposure:
@@ -551,8 +557,15 @@ class RiskManager:
         else:
             self.state.losses_today += 1
 
-        # Block re-entry if exit was triggered by a reversal stop
-        if "reversal" in reason.lower():
+        # Block re-entry on reversal stops and stop-losses
+        reason_lower = reason.lower()
+        if "stop-loss" in reason_lower or "stop_loss" in reason_lower:
+            station = pos.station
+            self.state.stop_loss_count[station] = (
+                self.state.stop_loss_count.get(station, 0) + 1
+            )
+            self._block_station(station)
+        elif "reversal" in reason_lower:
             self._block_station(pos.station)
 
         self._save_state()
@@ -650,4 +663,5 @@ class RiskManager:
             "is_halted":            self.is_halted,
             "reversal_blocked":     list(self.state.reversal_blocked),
             "expansion_used":       list(self.state.expansion_used),
+            "stop_loss_count":      dict(self.state.stop_loss_count),
         }
