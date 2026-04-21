@@ -411,23 +411,49 @@ def fetch_live_afm_forecast(station: str, target_date: date) -> float | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# GFS-MOS cache — keyed by (station, 6-hour UTC bucket) so we fetch at most
+# 4 times per day per station instead of on every signal pass.
+# ---------------------------------------------------------------------------
+_mos_cache: dict[tuple[str, str], float] = {}
+
+
+def _mos_cache_key(station: str) -> tuple[str, str]:
+    """Return (station, run_bucket) where run_bucket is the current 6h UTC slot."""
+    now_utc  = datetime.now(timezone.utc)
+    bucket   = now_utc.replace(hour=(now_utc.hour // 6) * 6, minute=0, second=0, microsecond=0)
+    return (station, bucket.isoformat())
+
+
 def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
     """
-    Fetch today's GFS-MOS (MAV) max temperature forecast from IEM.
+    Fetch today's GFS-MOS (MAV) max temperature forecast from IEM AFOS.
+
+    GFS-MOS only updates 4x/day (00Z/06Z/12Z/18Z), so results are cached
+    per 6-hour UTC bucket — at most 4 IEM calls per station per day instead
+    of one per signal pass.
+
     Returns °F or None on failure.
     """
-    from config import WFO_MAP
+    import time
     from scripts.build_model_forecast_archive import (
-        _parse_mos_max_temp, _issue_time_to_valid_date,
+        _parse_mos_max_temp, _issue_time_to_valid_date, STATION_MOS_IDS,
     )
-    wfo = WFO_MAP.get(station)
-    if not wfo:
-        return None
+
+    # Cache hit — reuse result from this 6h model-run window
+    cache_key = _mos_cache_key(station)
+    if cache_key in _mos_cache:
+        cached = _mos_cache[cache_key]
+        logger.debug("%s GFS-MOS (cached): %.1f°F", station, cached)
+        return cached
+
     try:
-        from scripts.build_model_forecast_archive import STATION_MOS_IDS
-        primary_id = STATION_MOS_IDS.get(station, [station])[0]  # e.g. KNYC for KJFK
-        mos_pil    = f"MAV{primary_id[1:]}"                       # KNYC → MAVNYC
-        products = _fetch_live_afos(mos_pil, target_date)
+        primary_id = STATION_MOS_IDS.get(station, [station])[0]
+        mos_pil    = f"MAV{primary_id[1:]}"   # e.g. KNYC → MAVNYC, KPHX → MAVPHX
+        time.sleep(0.5)                        # throttle: prevent burst 429 on multi-station passes
+        products   = _fetch_live_afos(mos_pil, target_date)
+
+        tmax = None
         # First pass: exact valid_date match
         for product in reversed(products):
             text       = product.get("data", "")
@@ -439,22 +465,28 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
                 continue
             tmax = _parse_mos_max_temp(text, station)
             if tmax is not None:
-                logger.info("%s live GFS-MOS forecast: %.1f°F", station, tmax)
-                return tmax
-        # Fallback: use most recent product regardless of valid_date
-        # (GFS-MOS only runs 00Z/12Z; 12Z product valid_date = tomorrow but
-        #  still contains useful calibration data during intraday operation)
-        for product in reversed(products):
-            text = product.get("data", "")
-            if not text:
-                continue
-            tmax = _parse_mos_max_temp(text, station)
-            if tmax is not None:
-                logger.info("%s live GFS-MOS forecast (fallback date): %.1f°F", station, tmax)
-                return tmax
+                logger.info("%s GFS-MOS: %.1f°F", station, tmax)
+                break
+
+        # Fallback: most recent product regardless of valid_date
+        # (12Z run's valid_date is tomorrow but still useful intraday)
+        if tmax is None:
+            for product in reversed(products):
+                text = product.get("data", "")
+                if not text:
+                    continue
+                tmax = _parse_mos_max_temp(text, station)
+                if tmax is not None:
+                    logger.info("%s GFS-MOS (fallback date): %.1f°F", station, tmax)
+                    break
+
+        if tmax is not None:
+            _mos_cache[cache_key] = tmax
+        return tmax
+
     except Exception as exc:
-        logger.warning("%s live GFS-MOS fetch failed: %s", station, exc)
-    return None
+        logger.warning("%s GFS-MOS fetch failed: %s", station, exc)
+        return None
 
 
 def _fetch_nws_forecast(station: str, target_date: date) -> float | None:
