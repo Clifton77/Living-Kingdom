@@ -793,8 +793,11 @@ def _build_reasoning(
     lo1 = forecast_adjusted - bias_std
     hi1 = forecast_adjusted + bias_std
 
-    if bias_src == "nws_fixed":
-        obs_desc = "NWS forecast is already human-calibrated — no bias correction applied"
+    if bias_src in ("nws_fixed", "nws_era5_sigma"):
+        obs_desc = (
+            f"NWS forecast is already human-calibrated — no bias correction applied. "
+            f"Uncertainty (±{bias_std:.1f}°F) derived from station historical ERA5 error."
+        )
     elif bias_src == "cluster_match":
         obs_desc = f"Based on {n_obs} similar days in this exact pattern during the same month"
     elif bias_src == "station_month_fallback":
@@ -1017,23 +1020,31 @@ def generate_signal(
 
     # ── 3. Bias correction ───────────────────────────────────────────────
     # NWS forecasts are already human-calibrated — no systematic bias to correct.
-    # Use a fixed uncertainty of 3.5°F (typical NWS day-ahead error).
-    # ERA5/MOS sources still go through the bias table.
-    NWS_SIGMA = 3.5
+    # Use station-specific ERA5 sigma from bias table as the uncertainty estimate.
+    # NWS day-ahead error is typically ≤ ERA5 error, so this is slightly
+    # conservative and far better than a flat 3.5°F applied to every station.
+    effective_cluster = (
+        -1 if pattern.get("data_source") == "reanalysis_fallback"
+        else pattern["cluster_id"]
+    )
     if model_source_used == "IEM_AFM":
+        era5_info = lookup_bias(
+            bias_df, station, event_date,
+            effective_cluster, pattern["season"], forecast_raw,
+            model_source="ERA5",
+        )
         bias_info = {
             "bias_mean": 0.0,
-            "bias_std":  NWS_SIGMA,
-            "n_obs":     0,
+            "bias_std":  era5_info["bias_std"],
+            "n_obs":     era5_info["n_obs"],
             "model_bin": float(forecast_raw),
-            "source":    "nws_fixed",
+            "source":    "nws_era5_sigma",
         }
-        logger.info("%s NWS source — using fixed sigma=%.1f°F, no bias correction", station, NWS_SIGMA)
-    else:
-        effective_cluster = (
-            -1 if pattern.get("data_source") == "reanalysis_fallback"
-            else pattern["cluster_id"]
+        logger.info(
+            "%s NWS source — station sigma=%.1f°F (ERA5 historical), no bias correction",
+            station, era5_info["bias_std"],
         )
+    else:
         bias_info = lookup_bias(
             bias_df, station, event_date,
             effective_cluster, pattern["season"], forecast_raw,
@@ -1114,8 +1125,22 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Modal bucket — always trade where the forecast is centered, never chase tails
-    top = max(bucket_analyses, key=lambda b: b.model_prob)
+    # Modal bucket — the interior bucket whose 2°F range contains the forecast.
+    # Each interior bucket lower=L covers [L-0.5, L+1.5], center = L+0.5.
+    # We pick the closest interior bucket to the forecast, explicitly excluding
+    # tail buckets — tails are open-ended and always accumulate more probability
+    # than any single 2°F interior bucket, so max(model_prob) would always pick
+    # the tail, which is the bug we are fixing.
+    interior_buckets = [
+        b for b in bucket_analyses
+        if b.bucket_lower not in (live_lower_tail, live_upper_tail)
+    ]
+    if interior_buckets:
+        top = min(interior_buckets,
+                  key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
+    else:
+        # All buckets are tails (very unusual) — fall back to highest model prob
+        top = max(bucket_analyses, key=lambda b: b.model_prob)
 
     # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
     if mos_forecast_raw is not None and model_divergence_f is not None:
