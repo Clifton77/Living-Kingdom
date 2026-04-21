@@ -1162,10 +1162,10 @@ def generate_signal(
                 f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
             )
 
-    # Entry decision — enter only when we are not overpaying (model_prob ≥ yes_ask).
-    # WATCH means the modal bucket is currently overpriced; Tier1 re-checks live
-    # price every 5 min and promotes to TRADE when the ask drops to fair value.
-    if top.edge >= 0:
+    # Entry decision — edge must clear the effective threshold (weather/bias-adjusted).
+    # WATCH means edge is positive but below threshold; Tier1 re-checks live price
+    # every 5 min and promotes to TRADE if the ask drops enough to clear threshold.
+    if top.edge >= effective_threshold:
         decision = "TRADE"
     else:
         decision = "WATCH"

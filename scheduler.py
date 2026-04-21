@@ -629,8 +629,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     )
     fresh_edge = sig.top_model_prob - snap.yes_ask
     if fresh_edge < threshold:
-        logger.debug("[Tier1] %s edge %+.3f below threshold %.3f — skip",
-                     station, fresh_edge, threshold)
+        logger.info("[Tier1] %s edge %+.3f below threshold %.3f — skip",
+                    station, fresh_edge, threshold)
         return
 
     ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
