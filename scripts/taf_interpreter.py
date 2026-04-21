@@ -435,7 +435,18 @@ def parse_taf(
     parts = []
     if peak_window_utc and peak_window_utc[0]:
         win_s, win_e = peak_window_utc
-        parts.append(f"Peak window {win_s.strftime('%H:%MZ')}–{win_e.strftime('%H:%MZ')}")
+        try:
+            import pytz
+            tz      = pytz.timezone(STATION_TIMEZONES[station])
+            win_s_l = win_s.astimezone(tz)
+            win_e_l = win_e.astimezone(tz)
+            tz_abbr = win_s_l.strftime("%Z")  # e.g. EDT, CDT, PDT, MDT
+            parts.append(
+                f"Peak window {win_s_l.strftime('%I:%M %p')}–"
+                f"{win_e_l.strftime('%I:%M %p')} {tz_abbr}"
+            )
+        except Exception:
+            parts.append(f"Peak window {win_s.strftime('%H:%MZ')}–{win_e.strftime('%H:%MZ')}")
     if has_ts:
         parts.append("TS in window")
     if precip_found:
