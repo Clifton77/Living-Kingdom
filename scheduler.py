@@ -809,7 +809,10 @@ def tier3_full_signal_pass(event_date: date | None = None):
         return
 
     if event_date is None:
-        event_date = date.today() + timedelta(days=1)
+        # Cron runs (00:30, 06:30, 12:30, 18:30 UTC) refresh signals for today's
+        # active markets. Tomorrow's markets open at ~14:00 UTC — that transition
+        # is handled by _tier3_day1_market_open which explicitly passes tomorrow.
+        event_date = date.today()
 
     # ── Forecast availability probe ───────────────────────────────────────
     avail = check_forecast_availability(event_date)

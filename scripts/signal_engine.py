@@ -1135,6 +1135,11 @@ def generate_signal(
         b for b in bucket_analyses
         if b.bucket_lower not in (live_lower_tail, live_upper_tail)
     ]
+    logger.info(
+        "%s bucket selection: lower_tail=%s upper_tail=%s interior=%s forecast=%.1f",
+        station, live_lower_tail, live_upper_tail,
+        [b.bucket_lower for b in interior_buckets], forecast_adjusted,
+    )
     if interior_buckets:
         top = min(interior_buckets,
                   key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
