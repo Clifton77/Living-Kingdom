@@ -47,7 +47,7 @@ from config import (
     EDGE_THRESHOLD_BASE,
     CONFIDENCE_KELLY_SCALE,
     MIN_PROB_RATIO,
-    EDGE_BLEND_WEIGHT,
+    MOS_DIVERGENCE_THRESHOLD,
 )
 
 logger = setup_logging("signal_engine")
@@ -1104,39 +1104,41 @@ def generate_signal(
         return _skip_signal(station, event_date, local_time_str, taf, metar,
                             pattern, "No bucket overlap between model and Kalshi")
 
-    # Best edge bucket — only consider buckets with meaningful model probability.
-    # Prevents edge-optimizing on cheap tail bets when the forecast is far away
-    # (e.g., forecast=76°F but Kalshi misprices ≤72 tail at 5¢ → apparent edge
-    # but the tail is 4°F below the forecast and unlikely to win).
+    # Log low-probability buckets for informational purposes
     peak_prob = max(b.model_prob for b in bucket_analyses)
     min_prob  = peak_prob * MIN_PROB_RATIO
-    eligible  = [b for b in bucket_analyses if b.model_prob >= min_prob]
-    if not eligible:
-        eligible = bucket_analyses  # safety fallback (shouldn't happen)
-
     filtered_labels = [b.bucket_label for b in bucket_analyses if b.model_prob < min_prob]
     if filtered_labels:
         logger.info(
-            "%s — filtered low-prob buckets (peak=%.1f%%, min=%.1f%%): %s",
-            station, peak_prob * 100, min_prob * 100, filtered_labels,
+            "%s — low-prob buckets (modal=%.1f%%): %s",
+            station, peak_prob * 100, filtered_labels,
         )
 
-    positive_buckets = [b for b in eligible if b.edge > 0]
-    if not positive_buckets:
-        # No edge anywhere — show the most probable bucket for context
-        top = max(eligible, key=lambda b: b.model_prob)
-        decision = "SKIP"
-    else:
-        # Blend probability and edge so the selection favours likely outcomes
-        # while still rewarding genuine mispricing.
-        # score = model_prob + EDGE_BLEND_WEIGHT × edge
-        # To beat a bucket that is 5% more probable you need 10% more edge (at 0.5 weight).
-        top = max(positive_buckets, key=lambda b: b.model_prob + EDGE_BLEND_WEIGHT * b.edge)
+    # Modal bucket — always trade where the forecast is centered, never chase tails
+    top = max(bucket_analyses, key=lambda b: b.model_prob)
 
-        if top.edge >= effective_threshold:
-            decision = "TRADE"
-        else:
-            decision = "WATCH"
+    # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
+    if mos_forecast_raw is not None and model_divergence_f is not None:
+        if abs(model_divergence_f) > MOS_DIVERGENCE_THRESHOLD:
+            logger.info(
+                "%s MOS divergence %.1f°F exceeds %.1f°F threshold — skipping "
+                "(NWS=%.1f°F, MOS=%.1f°F)",
+                station, abs(model_divergence_f), MOS_DIVERGENCE_THRESHOLD,
+                forecast_raw, mos_forecast_raw,
+            )
+            return _skip_signal(
+                station, event_date, local_time_str, taf, metar, pattern,
+                f"NWS/MOS divergence {abs(model_divergence_f):.1f}°F > "
+                f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
+            )
+
+    # Entry decision — enter only when we are not overpaying (model_prob ≥ yes_ask).
+    # WATCH means the modal bucket is currently overpriced; Tier1 re-checks live
+    # price every 5 min and promotes to TRADE when the ask drops to fair value.
+    if top.edge >= 0:
+        decision = "TRADE"
+    else:
+        decision = "WATCH"
 
     # ── 8. Kelly sizing with confidence scaling ──────────────────────────
     kelly_frac, kelly_usd, kelly_contracts = kelly_stake(
