@@ -247,12 +247,23 @@ function rebuildCarousel(positions) {
   const inner = document.getElementById('carousel-inner');
   if (!inner) return;
 
+  const placeholder = document.getElementById('no-positions-placeholder');
+  const prevBtn = document.getElementById('carousel-prev');
+  const nextBtn = document.getElementById('carousel-next');
+
   const entries = Object.entries(positions);
   if (entries.length === 0) {
     inner.innerHTML = '';
-    document.getElementById('no-positions-placeholder')?.classList.remove('d-none');
+    placeholder?.classList.remove('d-none');
+    if (prevBtn) prevBtn.style.display = 'none';
+    if (nextBtn) nextBtn.style.display = 'none';
     return;
   }
+
+  placeholder?.classList.add('d-none');
+  const showNav = entries.length > 1;
+  if (prevBtn) prevBtn.style.display = showNav ? '' : 'none';
+  if (nextBtn) nextBtn.style.display = showNav ? '' : 'none';
 
   inner.innerHTML = entries.map(([mid, pos], i) =>
     `<div class="carousel-item${i === 0 ? ' active' : ''}" data-market-id="${mid}">
@@ -316,7 +327,13 @@ function removeCarouselCard(marketId) {
   if (wasActive) {
     document.querySelector('#carousel-inner .carousel-item')?.classList.add('active');
   }
-  updatePositionCount(document.querySelectorAll('#carousel-inner .carousel-item').length);
+  const remaining = document.querySelectorAll('#carousel-inner .carousel-item').length;
+  updatePositionCount(remaining);
+  const showNav = remaining > 1;
+  const prevBtn = document.getElementById('carousel-prev');
+  const nextBtn = document.getElementById('carousel-next');
+  if (prevBtn) prevBtn.style.display = showNav ? '' : 'none';
+  if (nextBtn) nextBtn.style.display = showNav ? '' : 'none';
 }
 
 function flashSignalCard(station, decision) {
