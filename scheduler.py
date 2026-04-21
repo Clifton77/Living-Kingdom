@@ -645,10 +645,23 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     max_price = round(sig.top_model_prob - effective_threshold, 4)
     max_price = max(max_price, snap.yes_ask)
 
+    # Recompute contracts at the live execution price — the signal's kelly_contracts
+    # was sized against the Tier3 ask, which may have risen by Tier1 execution.
+    # Using stale contracts at a higher price overspends Kelly's risk budget.
+    import math as _math
+    live_contracts = int(_math.floor(sig.kelly_stake_usd / max_price)) if max_price > 0 else 0
+    if live_contracts < 1:
+        logger.info(
+            "[Tier1] %s kelly $%.2f yields 0 contracts at live ask $%.2f — skip",
+            station, sig.kelly_stake_usd, max_price,
+        )
+        return
+    live_stake = round(live_contracts * max_price, 4)
+
     market_id = snap.market_id  # use API ticker (avoids B68 vs T68 mismatch)
     result = kalshi.place_order_with_fill_check(
         market_id=market_id,
-        contracts=sig.kelly_contracts,
+        contracts=live_contracts,
         limit_price=max_price,
         side="yes",
     )
@@ -658,7 +671,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             station=station,
             market_id=market_id,
             bucket_lower=sig.top_bucket,
-            contracts=sig.kelly_contracts,
+            contracts=live_contracts,
             entry_price=max_price,
             event_date=event_date,
         )
@@ -668,8 +681,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             market_id=market_id,
             bucket_lower=sig.top_bucket,
             entry_price=max_price,
-            contracts=sig.kelly_contracts,
-            stake_usd=sig.kelly_stake_usd,
+            contracts=live_contracts,
+            stake_usd=live_stake,
             sig=sig,
         )
         journal_entry(
@@ -677,8 +690,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             market_id=market_id,
             bucket_lower=sig.top_bucket,
             entry_price=max_price,
-            contracts=sig.kelly_contracts,
-            stake_usd=sig.kelly_stake_usd,
+            contracts=live_contracts,
+            stake_usd=live_stake,
             model_prob=sig.top_model_prob,
             edge=fresh_edge,
             forecast_adjusted=sig.forecast_adjusted,
@@ -689,16 +702,16 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "station":      station,
             "bucket_lower": sig.top_bucket,
             "entry_price":  max_price,
-            "contracts":    sig.kelly_contracts,
-            "stake_usd":    sig.kelly_stake_usd,
+            "contracts":    live_contracts,
+            "stake_usd":    live_stake,
             "entry_reason": "tier1",
         })
         push_event("state_update", rm.summary())
         logger.info(
             "[Tier1] Entry: %s | bucket %d | %d contracts @ $%.2f | "
             "edge %+.3f | stake $%.2f",
-            station, sig.top_bucket, sig.kelly_contracts, max_price,
-            fresh_edge, sig.kelly_stake_usd,
+            station, sig.top_bucket, live_contracts, max_price,
+            fresh_edge, live_stake,
         )
     else:
         logger.error("[Tier1] Order failed for %s bucket %d: %s",

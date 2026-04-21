@@ -463,7 +463,7 @@ class RiskManager:
         Record a new open position. Returns None if risk checks fail.
         """
         stake_usd = round(entry_price * contracts, 4)
-        ok, reason = self.can_open_position(stake_usd)
+        ok, reason = self.can_open_position(stake_usd, station)
         if not ok:
             logger.warning("Cannot open position for %s: %s", station, reason)
             return None
