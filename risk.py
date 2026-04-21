@@ -557,7 +557,9 @@ class RiskManager:
         else:
             self.state.losses_today += 1
 
-        # Block re-entry on reversal stops and stop-losses
+        # Block re-entry on reversal stops, stop-losses, and overshoot exits.
+        # Overshoot means temp has already blown past the bucket range — re-entering
+        # the same bucket immediately is guaranteed to trigger another overshoot exit.
         reason_lower = reason.lower()
         if "stop-loss" in reason_lower or "stop_loss" in reason_lower:
             station = pos.station
@@ -565,7 +567,7 @@ class RiskManager:
                 self.state.stop_loss_count.get(station, 0) + 1
             )
             self._block_station(station)
-        elif "reversal" in reason_lower:
+        elif "reversal" in reason_lower or "overshoot" in reason_lower:
             self._block_station(pos.station)
 
         self._save_state()
