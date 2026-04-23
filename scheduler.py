@@ -123,6 +123,13 @@ _entry_in_progress: set[str] = set()
 # Key = market_id, value = UTC datetime of last snapshot write.
 _last_snapshot_time: dict[str, datetime] = {}
 
+# In-memory closed trade history for the dashboard trade log (current session only).
+_closed_trades: list = []
+
+
+def get_closed_trades() -> list:
+    return list(_closed_trades)
+
 
 # ---------------------------------------------------------------------------
 # Shared state accessors (for dashboard)
@@ -793,7 +800,8 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
         )
         mode = "DEMO" if USE_DEMO else "LIVE"
         get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
-        push_event("position_closed", {
+        closed_record = {
+            "ts":           datetime.now(timezone.utc).strftime("%H:%M UTC"),
             "market_id":    market_id,
             "station":      pos.station,
             "bucket_lower": pos.bucket_lower,
@@ -802,7 +810,9 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
             "exit_price":   bid_price,
             "realized_pnl": realized,
             "reason":       reason,
-        })
+        }
+        _closed_trades.append(closed_record)
+        push_event("position_closed", closed_record)
         push_event("state_update", rm.summary())
         logger.info("[Exit] Complete: %s | realized P/L $%+.4f", market_id, realized)
     else:

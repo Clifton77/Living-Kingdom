@@ -132,87 +132,78 @@
     <span class="badge bg-secondary" id="position-count">{{ initial_state.summary.open_positions }}</span>
   </div>
 
-  {% if initial_state.positions %}
   <div id="positions-carousel" class="carousel slide wb-carousel" data-bs-ride="false" data-bs-interval="false">
     <div class="carousel-inner" id="carousel-inner">
-      {% for market_id, pos in initial_state.positions.items() %}
-      <div class="carousel-item {% if loop.first %}active{% endif %}" data-market-id="{{ market_id }}">
-        <div class="wb-position-card card mx-auto">
-          <div class="card-body">
-            <!-- Header -->
-            <div class="d-flex justify-content-between align-items-start mb-2">
-              <div>
-                <span class="fw-bold fs-5">{{ pos.station }}</span>
-                <span class="badge bg-primary ms-2">HIGH</span>
-                {% set pos_sig = initial_state.signals.get(pos.station) %}
-                {% set p_lower = pos_sig.live_lower_tail if pos_sig else 68 %}
-                {% set p_upper = pos_sig.live_upper_tail if pos_sig else 77 %}
-                <span class="ms-2 text-muted">{% if pos.bucket_lower == p_lower %}≤{{ p_lower }}{% elif pos.bucket_lower == p_upper %}≥{{ p_upper }}{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
-              </div>
-              <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
-                    id="pos-badge-{{ market_id|replace('-','_') }}">
-                ${{ "%+.2f"|format(pos.unrealized_pnl) }}
-              </span>
-            </div>
-            <!-- P/L row (prominent) -->
-            <div class="wb-pnl-row mb-3">
-              <div class="d-flex justify-content-between align-items-center">
+      {% if initial_state.positions %}
+        {% for market_id, pos in initial_state.positions.items() %}
+        <div class="carousel-item {% if loop.first %}active{% endif %}" data-market-id="{{ market_id }}">
+          <div class="wb-position-card card mx-auto">
+            <div class="card-body">
+              <!-- Header -->
+              <div class="d-flex justify-content-between align-items-start mb-2">
                 <div>
-                  <span class="text-muted small">Entry</span>
-                  <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
-                  <span class="mx-2 text-muted">→</span>
-                  <span class="text-muted small">Current</span>
-                  <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
-                    ${{ "%.2f"|format(pos.current_bid) }}
-                  </span>
+                  <span class="fw-bold fs-5">{{ pos.station }}</span>
+                  <span class="badge bg-primary ms-2">HIGH</span>
+                  {% set pos_sig = initial_state.signals.get(pos.station) %}
+                  {% set p_lower = pos_sig.live_lower_tail if pos_sig else 68 %}
+                  {% set p_upper = pos_sig.live_upper_tail if pos_sig else 77 %}
+                  <span class="ms-2 text-muted">{% if pos.bucket_lower == p_lower %}≤{{ p_lower }}{% elif pos.bucket_lower == p_upper %}≥{{ p_upper }}{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
                 </div>
-                <div class="text-end">
-                  <span class="{% if pos.pnl_pct >= 0 %}text-success{% else %}text-danger{% endif %} fw-bold"
-                        id="pos-pct-{{ market_id|replace('-','_') }}">
-                    {{ "%+.1f"|format(pos.pnl_pct) }}%
-                  </span>
+                <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
+                      id="pos-badge-{{ market_id|replace('-','_') }}">
+                  ${{ "%+.2f"|format(pos.unrealized_pnl) }}
+                </span>
+              </div>
+              <!-- P/L row (prominent) -->
+              <div class="wb-pnl-row mb-3">
+                <div class="d-flex justify-content-between align-items-center">
+                  <div>
+                    <span class="text-muted small">Entry</span>
+                    <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
+                    <span class="mx-2 text-muted">→</span>
+                    <span class="text-muted small">Current</span>
+                    <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
+                      ${{ "%.2f"|format(pos.current_bid) }}
+                    </span>
+                  </div>
+                  <div class="text-end">
+                    <span class="{% if pos.pnl_pct >= 0 %}text-success{% else %}text-danger{% endif %} fw-bold"
+                          id="pos-pct-{{ market_id|replace('-','_') }}">
+                      {{ "%+.1f"|format(pos.pnl_pct) }}%
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
-            <!-- Details -->
-            <div class="row g-1 text-muted small mb-3">
-              <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
-              <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
-              <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
-              <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
-            </div>
-            <!-- Actions -->
-            <div class="d-flex gap-2">
-              <button class="btn btn-sm btn-outline-danger flex-grow-1"
-                      onclick="confirmClose('{{ market_id }}', '{{ pos.station }}', {{ pos.unrealized_pnl }})">
-                Close Position
-              </button>
+              <!-- Details -->
+              <div class="row g-1 text-muted small mb-3">
+                <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
+                <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
+                <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
+                <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
+              </div>
+              <!-- Actions -->
+              <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-danger flex-grow-1"
+                        onclick="confirmClose('{{ market_id }}', '{{ pos.station }}', {{ pos.unrealized_pnl }})">
+                  Close Position
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-      {% endfor %}
+        {% endfor %}
+      {% endif %}
     </div>
-    {% if initial_state.positions | length > 1 %}
-    <button class="carousel-control-prev wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="prev">
+    <button class="carousel-control-prev wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="prev" style="display:none" id="carousel-prev">
       <span class="carousel-control-prev-icon"></span>
     </button>
-    <button class="carousel-control-next wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="next">
+    <button class="carousel-control-next wb-carousel-ctrl" type="button" data-bs-target="#positions-carousel" data-bs-slide="next" style="display:none" id="carousel-next">
       <span class="carousel-control-next-icon"></span>
     </button>
-    <div class="carousel-indicators wb-carousel-dots" style="position:static;margin-top:8px;">
-      {% for market_id in initial_state.positions %}
-      <button type="button" data-bs-target="#positions-carousel" data-bs-slide-to="{{ loop.index0 }}"
-              {% if loop.first %}class="active"{% endif %}></button>
-      {% endfor %}
-    </div>
-    {% endif %}
   </div>
-  {% else %}
-  <div class="wb-empty-state card p-3 text-center text-muted" id="no-positions-placeholder">
+  <div class="wb-empty-state card p-3 text-center text-muted {% if initial_state.positions %}d-none{% endif %}" id="no-positions-placeholder">
     No open positions
   </div>
-  {% endif %}
 </div>
 
 
@@ -503,7 +494,24 @@
           </tr>
         </thead>
         <tbody id="trade-history-body">
-          <tr><td colspan="7" class="text-muted text-center py-3">No closed trades today.</td></tr>
+          {% if initial_state.closed_trades %}
+            {% for t in initial_state.closed_trades %}
+            {% set pnl = t.realized_pnl or 0 %}
+            <tr>
+              <td>{{ t.ts or '—' }}</td>
+              <td>{{ t.station or '—' }}</td>
+              <td>{{ t.bucket_lower }}°F</td>
+              <td>{{ (t.entry_price * 100)|int }}¢</td>
+              <td>{{ (t.exit_price * 100)|int }}¢</td>
+              <td class="fw-bold {% if pnl >= 0 %}text-success{% else %}text-danger{% endif %}">
+                ${{ "%+.2f"|format(pnl) }}
+              </td>
+              <td class="d-none d-md-table-cell text-muted small">{{ t.reason or '—' }}</td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="7" class="text-muted text-center py-3">No closed trades today.</td></tr>
+          {% endif %}
         </tbody>
       </table>
     </div>

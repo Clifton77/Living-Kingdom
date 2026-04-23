@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from utils.logging_config import setup_logging
-from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS, SNAPSHOT_INTERVAL_MIN
+from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS, SNAPSHOT_INTERVAL_MIN, MIN_EDGE
 
 logger = setup_logging("sheets")
 
@@ -210,7 +210,6 @@ class GoogleSheetsLogger:
     ):
         """Append a row when a position is opened. Exit fields blank until close."""
         try:
-            thr = sig.threshold_result
             row = [[
                 self._now(),
                 str(event_date),
@@ -226,7 +225,7 @@ class GoogleSheetsLogger:
                 sig.cluster_id,
                 sig.season,
                 sig.pattern_confidence,
-                thr.taf_condition if thr else "",
+                getattr(sig, "weather_gate", ""),
                 round(sig.top_edge, 4),
                 round(sig.forecast_adjusted, 1),
                 round(sig.bias_std, 2),
@@ -272,7 +271,6 @@ class GoogleSheetsLogger:
     def log_skipped_signal(self, sig, skip_reason: str):
         """Append a row to Skipped Signals for every non-TRADE decision."""
         try:
-            thr = sig.threshold_result
             row = [[
                 self._now(),
                 str(sig.event_date),
@@ -281,8 +279,8 @@ class GoogleSheetsLogger:
                 round(sig.top_model_prob * 100, 1),
                 round(sig.top_kalshi_prob * 100, 1),
                 round(sig.top_edge, 4),
-                round(thr.threshold, 4) if thr else "",
-                thr.taf_condition if thr else "",
+                round(MIN_EDGE, 4),
+                getattr(sig, "weather_gate", ""),
                 sig.decision,
                 skip_reason,
             ]]

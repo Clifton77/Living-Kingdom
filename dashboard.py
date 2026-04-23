@@ -113,7 +113,7 @@ def _safe_dict(obj) -> Any:
 
 def _get_full_state() -> dict:
     """Build a complete state snapshot for initial page render or /api/state."""
-    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run
+    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_closed_trades
 
     rm      = get_risk_manager()
     summary = rm.summary()
@@ -156,6 +156,7 @@ def _get_full_state() -> dict:
         },
         "city_names":      dict(cfg.STATION_CITY_NAMES),
         "bias_updated":    bias_updated,
+        "closed_trades":   list(reversed(get_closed_trades())),
     }
 
 
