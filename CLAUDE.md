@@ -90,3 +90,56 @@ Added Apr 2026: KAUS, KPHL, KBOS, KDCA, KLAS, KMSP, KMSY, KOKC, KPHX, KSAT, KSEA
 
 ## Branch
 Active development: `claude/push-recent-changes-iMtPy`
+
+---
+
+## Pending Redesign — Signal Engine + Same-Day Markets (approved 2026-04-21)
+
+### What Changes and Why
+Current threshold system multiplies a 0.12 base edge by weather penalties (up to 3×), causing stations with genuine edge to fail silently. New design: edge only needs to beat $0.01 (1 cent). Weather is a binary gate — skip or hard-skip — not a multiplier. Same-day market trading is also being added (bot currently only trades tomorrow's market).
+
+### 1. `utils/weather_penalty.py`
+Replace `compute_effective_threshold()` + `WEATHER_PENALTY` multiplier dict with:
+```python
+def compute_weather_gate(taf_condition: str) -> str:
+    if taf_condition in ("hard_skip", "precip", "convective"):
+        return "hard_skip"
+    if taf_condition in ("broken", "marine_fog"):
+        return "skip"
+    return "trade"   # scattered, clear
+```
+
+### 2. `scripts/signal_engine.py`
+- Wire `compute_weather_gate()` in place of `compute_effective_threshold()`
+- `hard_skip` → `_hard_skip_signal()`; `skip` → `_skip_signal()`
+- Decision gate: `if top.edge >= MIN_EDGE (0.01): TRADE else: WATCH`
+- Remove `STD_GATE_VALUE` / `STD_GATE_FLOOR` bias_std gate (Kelly self-regulates)
+- Keep: MOS divergence gate (4°F), `MIN_KELLY_STAKE` ($1.00), bucket selection logic
+
+### 3. `scheduler.py`
+**Same-day trading:**
+- Add `_get_entry_event_date(station, now_utc) -> date | None`
+  - Before cutoff (peak_hour − 2h): return `date.today()`
+  - After cutoff + after 14:05 UTC: return `date.today() + 1`
+  - In gap: return `None` (no entries)
+- Tier 3 loop: compute target date per-station using `_get_entry_event_date()`
+- Tier 1 entry: use `sig.event_date` directly (not hardcoded `today+1`)
+
+**Tier 2 AMD:**
+- After `_execute_exit()` on AMD, write `HARD_SKIP` signal into `_latest_signals[station]`
+- Blocks Tier 1 re-entry until next Tier 3 run
+
+### 4. `config.py`
+```python
+MIN_EDGE = 0.01                     # 1-cent minimum edge to trade
+ENTRY_CUTOFF_PRE_PEAK_HOURS = 2     # stop same-day entries N hours before peak
+# Remove: WEATHER_PENALTY, EDGE_THRESHOLD_BASE, STD_GATE_VALUE, STD_GATE_FLOOR
+```
+
+### Key Functions to Reuse (unchanged)
+- `get_peak_hour(station, event_date)` — `utils/peak_hours.py`
+- `get_all_snapshots(station, event_date)` — `kalshi_client.py`
+- `build_probability_distribution()` — `signal_engine.py:173`
+- `kelly_stake()` — `signal_engine.py:657`
+- `interpret_taf()` — `taf_interpreter.py`
+- `_execute_exit()` — `scheduler.py:722`

@@ -25,7 +25,7 @@ import pandas as pd
 from scipy import stats as scipy_stats
 
 from utils.logging_config import setup_logging
-from utils.weather_penalty import compute_effective_threshold, ThresholdResult
+from utils.weather_penalty import compute_weather_gate, describe_gate
 from scripts.taf_interpreter import interpret_taf, get_metar, TafResult, MetarResult
 from scripts.pattern_classifier import classify_pattern
 from kalshi_client import KalshiClient, MarketSnapshot, all_bucket_lowers, bucket_label
@@ -44,9 +44,11 @@ from config import (
     STARTING_BANKROLL,
     MAX_STAKE_PCT,
     MIN_N_OBS,
-    EDGE_THRESHOLD_BASE,
+    MIN_EDGE,
+    BIAS_STD_GATE,
     CONFIDENCE_KELLY_SCALE,
     MIN_PROB_RATIO,
+    MIN_BUCKET_PROB,
     MOS_DIVERGENCE_THRESHOLD,
 )
 
@@ -129,8 +131,8 @@ class TradeSignal:
     kelly_stake_usd:    float
     kelly_contracts:    int
 
-    # Threshold
-    threshold_result:   Optional[ThresholdResult]
+    # Weather gate
+    weather_gate:       str            # "trade" | "skip" | "hard_skip"
     taf:                TafResult
     metar:              MetarResult
 
@@ -655,7 +657,7 @@ def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, 
 # ---------------------------------------------------------------------------
 
 def kelly_stake(
-    edge: float,
+    model_prob: float,
     yes_ask: float,
     bankroll: float,
     max_stake_pct: float = MAX_STAKE_PCT,
@@ -671,8 +673,7 @@ def kelly_stake(
 
     Returns (kelly_fraction, stake_usd, contracts)
     """
-    p = edge + yes_ask          # our probability = kalshi_prob + edge
-    p = float(np.clip(p, 0.01, 0.99))
+    p = float(np.clip(model_prob, 0.01, 0.99))
     q = 1.0 - p
 
     if yes_ask <= 0 or yes_ask >= 1:
@@ -724,7 +725,8 @@ def _build_reasoning(
     forecast_adjusted: float,
     taf: TafResult,
     metar: MetarResult,
-    threshold_result: ThresholdResult | None,
+    weather_gate: str,
+    bias_std_gate_fired: bool,
     top_bucket: BucketAnalysis,
     bucket_analyses: list[BucketAnalysis],
     decision: str,
@@ -847,15 +849,17 @@ def _build_reasoning(
     kalshi_pct = top_bucket.kalshi_prob * 100
     ask_cents  = round(top_bucket.yes_ask * 100)
 
-    if threshold_result is not None:
-        thr_pct   = threshold_result.threshold * 100
-        cond_desc = _CONDITION_PLAIN.get(taf.condition, taf.condition)
-        penalty_note = (
-            f"Our edge threshold today is {thr_pct:.0f}% ({cond_desc} — "
-            f"{'no penalty applied' if taf.condition == 'clear' else 'penalty applied to require higher confidence'})."
-        )
+    cond_desc = _CONDITION_PLAIN.get(taf.condition, taf.condition)
+    if weather_gate == "hard_skip":
+        penalty_note = f"Weather gate: HARD SKIP ({cond_desc}) — conditions too dangerous to trade."
+    elif weather_gate == "skip":
+        penalty_note = f"Weather gate: SKIP ({cond_desc}) — elevated uncertainty, not trading today."
     else:
-        penalty_note = "Weather conditions require skipping this station entirely."
+        gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
+        penalty_note = (
+            f"Weather gate: TRADE ({cond_desc}). "
+            f"Edge must clear {MIN_EDGE:.0%} minimum.{gate_suffix}"
+        )
 
     market_analysis = (
         f"Kalshi is pricing the {top_bucket.bucket_label} bucket at {kalshi_pct:.0f}% "
@@ -877,13 +881,10 @@ def _build_reasoning(
             f"Edge of {top_bucket.edge:+.3f} clears our required threshold."
         )
     elif decision == "WATCH":
-        if threshold_result:
-            decision_rationale = (
-                f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
-                f"our {threshold_result.threshold:.3f} threshold. Not enough margin to trade today."
-            )
-        else:
-            decision_rationale = "Watching — edge present but threshold check failed."
+        decision_rationale = (
+            f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
+            f"our {MIN_EDGE:.2f} minimum. Not enough margin to trade today."
+        )
     elif decision == "HARD_SKIP":
         decision_rationale = (
             f"Hard skip — {taf.summary}. "
@@ -915,24 +916,24 @@ def _build_reasoning(
     # ── Threshold checklist ───────────────────────────────────────────────
     threshold_checks = []
 
-    if threshold_result is not None:
-        threshold_checks.append({
-            "name":   "Weather condition",
-            "passed": taf.condition != "hard_skip",
-            "detail": f"{_CONDITION_PLAIN.get(taf.condition, taf.condition)} — {taf.summary}",
-        })
-        threshold_checks.append({
-            "name":   "Edge vs threshold",
-            "passed": top_bucket.edge >= threshold_result.threshold,
-            "detail": f"Edge {top_bucket.edge:+.3f} vs required {threshold_result.threshold:.3f}",
-        })
-        threshold_checks.append({
-            "name":   "Bias uncertainty gate",
-            "passed": not threshold_result.std_gate_fired,
-            "detail": (
-                f"Bias spread {bias_std:.1f}°F — gate {'fired, floor applied' if threshold_result.std_gate_fired else 'clear'}"
-            ),
-        })
+    threshold_checks.append({
+        "name":   "Weather gate",
+        "passed": weather_gate == "trade",
+        "detail": describe_gate(taf.condition),
+    })
+    threshold_checks.append({
+        "name":   "Forecast uncertainty",
+        "passed": not bias_std_gate_fired,
+        "detail": (
+            f"Bias spread {bias_std:.1f}°F — "
+            f"{'too high, gate fired (>{BIAS_STD_GATE:.0f}°F)' if bias_std_gate_fired else 'acceptable'}"
+        ),
+    })
+    threshold_checks.append({
+        "name":   "Edge vs minimum",
+        "passed": top_bucket.edge >= MIN_EDGE,
+        "detail": f"Edge {top_bucket.edge:+.3f} vs required {MIN_EDGE:.2f}",
+    })
     threshold_checks.append({
         "name":   "Minimum stake",
         "passed": kelly_stake_usd >= 1.0,
@@ -1054,16 +1055,32 @@ def generate_signal(
     bias_std          = bias_info["bias_std"]
     forecast_adjusted = forecast_raw + bias_mean
 
-    # ── 4. Weather penalty threshold ─────────────────────────────────────
-    threshold_result = compute_effective_threshold(taf.condition, bias_std)
+    # ── 4. Weather gate ──────────────────────────────────────────────────
+    weather_gate = compute_weather_gate(taf.condition)
 
-    if threshold_result is None:
+    if weather_gate == "hard_skip":
         return _hard_skip_signal(
             station, event_date, local_time_str, taf, metar,
             pattern, forecast_raw, bias_info, forecast_adjusted,
         )
 
-    effective_threshold = threshold_result.threshold
+    if weather_gate == "skip":
+        return _skip_signal(
+            station, event_date, local_time_str, taf, metar,
+            pattern, f"Weather gate SKIP: {taf.condition} — {taf.summary}",
+        )
+
+    # ── 4b. Forecast uncertainty gate ───────────────────────────────────
+    bias_std_gate_fired = bias_std > BIAS_STD_GATE
+    if bias_std_gate_fired:
+        logger.info(
+            "%s bias_std %.1f°F > gate %.1f°F — skipping (forecast too uncertain)",
+            station, bias_std, BIAS_STD_GATE,
+        )
+        return _skip_signal(
+            station, event_date, local_time_str, taf, metar,
+            pattern, f"Forecast uncertainty too high: bias_std={bias_std:.1f}°F > {BIAS_STD_GATE}°F",
+        )
 
     # ── 5. Kalshi snapshots (fetch first — needed for live bucket bounds) ───
     snapshots: dict[int, MarketSnapshot] = kalshi.get_all_snapshots(station, event_date)
@@ -1090,6 +1107,20 @@ def generate_signal(
             return f"{lower}° or above"
         return f"{lower}° to {lower + 1}°"
 
+    # Normalize market implied probabilities (ask prices) to sum to 1.0.
+    # Kalshi ask prices sum to >100% due to bid-ask spread / market maker edge.
+    # Normalizing gives a "shape vs. shape" comparison so spread doesn't
+    # systematically deflate our edge estimates.
+    raw_market_total = sum(
+        s.implied_prob for s in snapshots.values() if s is not None
+    )
+    market_total = raw_market_total if raw_market_total > 0 else 1.0
+    market_vig   = market_total - 1.0
+    logger.info(
+        "%s market vig: %.1f%% (ask sum=%.3f across %d buckets)",
+        station, market_vig * 100, market_total, len(snapshots),
+    )
+
     bucket_analyses: list[BucketAnalysis] = []
 
     for lower in live_buckets:
@@ -1098,7 +1129,7 @@ def generate_signal(
         if snap is None:
             continue
 
-        kalshi_p = snap.implied_prob
+        kalshi_p = snap.implied_prob / market_total   # normalized fair probability
         edge     = model_p - kalshi_p
 
         bucket_analyses.append(BucketAnalysis(
@@ -1125,12 +1156,12 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Modal bucket — the interior bucket whose 2°F range contains the forecast.
-    # Each interior bucket lower=L covers [L-0.5, L+1.5], center = L+0.5.
-    # We pick the closest interior bucket to the forecast, explicitly excluding
-    # tail buckets — tails are open-ended and always accumulate more probability
-    # than any single 2°F interior bucket, so max(model_prob) would always pick
-    # the tail, which is the bug we are fixing.
+    # Best-edge bucket selection.
+    # Pool: all buckets where our model assigns >= MIN_BUCKET_PROB probability.
+    # This filters out extreme tails we deem very unlikely while still allowing
+    # tail buckets with genuine edge (market underpricing tail risk).
+    # When no candidate has positive edge, fall back to the modal interior bucket
+    # so WATCH signals track the most likely outcome.
     interior_buckets = [
         b for b in bucket_analyses
         if b.bucket_lower not in (live_lower_tail, live_upper_tail)
@@ -1140,12 +1171,34 @@ def generate_signal(
         station, live_lower_tail, live_upper_tail,
         [b.bucket_lower for b in interior_buckets], forecast_adjusted,
     )
-    if interior_buckets:
-        top = min(interior_buckets,
-                  key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
+
+    candidates = [b for b in bucket_analyses if b.model_prob >= MIN_BUCKET_PROB]
+    if not candidates:
+        candidates = bucket_analyses  # degenerate — all buckets below floor
+
+    best_edge_bucket = max(candidates, key=lambda b: b.edge)
+
+    if best_edge_bucket.edge > 0:
+        top = best_edge_bucket
+        # Log when we deviate from the modal bucket so we can audit the choice
+        modal = (
+            min(interior_buckets, key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
+            if interior_buckets else best_edge_bucket
+        )
+        if top.bucket_lower != modal.bucket_lower:
+            logger.info(
+                "%s best-edge bucket %s (edge=%.3f model=%.1f%%) differs from modal %s "
+                "(edge=%.3f model=%.1f%%)",
+                station, top.bucket_label, top.edge, top.model_prob * 100,
+                modal.bucket_label, modal.edge, modal.model_prob * 100,
+            )
     else:
-        # All buckets are tails (very unusual) — fall back to highest model prob
-        top = max(bucket_analyses, key=lambda b: b.model_prob)
+        # No bucket has positive edge — WATCH on the modal bucket
+        if interior_buckets:
+            top = min(interior_buckets,
+                      key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
+        else:
+            top = max(bucket_analyses, key=lambda b: b.model_prob)
 
     # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
     if mos_forecast_raw is not None and model_divergence_f is not None:
@@ -1162,17 +1215,17 @@ def generate_signal(
                 f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
             )
 
-    # Entry decision — edge must clear the effective threshold (weather/bias-adjusted).
-    # WATCH means edge is positive but below threshold; Tier1 re-checks live price
-    # every 5 min and promotes to TRADE if the ask drops enough to clear threshold.
-    if top.edge >= effective_threshold:
+    # Entry decision — edge must clear MIN_EDGE (weather and uncertainty already gated above).
+    # WATCH means edge is positive but below minimum; Tier1 re-checks live price
+    # every 5 min and promotes to TRADE if the ask drops enough to clear MIN_EDGE.
+    if top.edge >= MIN_EDGE:
         decision = "TRADE"
     else:
         decision = "WATCH"
 
     # ── 8. Kelly sizing with confidence scaling ──────────────────────────
     kelly_frac, kelly_usd, kelly_contracts = kelly_stake(
-        top.edge, top.yes_ask, bankroll
+        top.model_prob, top.yes_ask, bankroll
     )
 
     # Scale Kelly fraction by pattern confidence — unusual regimes get reduced sizing
@@ -1200,7 +1253,8 @@ def generate_signal(
         forecast_adjusted=forecast_adjusted,
         taf=taf,
         metar=metar,
-        threshold_result=threshold_result,
+        weather_gate=weather_gate,
+        bias_std_gate_fired=bias_std_gate_fired,
         top_bucket=top,
         bucket_analyses=bucket_analyses,
         decision=decision,
@@ -1214,11 +1268,11 @@ def generate_signal(
 
     logger.info(
         "%s | %s | AFM=%.1f°F MOS=%s | adj=%.1f°F | top=%s | edge=%+.3f | "
-        "threshold=%.3f | kelly=$%.2f | decision=%s",
+        "min_edge=%.2f | kelly=$%.2f | decision=%s",
         station, event_date, forecast_raw,
         f"{mos_forecast_raw:.1f}°F" if mos_forecast_raw else "N/A",
         forecast_adjusted, top.bucket_label, top.edge,
-        effective_threshold, kelly_usd, decision,
+        MIN_EDGE, kelly_usd, decision,
     )
 
     return TradeSignal(
@@ -1244,7 +1298,7 @@ def generate_signal(
         kelly_fraction=kelly_frac,
         kelly_stake_usd=kelly_usd,
         kelly_contracts=kelly_contracts,
-        threshold_result=threshold_result,
+        weather_gate=weather_gate,
         taf=taf,
         metar=metar,
         buckets=bucket_analyses,
@@ -1266,7 +1320,7 @@ def _skip_signal(station, event_date, local_time, taf, metar,
         top_bucket=0, top_edge=0.0, top_model_prob=0.0,
         top_kalshi_prob=0.0, top_yes_ask=0.0,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
-        threshold_result=None, taf=taf, metar=metar,
+        weather_gate="skip", taf=taf, metar=metar,
         buckets=[], reasoning=f"Skipped: {reason}",
     )
 
@@ -1285,9 +1339,9 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
         top_bucket=0, top_edge=0.0, top_model_prob=0.0,
         top_kalshi_prob=0.0, top_yes_ask=0.0,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
-        threshold_result=None, taf=taf, metar=metar,
+        weather_gate="hard_skip", taf=taf, metar=metar,
         buckets=[],
-        reasoning=f"HARD SKIP: {taf.summary} — weather penalty forces skip.",
+        reasoning=f"HARD SKIP: {taf.summary} — weather gate forces skip.",
     )
 
 

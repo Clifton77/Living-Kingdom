@@ -40,7 +40,7 @@ _ADJUSTABLE_SETTINGS = {
     "EXPANSION_EDGE_MIN":            ("Expansion edge min",        0.1,  0.5),
     "SIGNIFICANT_REPOSITION_EDGE_MIN": ("Significant reposition edge", 0.1, 0.5),
     "MAJOR_REPOSITION_EDGE_MIN":     ("Major reposition edge",    0.1,  0.5),
-    "EDGE_THRESHOLD_BASE":           ("Base edge threshold",      0.05, 0.5),
+    "MIN_EDGE":                       ("Min edge to trade",        0.01, 0.20),
     "MIN_KELLY_STAKE":               ("Min Kelly stake ($)",       0.5, 10.0),
 }
 

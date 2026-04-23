@@ -401,6 +401,7 @@ REVERSAL_EDGE_THRESHOLD  = -0.15   # signal reversal stop: exit and do not re-en
 PROFIT_REVERSAL_THRESHOLD = 0.10   # early profit exit threshold
 MIN_KELLY_STAKE          = 1.00    # minimum stake in USD to enter a trade
 MIN_PROB_RATIO           = 0.75   # used for logging only — buckets below this shown as low-prob
+MIN_BUCKET_PROB          = 0.05   # minimum model probability for a bucket to be eligible for selection
 MOS_DIVERGENCE_THRESHOLD = 4.0    # skip if NWS and GFS-MOS disagree by more than this (°F)
 
 # Confidence-scaled Kelly: scale stake down when pattern match is uncertain
@@ -486,28 +487,19 @@ STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Edge threshold — hybrid weather penalty system
+# Edge threshold — binary weather gate system
 # ---------------------------------------------------------------------------
-EDGE_THRESHOLD_BASE = 0.12   # base edge required with no weather penalty
+MIN_EDGE = 0.06   # minimum edge (normalized) required to enter a trade
 
 # Peak-window TAF scoring — how far around the expected high-temp hour to check
 TAF_PRE_PEAK_WINDOW_HOURS  = 3   # hours before peak to include (approaching storm matters)
 TAF_POST_PEAK_WINDOW_HOURS = 1   # hours after peak to include
 
-# TAF weather penalty multipliers (worst condition in peak window)
-WEATHER_PENALTY = {
-    "clear":       1.0,   # SKC / CLR / FEW
-    "scattered":   1.2,   # SCT only, no precip
-    "broken":      1.5,   # BKN / OVC, no precip
-    "marine_fog":  1.8,   # BR / FG at coastal stations
-    "convective":  2.5,   # VCTS / TS in TAF
-    "precip":      3.0,   # RA / SN / FZRA active
-    "hard_skip":   None,  # FZRA+OVC / heavy SN / ICE — never trade
-}
+# bias_std gate — skip when forecast uncertainty is too high (Kelly can't compensate for wrong bucket)
+BIAS_STD_GATE = 5.0   # skip if bias_std exceeds this (°F)
 
-# bias_std gate — independent secondary check
-STD_GATE_VALUE = 4.5    # if bias_std exceeds this, apply floor
-STD_GATE_FLOOR = 0.30   # minimum effective threshold when gate fires
+# Same-day entry cutoff: stop entering same-day markets this many hours before peak
+ENTRY_CUTOFF_PRE_PEAK_HOURS = 2
 
 # ---------------------------------------------------------------------------
 # Scheduler tier intervals
