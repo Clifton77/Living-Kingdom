@@ -8,6 +8,7 @@
 // ── State ────────────────────────────────────────────────────
 let pendingCloseMarketId = null;
 let tradeHistoryOffset   = 0;
+let _signals = (typeof INITIAL_STATE !== 'undefined' && INITIAL_STATE.signals) ? INITIAL_STATE.signals : {};
 const HISTORY_PAGE_SIZE  = 20;
 const STATION_CITIES = {
   KJFK: 'New York',      KORD: 'Chicago',       KMIA: 'Miami',         KDFW: 'Dallas',
@@ -114,6 +115,7 @@ function initSSE() {
     const d = JSON.parse(e.data);
     // Full state will arrive shortly via state_update; refresh carousel
     fetch('/api/state').then(r => r.json()).then(state => {
+      if (state.signals) _signals = state.signals;
       rebuildCarousel(state.positions);
       updatePositionCount(Object.keys(state.positions).length);
     });
@@ -195,6 +197,7 @@ function initSSE() {
 
 // ── Apply full state snapshot ────────────────────────────────
 function applyFullState(state) {
+  if (state.signals) _signals = state.signals;
   updateSummaryStrip(state.summary);
   if (state.positions) rebuildCarousel(state.positions);
   if (state.closed_trades) populateTradeHistory(state.closed_trades);
@@ -275,10 +278,13 @@ function rebuildCarousel(positions) {
 }
 
 function buildPositionCardInner(mid, pos) {
-  const safeMid  = mid.replace(/-/g, '_');
-  const pnlClass = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
-  const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
-  const sign     = pos.unrealized_pnl >= 0 ? '+' : '';
+  const safeMid   = mid.replace(/-/g, '_');
+  const pnlClass  = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
+  const pctClass  = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
+  const sign      = pos.unrealized_pnl >= 0 ? '+' : '';
+  const sig       = _signals[pos.station] || {};
+  const lowerTail = sig.live_lower_tail !== undefined ? sig.live_lower_tail : 68;
+  const upperTail = sig.live_upper_tail !== undefined ? sig.live_upper_tail : 77;
   return `
 <div class="wb-position-card card mx-auto">
   <div class="card-body">
@@ -287,7 +293,7 @@ function buildPositionCardInner(mid, pos) {
         <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
         <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
-        <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower)}</span>
+        <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower, lowerTail, upperTail)}</span>
       </div>
       <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
         $${sign}${pos.unrealized_pnl.toFixed(2)}
@@ -600,10 +606,12 @@ function escHtml(str) {
 }
 
 /** Format a bucket lower bound into a human-readable range string. */
-function fmtBucket(lower) {
-  if (lower <= 68) return '\u226468\u00b0F';          // ≤68°F
-  if (lower >= 77) return '\u226577\u00b0F';          // ≥77°F
-  return `${lower}\u2013${lower + 1}\u00b0F`;         // 69–70°F
+function fmtBucket(lower, lowerTail, upperTail) {
+  lowerTail = lowerTail !== undefined ? lowerTail : 68;
+  upperTail = upperTail !== undefined ? upperTail : 77;
+  if (lower === lowerTail) return '≤' + lowerTail + '°F';
+  if (lower === upperTail) return '≥' + upperTail + '°F';
+  return lower + '–' + (lower + 1) + '°F';
 }
 
 function nowStr() {
