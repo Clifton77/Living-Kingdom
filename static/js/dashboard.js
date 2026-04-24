@@ -287,7 +287,7 @@ function buildPositionCardInner(mid, pos) {
         <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
         <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
-        <span class="ms-2 text-muted">${fmtBucket(pos.bucket_lower)}</span>
+        <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower)}</span>
       </div>
       <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
         $${sign}${pos.unrealized_pnl.toFixed(2)}
@@ -308,8 +308,8 @@ function buildPositionCardInner(mid, pos) {
     <div class="row g-1 text-muted small mb-3">
       <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
       <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
-      <div class="col-12">Entered: <span class="text-body">${escHtml(pos.entry_time)}</span></div>
-      <div class="col-12">Event: <span class="text-body">${escHtml(pos.event_date)}</span></div>
+      <div class="col-12">Entered: <span class="text-body">${escHtml(pos.entry_time_display || pos.entry_time)}</span></div>
+      <div class="col-12">Market: <span class="text-body">${escHtml(pos.event_date_display || pos.event_date)}</span></div>
     </div>
     <div class="d-flex gap-2">
       <button class="btn btn-sm btn-outline-danger flex-grow-1"
