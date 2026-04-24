@@ -740,12 +740,26 @@ def _build_reasoning(
     mos_forecast_raw: float | None = None,
     model_divergence_f: float | None = None,
     model_source_used: str = "IEM_AFM",
+    nbm_forecast_raw: float | None = None,
+    nbm_divergence_f: float | None = None,
 ) -> SignalReasoning:
     """Build fully structured plain-English reasoning for the dashboard card."""
 
-    now = datetime.now(timezone.utc)
+    now         = datetime.now(timezone.utc)
     season_name = _SEASON_NAMES.get(pattern.get("season", ""), pattern.get("season", ""))
     confidence  = pattern.get("confidence", "low")
+    cluster_id  = pattern.get("cluster_id", "?")
+    distance    = pattern.get("distance", 0.0)
+    data_source = pattern.get("data_source", "unknown")
+    conf_plain  = _CONFIDENCE_PLAIN.get(confidence, confidence)
+    bias_mean   = bias_info["bias_mean"]
+    bias_std    = bias_info["bias_std"]
+    n_obs       = bias_info["n_obs"]
+    bias_src    = bias_info.get("source", "unknown")
+    direction   = "warmer" if bias_mean > 0 else "cooler"
+    abs_bias    = abs(bias_mean)
+    lo1         = forecast_adjusted - bias_std
+    hi1         = forecast_adjusted + bias_std
 
     # ── Current conditions ────────────────────────────────────────────────
     cond_parts = []
@@ -770,81 +784,215 @@ def _build_reasoning(
     )
 
     # ── Synoptic pattern ──────────────────────────────────────────────────
-    cluster_id   = pattern.get("cluster_id", "?")
-    distance     = pattern.get("distance", 0.0)
-    data_source  = pattern.get("data_source", "unknown")
-    conf_plain   = _CONFIDENCE_PLAIN.get(confidence, confidence)
-
-    if confidence == "high":
-        regime_desc = "Today closely matches the historical norm for this pattern — the bias correction is well-supported."
-    elif confidence == "medium":
-        regime_desc = "Today is a reasonable match. Bias correction applies but with slightly more uncertainty."
-    else:
-        regime_desc = "Today is in unusual synoptic territory. We're applying a reduced Kelly stake to account for higher uncertainty."
-
-    synoptic_pattern = (
-        f"The upper-level (500mb) pattern is classified as Cluster {cluster_id} "
-        f"for {season_name}, identified from {'live GFS data' if 'gfs' in data_source.lower() else 'recent reanalysis'}. "
-        f"Pattern confidence: {conf_plain}. {regime_desc}"
+    pattern_src = (
+        "live 500hPa analysis"
+        if any(k in data_source.lower() for k in ("openmeteo", "gfs", "live"))
+        else "recent reanalysis"
     )
 
-    # ── Forecast and bias ─────────────────────────────────────────────────
-    bias_mean  = bias_info["bias_mean"]
-    bias_std   = bias_info["bias_std"]
-    n_obs      = bias_info["n_obs"]
-    bias_src   = bias_info.get("source", "unknown")
-    direction  = "warmer" if bias_mean > 0 else "cooler"
-    abs_bias   = abs(bias_mean)
-
-    lo1 = forecast_adjusted - bias_std
-    hi1 = forecast_adjusted + bias_std
-
-    if bias_src in ("nws_fixed", "nws_era5_sigma"):
-        obs_desc = (
-            f"NWS forecast is already human-calibrated — no bias correction applied. "
-            f"Uncertainty (±{bias_std:.1f}°F) derived from station historical ERA5 error."
-        )
-    elif bias_src == "cluster_match":
-        obs_desc = f"Based on {n_obs} similar days in this exact pattern during the same month"
-    elif bias_src == "station_month_fallback":
-        obs_desc = f"Cluster data was sparse — using {n_obs} days across all patterns for this station and month"
+    if distance is not None and distance > 0:
+        if distance < 0.5:
+            distance_note = f"Centroid distance {distance:.2f} — near-textbook match for this cluster."
+        elif distance < 1.0:
+            distance_note = f"Centroid distance {distance:.2f} — solid match."
+        elif distance < 1.5:
+            distance_note = f"Centroid distance {distance:.2f} — near the edge of the cluster; use bias estimates with some caution."
+        else:
+            distance_note = f"Centroid distance {distance:.2f} — today sits at the outer fringe of this cluster."
     else:
-        obs_desc = "No historical bias data found — using zero correction"
+        distance_note = ""
 
-    # Model source label for display
-    src_label = "NWS AFM" if model_source_used == "IEM_AFM" else "Open-Meteo/ERA5"
+    if confidence == "high":
+        regime_desc = "The upper-level setup is well-established and closely mirrors historical examples of this regime."
+    elif confidence == "medium":
+        regime_desc = "A reasonable synoptic match — bias correction applies with moderate confidence."
+    else:
+        regime_desc = "Unusual synoptic setup; historical parallels are limited and bias estimates carry more uncertainty."
 
-    # NWS vs GFS-MOS divergence note
-    if mos_forecast_raw is not None and model_divergence_f is not None:
-        abs_div = abs(model_divergence_f)
-        if abs_div < 1.0:
-            div_note = (
-                f"GFS-MOS agrees closely ({mos_forecast_raw:.0f}°F, divergence <1°F) — "
-                "model and forecaster are aligned."
+    if n_obs >= 10 and abs_bias >= 0.5:
+        hist_note = (
+            f"In {n_obs} similar {season_name} days under this regime, {station} has "
+            f"verified {abs_bias:.1f}°F {direction} than model guidance — "
+            "this tendency is baked into the adjusted forecast."
+        )
+    elif n_obs >= 10:
+        hist_note = (
+            f"Across {n_obs} similar {season_name} days, the model has been well-calibrated "
+            f"at {station} with negligible systematic bias."
+        )
+    else:
+        hist_note = (
+            f"Only {n_obs} similar days in the bias table — "
+            "bias estimate is tentative; treat uncertainty bounds as approximate."
+        )
+
+    synoptic_pattern = (
+        f"{season_name} Cluster {cluster_id} — identified from {pattern_src}. "
+        f"{distance_note} "
+        f"Confidence: {conf_plain}. "
+        f"{regime_desc} "
+        f"{hist_note}"
+    )
+
+    # ── Model runs & day outlook ──────────────────────────────────────────
+    src_label = "NWS AFM" if model_source_used == "IEM_AFM" else "Open-Meteo"
+
+    # Model snapshot line
+    model_parts = [f"NWS AFM {forecast_raw:.0f}°F"]
+    if nbm_forecast_raw is not None:
+        model_parts.append(f"NBM {nbm_forecast_raw:.0f}°F")
+    if mos_forecast_raw is not None:
+        model_parts.append(f"GFS-MOS {mos_forecast_raw:.0f}°F")
+    model_snapshot = "  |  ".join(model_parts)
+
+    # Convergence / divergence narrative
+    active_temps = [t for t in [forecast_raw, nbm_forecast_raw, mos_forecast_raw] if t is not None]
+    spread = round(max(active_temps) - min(active_temps), 1) if len(active_temps) > 1 else 0.0
+
+    afm_nbm_diff = abs(nbm_divergence_f)  if nbm_divergence_f  is not None else None
+    afm_mos_diff = abs(model_divergence_f) if model_divergence_f is not None else None
+    nbm_mos_diff = (
+        abs(nbm_forecast_raw - mos_forecast_raw)
+        if nbm_forecast_raw is not None and mos_forecast_raw is not None else None
+    )
+
+    if len(active_temps) == 1:
+        convergence_note = (
+            "NBM and GFS-MOS are not available — signal based on NWS AFM alone."
+        )
+    elif len(active_temps) == 2:
+        if nbm_forecast_raw is None:
+            # AFM + MOS only
+            if spread < 1.5:
+                convergence_note = f"NWS AFM and GFS-MOS are aligned (spread {spread:.1f}°F)."
+            elif model_divergence_f > 0:
+                convergence_note = (
+                    f"NWS is running {afm_mos_diff:.0f}°F warmer than GFS-MOS. "
+                    "The human forecaster may be capturing warm advection or a clearing "
+                    "that the model blend hasn't resolved yet."
+                )
+            else:
+                convergence_note = (
+                    f"NWS is running {afm_mos_diff:.0f}°F cooler than GFS-MOS. "
+                    "The forecaster may be factoring in marine influence, "
+                    "a cloud deck, or a cold pool the model blend doesn't resolve."
+                )
+        else:
+            # AFM + NBM, no MOS
+            if spread < 1.5:
+                convergence_note = f"NWS AFM and NBM are well-aligned (spread {spread:.1f}°F)."
+            elif nbm_divergence_f > 0:
+                convergence_note = (
+                    f"NWS AFM is {afm_nbm_diff:.0f}°F warmer than NBM. "
+                    "The human forecaster is bullish relative to the automated blend."
+                )
+            else:
+                convergence_note = (
+                    f"NWS AFM is {afm_nbm_diff:.0f}°F cooler than NBM — "
+                    "human forecast is on the cool side; NBM may be overestimating daytime heating."
+                )
+    else:
+        # All three available
+        if spread < 1.5:
+            convergence_note = (
+                f"All three model runs are well-aligned (spread {spread:.1f}°F) — "
+                "clean temperature signal, high confidence in the forecast."
             )
-        elif model_divergence_f > 0:
-            div_note = (
-                f"GFS-MOS guidance is {mos_forecast_raw:.0f}°F — the NWS forecaster is "
-                f"running {abs_div:.0f}°F WARMER than the model blend, suggesting local "
-                "warm-advection or sea-breeze break knowledge."
+        elif afm_mos_diff is not None and afm_mos_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
+            # AFM and MOS agree; NBM is outlier
+            nbm_dir = "warmer" if nbm_divergence_f < 0 else "cooler"
+            convergence_note = (
+                f"NWS AFM and GFS-MOS agree; NBM is the outlier, running "
+                f"{afm_nbm_diff:.0f}°F {nbm_dir}. "
+                "The automated blend may be overweighting a model that's out of phase today."
+            )
+        elif afm_nbm_diff is not None and afm_nbm_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
+            # AFM and NBM agree; MOS is outlier
+            mos_dir = "warmer" if model_divergence_f < 0 else "cooler"
+            convergence_note = (
+                f"NWS AFM and NBM are aligned; GFS-MOS is the outlier at {mos_forecast_raw:.0f}°F "
+                f"({afm_mos_diff:.0f}°F {mos_dir}). "
+                "GFS-MOS may be lagging on the latest pattern evolution."
+            )
+        elif spread >= 3.0:
+            convergence_note = (
+                f"Models are spread {spread:.0f}°F apart — genuine forecast uncertainty today. "
+                "NWS AFM is our primary input; use the bias spread as your uncertainty guide."
             )
         else:
-            div_note = (
-                f"GFS-MOS guidance is {mos_forecast_raw:.0f}°F — the NWS forecaster is "
-                f"running {abs_div:.0f}°F COOLER than the model blend, suggesting local "
-                "marine influence, cloud cover, or cold-pool knowledge."
+            convergence_note = (
+                f"Models show modest spread ({spread:.1f}°F). "
+                "NWS AFM leads; NBM and GFS-MOS are cross-checks."
             )
+
+    # Bias correction note
+    if bias_src in ("nws_fixed", "nws_era5_sigma"):
+        bias_note = (
+            f"NWS AFM is already human-calibrated — no additional bias correction applied. "
+            f"Uncertainty ±{bias_std:.1f}°F from station-level ERA5 historical error."
+        )
+    elif abs_bias < 0.3:
+        bias_note = (
+            f"Cluster/month bias is negligible ({bias_mean:+.1f}°F over {n_obs} days). "
+            f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F."
+        )
     else:
-        div_note = "GFS-MOS not available today — single-model signal only."
+        bias_note = (
+            f"Applying a {bias_mean:+.1f}°F cluster/month correction "
+            f"({abs_bias:.1f}°F {direction} over {n_obs} similar days). "
+            f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F "
+            f"(~68% of similar days land {lo1:.0f}–{hi1:.0f}°F)."
+        )
+
+    # TAF integrated into day outlook
+    cond_desc = _CONDITION_PLAIN.get(taf.condition, taf.condition)
+    if weather_gate == "hard_skip":
+        taf_note = (
+            f"TAF ALERT: {taf.summary} — dangerous conditions during peak heating window. "
+            "Temperature forecast is unreliable today."
+        )
+    elif weather_gate == "skip":
+        taf_note = (
+            f"TAF shows {cond_desc.lower()} during peak heating hours. "
+            "Fog/marine layer burn-off timing is uncertain and could suppress or delay the high. "
+            "Elevated uncertainty — not trading today."
+        )
+    elif weather_gate == "trade_cautious":
+        taf_note = (
+            f"TAF shows {cond_desc.lower()} (mostly cloudy) during peak heating hours — "
+            "cloud cover limits solar insolation and may keep the high 1–2°F below a clear-sky day. "
+            f"Trading with a raised edge requirement ({BROKEN_SKY_MIN_EDGE:.0%} vs normal {MIN_EDGE:.0%})."
+        )
+    elif taf.has_ts:
+        taf_note = (
+            "TAF mentions convective activity during or near peak heating — "
+            "afternoon temperatures may be capped by evaporative cooling."
+        )
+    elif taf.precip:
+        precip_str = ", ".join(taf.precip)
+        taf_note = (
+            f"TAF flags {precip_str} during the forecast period — "
+            "precipitation may limit daytime heating."
+        )
+    elif taf.condition in ("clear", "scattered", "") or not taf.condition:
+        taf_note = (
+            f"TAF shows {cond_desc.lower()} through peak heating hours — "
+            "favorable sky conditions for maximum daytime warming."
+        )
+    else:
+        taf_note = f"TAF: {taf.summary}."
+
+    if taf.has_amd:
+        taf_note += " ⚠ TAF amended since last check — Tier 2 monitor is watching for further changes."
 
     forecast_and_bias = (
-        f"The {src_label} forecast is {forecast_raw:.0f}°F. "
-        f"{div_note} "
-        f"{obs_desc}, {station} has historically run "
-        f"{abs_bias:.1f}°F {direction} than the model in conditions like today. "
-        f"Our adjusted forecast is {forecast_adjusted:.1f}°F, with a typical spread of "
-        f"±{bias_std:.1f}°F (roughly 68% of similar days land between "
-        f"{lo1:.0f}°F and {hi1:.0f}°F)."
+        f"Model runs: {model_snapshot}. "
+        f"{convergence_note} "
+        f"{bias_note} "
+        f"{taf_note} "
+        f"Targeting ~{forecast_adjusted:.0f}°F"
+        + (f" (±{bias_std:.1f}°F spread)" if bias_std > 0 else "")
+        + "."
     )
 
     # ── Market analysis ───────────────────────────────────────────────────
@@ -965,9 +1113,10 @@ def _build_reasoning(
 
     # ── Data sources ──────────────────────────────────────────────────────
     mos_src_str = f"GFS-MOS {mos_forecast_raw:.0f}°F" if mos_forecast_raw is not None else "unavailable"
+    nbm_src_str = f"NBM {nbm_forecast_raw:.0f}°F"     if nbm_forecast_raw is not None else "unavailable"
     data_sources = {
         "pattern":  f"{'Live Open-Meteo 500hPa' if data_source == 'openmeteo' else 'Reanalysis fallback'}",
-        "forecast": f"{src_label} (primary) | GFS-MOS: {mos_src_str}",
+        "forecast": f"{src_label} (primary) | NBM: {nbm_src_str} | GFS-MOS: {mos_src_str}",
         "bias":     f"{bias_src} — {n_obs} obs (model_source={model_source_used})",
         "taf":      f"aviationweather.gov ({taf.fetched_utc})",
         "metar":    f"aviationweather.gov ({metar.fetched_utc})",
@@ -1311,6 +1460,8 @@ def generate_signal(
         mos_forecast_raw=mos_forecast_raw,
         model_divergence_f=model_divergence_f,
         model_source_used=model_source_used,
+        nbm_forecast_raw=nbm_forecast_raw,
+        nbm_divergence_f=nbm_divergence_f,
     )
 
     logger.info(
