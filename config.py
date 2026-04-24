@@ -496,6 +496,7 @@ STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
 # ---------------------------------------------------------------------------
 MIN_EDGE             = 0.06   # minimum edge (normalized) required to enter a trade
 BROKEN_SKY_MIN_EDGE  = 0.10   # higher bar for broken/overcast conditions (trade_cautious gate)
+MIN_YES_ASK          = 0.04   # floor on Kalshi yes_ask — never enter below 4¢ (market pricing near-impossible)
 
 # Peak-window TAF scoring — how far around the expected high-temp hour to check
 TAF_PRE_PEAK_WINDOW_HOURS  = 3   # hours before peak to include (approaching storm matters)

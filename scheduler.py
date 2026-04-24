@@ -90,6 +90,7 @@ from config import (
     ENTRY_CUTOFF_PRE_PEAK_HOURS,
     MIN_EDGE,
     BROKEN_SKY_MIN_EDGE,
+    MIN_YES_ASK,
 )
 
 logger = setup_logging("scheduler")
@@ -97,6 +98,10 @@ logger = setup_logging("scheduler")
 # Shared state — written by scheduler, read by dashboard
 _latest_signals:   dict[str, TradeSignal] = {}
 _latest_signals_lock = threading.Lock()
+
+# Running-max cache: populated by exit pass, consumed by entry pass.
+# Prevents entering a bucket the temperature has already surpassed.
+_running_max_cache: dict[str, tuple[float, datetime]] = {}  # station → (max_f, fetched_at)
 
 _risk_manager: Optional[RiskManager] = None
 _kalshi:       Optional[KalshiClient] = None
@@ -441,6 +446,7 @@ def tier1_metar_entries_exits():
 
                 rm_data     = running_max_with_confluence(station, date.today())
                 running_max = rm_data["running_max_f"]
+                _running_max_cache[station] = (running_max, now_utc)
                 if not rm_data["in_confluence"]:
                     logger.warning("[Tier1] %s temp confluence issue: %s", station, rm_data["note"])
 
@@ -638,6 +644,12 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         snap_pre = kalshi.get_market_snapshot(station, sig.event_date, sig.top_bucket)
         if snap_pre is None or not snap_pre.is_open:
             return
+        if snap_pre.yes_ask < MIN_YES_ASK:
+            logger.info(
+                "[Tier1] %s WATCH: yes_ask=%.3f below floor %.3f — market near-impossible, skip",
+                station, snap_pre.yes_ask, MIN_YES_ASK,
+            )
+            return
         fresh_edge = sig.top_model_prob - snap_pre.yes_ask
         watch_threshold = BROKEN_SKY_MIN_EDGE if sig.weather_gate == "trade_cautious" else MIN_EDGE
         if fresh_edge < watch_threshold:
@@ -720,6 +732,41 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             station, sig.event_date.isoformat(), sig.top_bucket, LIQUIDITY_RETRY_INTERVAL_MIN
         )
         return
+
+    # YES_ASK floor guard: market pricing near-impossible — never enter
+    if snap.yes_ask < MIN_YES_ASK:
+        logger.info(
+            "[Tier1] %s yes_ask=%.3f below floor %.3f — skip",
+            station, snap.yes_ask, MIN_YES_ASK,
+        )
+        return
+
+    # Running-max guard: observed temp has already surpassed the bucket ceiling
+    _rm_cached = _running_max_cache.get(station)
+    if _rm_cached is not None and (now_utc - _rm_cached[1]).total_seconds() < 600:
+        entry_running_max = _rm_cached[0]
+    else:
+        try:
+            _rm_fresh = running_max_with_confluence(station, sig.event_date)
+            entry_running_max = _rm_fresh["running_max_f"]
+            _running_max_cache[station] = (entry_running_max, now_utc)
+        except Exception:
+            entry_running_max = None
+
+    if entry_running_max is not None:
+        if sig.top_bucket == KALSHI_BUCKET_LOWER_TAIL:
+            bucket_ceiling = KALSHI_BUCKET_LOWER_TAIL + 1   # "68 or below" busted once ≥ 69
+        elif sig.top_bucket == KALSHI_BUCKET_UPPER_TAIL:
+            bucket_ceiling = None                            # upper tail has no ceiling
+        else:
+            bucket_ceiling = sig.top_bucket + 2             # interior buckets: [lower, lower+2)
+
+        if bucket_ceiling is not None and entry_running_max >= bucket_ceiling:
+            logger.info(
+                "[Tier1] %s running_max %.1f°F ≥ bucket ceiling %.0f°F (bucket %d) — skip",
+                station, entry_running_max, bucket_ceiling, sig.top_bucket,
+            )
+            return
 
     fresh_edge = sig.top_model_prob - snap.yes_ask
     if fresh_edge < MIN_EDGE:
