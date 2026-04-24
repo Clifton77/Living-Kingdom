@@ -29,6 +29,7 @@ Kill switch halts all tiers immediately. Bot can resume from dashboard.
 
 from __future__ import annotations
 
+import dataclasses
 import signal
 import sys
 import threading
@@ -281,11 +282,10 @@ def tier2_taf_monitor():
 
                 # Block Tier 1 re-entry until the next Tier 3 run recomputes the signal.
                 # Write a HARD_SKIP into _latest_signals so Tier 1 sees it immediately.
-                import dataclasses as _dc
                 with _latest_signals_lock:
                     current = _latest_signals.get(station)
                     if current is not None:
-                        _latest_signals[station] = _dc.replace(
+                        _latest_signals[station] = dataclasses.replace(
                             current,
                             decision="HARD_SKIP",
                             weather_gate="hard_skip",
@@ -496,6 +496,21 @@ def tier1_metar_entries_exits():
                     if exit_decision.should_exit:
                         _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
                         _last_snapshot_time.pop(market_id, None)
+                        # After undershoot (peak passed), the day is over — block re-entry.
+                        if exit_decision.exit_type == "undershoot":
+                            with _latest_signals_lock:
+                                current_sig = _latest_signals.get(station)
+                                if current_sig is not None:
+                                    _latest_signals[station] = dataclasses.replace(
+                                        current_sig,
+                                        decision="HARD_SKIP",
+                                        weather_gate="hard_skip",
+                                    )
+                            logger.info(
+                                "[Tier1] %s → HARD_SKIP after undershoot exit — "
+                                "re-entry blocked until next Tier 3 run",
+                                station,
+                            )
                     else:
                         if exit_decision.urgency == "warning":
                             logger.warning(

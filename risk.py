@@ -106,6 +106,7 @@ class ExitDecision:
     should_exit:    bool
     reason:         str
     urgency:        str        # "immediate" | "recommended" | "warning" | "none"
+    exit_type:      str = "none"  # "undershoot" | "overshoot" | "stop_loss" | "reversal" | "early_profit" | "none"
 
 
 def evaluate_exit(
@@ -157,6 +158,7 @@ def evaluate_exit(
                 f"{stop_trigger:.2f} ({STOP_LOSS_PCT:.0%} of entry {pos.entry_price:.2f})"
             ),
             urgency="immediate",
+            exit_type="stop_loss",
         )
 
     # ── 2. Signal reversal stop ───────────────────────────────────────────
@@ -168,6 +170,7 @@ def evaluate_exit(
                 f"threshold {REVERSAL_EDGE_THRESHOLD:+.3f}"
             ),
             urgency="immediate",
+            exit_type="reversal",
         )
 
     # ── 3 & 4. Undershoot protection (requires intraday running max) ──────
@@ -187,6 +190,7 @@ def evaluate_exit(
                         f"Bucket {bucket_lo}–{bucket_hi}°F not reachable."
                     ),
                     urgency="immediate",
+                    exit_type="undershoot",
                 )
 
             elif local_hour >= peak_heating_hour - UNDERSHOOT_WARNING_LEAD_HOURS:
@@ -216,6 +220,7 @@ def evaluate_exit(
                     f"Locking in profit before potential retreat."
                 ),
                 urgency="recommended",
+                exit_type="overshoot",
             )
 
     # ── 6. Early profit exit ──────────────────────────────────────────────
@@ -248,6 +253,7 @@ def evaluate_exit(
                         f"{bucket_lo}–{bucket_hi}°F. Locking in profit."
                     ),
                     urgency="recommended",
+                    exit_type="early_profit",
                 )
         else:
             # No METAR data and before peak — take profit at high bid conservatively
@@ -258,6 +264,7 @@ def evaluate_exit(
                     "No METAR available to confirm — exiting conservatively."
                 ),
                 urgency="recommended",
+                exit_type="early_profit",
             )
 
     return ExitDecision(should_exit=False, reason="Hold — no exit condition met", urgency="none")
