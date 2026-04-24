@@ -1378,74 +1378,34 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
 def check_forecast_availability(event_date: date, probe_station: str = STATIONS[0]) -> dict:
     """
     Quick probe to confirm live forecast data is available for the target date.
-    Used by the scheduler before running a full Tier 3 pass — if data is missing,
-    the scheduler will retry rather than proceed with stale fallback numbers.
+    Used by the scheduler before running a full Tier 3 pass.
+    Probes NBM via Herbie — NOAA-direct, no throttling.
 
     Returns:
-        available : bool   — True if Open-Meteo has fresh data for event_date
+        available : bool   — True if NBM or NWS data is reachable
         source    : str    — "live" | "fallback" | "none"
         details   : str    — human-readable status for logging
     """
-    import requests as req
-    import time as _time
-    lat, lon = STATION_COORDS[settlement_station(probe_station)]
     try:
-        for attempt in range(3):
-            resp = req.get(
-                OPEN_METEO_FORECAST_URL,
-                params={
-                    "latitude":         lat,
-                    "longitude":        lon,
-                    "daily":            "temperature_2m_max",
-                    "temperature_unit": "fahrenheit",
-                    "forecast_days":    3,
-                    "timezone":         "UTC",
-                },
-                timeout=10,
-            )
-            if resp.status_code == 429:
-                # Rate limited — proceed anyway; per-station fallback handles it
-                logger.warning(
-                    "Forecast probe 429 (attempt %d/3) — proceeding with parquet fallback", attempt + 1
-                )
-                _time.sleep(5 * (attempt + 1))
-                if attempt == 2:
-                    return {
-                        "available": True,
-                        "source":    "fallback",
-                        "details":   "Open-Meteo rate limited — using parquet fallback per station",
-                    }
-                continue
-            resp.raise_for_status()
-            break
-
-        data     = resp.json()
-        dates    = data.get("daily", {}).get("time", [])
-        temps    = data.get("daily", {}).get("temperature_2m_max", [])
-        date_str = event_date.isoformat()
-
-        if date_str in dates:
-            idx = dates.index(date_str)
-            if temps[idx] is not None:
-                return {
-                    "available": True,
-                    "source":    "live",
-                    "details":   f"Open-Meteo has fresh data for {event_date} at {probe_station}",
-                }
-        # Date missing from Open-Meteo (late in day or model lag) — NWS is primary, proceed
+        nbm = fetch_nbm_forecast(probe_station, event_date)
+        if nbm is not None:
+            return {
+                "available": True,
+                "source":    "live",
+                "details":   f"NBM has fresh data for {event_date} at {probe_station} ({nbm:.1f}°F)",
+            }
+        # NBM unavailable — NWS AFM is primary and doesn't need a probe
         return {
             "available": True,
             "source":    "fallback",
-            "details":   f"Open-Meteo lacks {event_date} data — NWS primary will handle per station",
+            "details":   f"NBM unavailable for {event_date} — NWS AFM will handle per station",
         }
-
     except Exception as exc:
-        # Only gate on total network failure — NWS may still be reachable
         logger.warning("Forecast probe exception: %s — proceeding anyway", exc)
         return {
             "available": True,
             "source":    "fallback",
-            "details":   f"Open-Meteo probe failed ({exc}) — proceeding with NWS/CDO fallbacks",
+            "details":   f"Forecast probe failed ({exc}) — proceeding with NWS fallbacks",
         }
 
 
