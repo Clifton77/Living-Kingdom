@@ -1156,12 +1156,10 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Best-edge bucket selection.
-    # Pool: all buckets where our model assigns >= MIN_BUCKET_PROB probability.
-    # This filters out extreme tails we deem very unlikely while still allowing
-    # tail buckets with genuine edge (market underpricing tail risk).
-    # When no candidate has positive edge, fall back to the modal interior bucket
-    # so WATCH signals track the most likely outcome.
+    # Bucket selection: find the bucket the forecast actually falls in.
+    # The market's pricing of low-probability buckets reflects real-world
+    # likelihood — cheap tails are cheap for a reason. We trade what our
+    # forecast points to, not whatever bucket happens to have computed edge.
     interior_buckets = [
         b for b in bucket_analyses
         if b.bucket_lower not in (live_lower_tail, live_upper_tail)
@@ -1172,33 +1170,32 @@ def generate_signal(
         [b.bucket_lower for b in interior_buckets], forecast_adjusted,
     )
 
-    candidates = [b for b in bucket_analyses if b.model_prob >= MIN_BUCKET_PROB]
-    if not candidates:
-        candidates = bucket_analyses  # degenerate — all buckets below floor
+    # Find the bucket the forecast lands in.
+    # For the lower tail: forecast < lower_tail + 1.0 (bucket covers −∞ to lower_tail+0.5)
+    # For the upper tail: forecast >= upper_tail − 0.5
+    # For interior: forecast falls between bucket_lower−0.5 and bucket_lower+1.5
+    def _forecast_bucket(fc: float) -> BucketAnalysis | None:
+        for b in bucket_analyses:
+            if b.bucket_lower == live_lower_tail:
+                if fc < live_lower_tail + 1.0:
+                    return b
+            elif b.bucket_lower == live_upper_tail:
+                if fc >= live_upper_tail - 0.5:
+                    return b
+            else:
+                if b.bucket_lower - 0.5 <= fc < b.bucket_lower + 1.5:
+                    return b
+        return None
 
-    best_edge_bucket = max(candidates, key=lambda b: b.edge)
-
-    if best_edge_bucket.edge > 0:
-        top = best_edge_bucket
-        # Log when we deviate from the modal bucket so we can audit the choice
-        modal = (
+    forecast_bucket = _forecast_bucket(forecast_adjusted)
+    if forecast_bucket is None:
+        # Fallback: nearest interior bucket by distance
+        forecast_bucket = (
             min(interior_buckets, key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
-            if interior_buckets else best_edge_bucket
+            if interior_buckets else max(bucket_analyses, key=lambda b: b.model_prob)
         )
-        if top.bucket_lower != modal.bucket_lower:
-            logger.info(
-                "%s best-edge bucket %s (edge=%.3f model=%.1f%%) differs from modal %s "
-                "(edge=%.3f model=%.1f%%)",
-                station, top.bucket_label, top.edge, top.model_prob * 100,
-                modal.bucket_label, modal.edge, modal.model_prob * 100,
-            )
-    else:
-        # No bucket has positive edge — WATCH on the modal bucket
-        if interior_buckets:
-            top = min(interior_buckets,
-                      key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
-        else:
-            top = max(bucket_analyses, key=lambda b: b.model_prob)
+
+    top = forecast_bucket
 
     # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
     if mos_forecast_raw is not None and model_divergence_f is not None:
