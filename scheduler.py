@@ -434,6 +434,15 @@ def tier1_metar_entries_exits():
                     logger.warning("[Tier1] %s METAR failed (temp=%s) — skipping exit pass", station, obs_temp)
                     continue
 
+                # Push METAR to dashboard for every station every cycle
+                push_event("metar_update", {
+                    "station":    station,
+                    "temp_f":     obs_temp,
+                    "wind_kt":    metar.wind_kt,
+                    "dewpoint_f": metar.dewpoint_f,
+                    "sky_cover":  metar.sky_cover or "—",
+                })
+
                 station_positions = {
                     mid: pos for mid, pos in rm.state.positions.items()
                     if pos.station == station
@@ -1017,8 +1026,22 @@ def tier3_full_signal_pass(event_date: date | None = None):
     with _latest_signals_lock:
         _latest_signals.update(signals)
     for station, sig in signals.items():
-        push_event("signal_update", {"station": station, "decision": sig.decision,
-                                     "top_edge": sig.top_edge, "top_bucket": sig.top_bucket})
+        push_event("signal_update", {
+            "station":           station,
+            "decision":          sig.decision,
+            "top_edge":          sig.top_edge,
+            "top_bucket":        sig.top_bucket,
+            "top_model_prob":    sig.top_model_prob,
+            "top_kalshi_prob":   sig.top_kalshi_prob,
+            "forecast_adjusted": sig.forecast_adjusted,
+            "bias_std":          sig.bias_std,
+            "model_divergence_f": sig.model_divergence_f,
+            "live_lower_tail":   sig.live_lower_tail,
+            "live_upper_tail":   sig.live_upper_tail,
+            "cluster_id":        sig.cluster_id,
+            "season":            sig.season,
+            "n_obs":             sig.n_obs,
+        })
 
     # Log WATCH/SKIP/HARD_SKIP decisions to Sheets for review
     sheets = get_sheets_logger()

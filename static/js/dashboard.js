@@ -155,22 +155,103 @@ function initSSE() {
   const _noCardsOnLoad = document.querySelectorAll('#signal-cards [data-station]').length === 0;
   let _reloadScheduled = false;
 
+  src.addEventListener('metar_update', e => {
+    const d = JSON.parse(e.data);
+    const s = d.station;
+
+    // Weather widget
+    const tempEl = document.getElementById(`wx-temp-${s}`);
+    if (tempEl && d.temp_f != null) {
+      const t   = Math.round(d.temp_f);
+      const cls = t < 45 ? 'cold' : (t > 95 ? 'hot' : (t > 80 ? 'warm' : 'mild'));
+      tempEl.textContent = `${t}°F`;
+      tempEl.className   = `wb-wx-temp wb-temp-${cls}`;
+    }
+    const windEl = document.getElementById(`wx-wind-${s}`);
+    if (windEl && d.wind_kt != null) windEl.textContent = `${Math.round(d.wind_kt)}kt`;
+    const dewEl = document.getElementById(`wx-dew-${s}`);
+    if (dewEl && d.dewpoint_f != null) dewEl.textContent = `DP ${Math.round(d.dewpoint_f)}°F`;
+    const skyEl = document.getElementById(`wx-sky-${s}`);
+    if (skyEl && d.sky_cover) skyEl.textContent = d.sky_cover;
+
+    // Obs tracking row
+    const obsTempEl = document.getElementById(`obs-temp-${s}`);
+    if (obsTempEl && d.temp_f != null) obsTempEl.textContent = `${Math.round(d.temp_f)}°F`;
+    const sig = _signals[s] || {};
+    if (sig.forecast_adjusted != null && d.temp_f != null) {
+      const divF   = d.temp_f - sig.forecast_adjusted;
+      const divCls = divF > 4 ? 'hot' : (divF < -4 ? 'cold' : 'ok');
+      const arrow  = divCls === 'hot' ? ' ▲' : (divCls === 'cold' ? ' ▼' : ' ≈');
+      const obsDivEl = document.getElementById(`obs-div-${s}`);
+      if (obsDivEl) {
+        obsDivEl.textContent = `${divF >= 0 ? '+' : ''}${Math.round(divF)}°F${arrow}`;
+        obsDivEl.className   = `wb-divergence-flag wb-divergence-${divCls}`;
+      }
+    }
+  });
+
   src.addEventListener('signal_update', e => {
     const d = JSON.parse(e.data);
 
     if (_noCardsOnLoad && !_reloadScheduled) {
       _reloadScheduled = true;
-      // Wait 4s so Tier 3 finishes pushing all station updates before we reload
       setTimeout(() => location.reload(), 4000);
       return;
     }
 
+    // Update _signals cache with fresh data
+    _signals[d.station] = Object.assign(_signals[d.station] || {}, d);
+
+    // Decision badge + card border
     flashSignalCard(d.station, d.decision);
-    const el = document.querySelector(`[data-station="${d.station}"] .wb-decision-badge`);
-    if (el) {
-      el.textContent = d.decision;
-      el.className = `wb-decision-badge badge wb-badge-${d.decision.toLowerCase()}`;
+    const badgeEl = document.querySelector(`[data-station="${d.station}"] .wb-decision-badge`);
+    if (badgeEl) {
+      badgeEl.textContent = d.decision;
+      badgeEl.className   = `wb-decision-badge badge wb-badge-${d.decision.toLowerCase()}`;
     }
+
+    // Forecast temp
+    const fcstEl = document.getElementById(`fcst-temp-${d.station}`);
+    if (fcstEl && d.forecast_adjusted != null) {
+      const t   = Math.round(d.forecast_adjusted);
+      const cls = t < 45 ? 'cold' : (t > 95 ? 'hot' : (t > 80 ? 'warm' : 'mild'));
+      fcstEl.textContent = `${t}°F`;
+      fcstEl.className   = `fw-bold fs-5 wb-temp-${cls}`;
+    }
+    const stdEl = document.getElementById(`fcst-std-${d.station}`);
+    if (stdEl && d.bias_std != null) stdEl.textContent = `±${d.bias_std.toFixed(1)}°F`;
+
+    const divEl = document.getElementById(`fcst-div-${d.station}`);
+    if (divEl && d.model_divergence_f != null) {
+      const sign   = d.model_divergence_f >= 0 ? '+' : '';
+      const bgCls  = d.model_divergence_f > 2 ? 'bg-warning text-dark' : (d.model_divergence_f < -2 ? 'bg-info text-dark' : 'bg-secondary');
+      divEl.textContent = `NWS ${sign}${Math.round(d.model_divergence_f)}°F vs MOS`;
+      divEl.className   = `badge ${bgCls} wb-mos-badge`;
+    }
+
+    // Top bucket row
+    const lowerTail = d.live_lower_tail !== undefined ? d.live_lower_tail : 68;
+    const upperTail = d.live_upper_tail !== undefined ? d.live_upper_tail : 77;
+    const bucketEl  = document.getElementById(`top-bucket-${d.station}`);
+    if (bucketEl && d.top_bucket != null) bucketEl.textContent = fmtBucket(d.top_bucket, lowerTail, upperTail);
+
+    const modelProbEl = document.getElementById(`top-model-prob-${d.station}`);
+    if (modelProbEl && d.top_model_prob != null) modelProbEl.textContent = `${Math.round(d.top_model_prob * 100)}%`;
+
+    const kalshiProbEl = document.getElementById(`top-kalshi-prob-${d.station}`);
+    if (kalshiProbEl && d.top_kalshi_prob != null) kalshiProbEl.textContent = `${Math.round(d.top_kalshi_prob * 100)}%`;
+
+    const edgeEl = document.getElementById(`top-edge-${d.station}`);
+    if (edgeEl && d.top_edge != null) {
+      edgeEl.textContent = `${d.top_edge >= 0 ? '+' : ''}${d.top_edge.toFixed(2)}`;
+      edgeEl.className   = d.top_edge > 0 ? 'text-success fw-bold' : 'text-danger';
+    }
+
+    const clusterEl = document.getElementById(`fcst-cluster-${d.station}`);
+    if (clusterEl && d.cluster_id != null) {
+      clusterEl.textContent = `Cluster ${d.cluster_id} · ${d.season} · n=${d.n_obs}`;
+    }
+
     const signalsUpdated = document.getElementById('signals-updated');
     if (signalsUpdated) signalsUpdated.textContent = `Updated ${nowStr()}`;
   });
