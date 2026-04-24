@@ -500,6 +500,15 @@ def tier1_metar_entries_exits():
                         exit_decision.reason,
                     )
 
+                    # Push live price update to dashboard on every cycle
+                    push_event("position_price_update", {
+                        "market_id":     market_id,
+                        "current_bid":   snap.yes_bid,
+                        "current_ask":   snap.yes_ask,
+                        "unrealized_pnl": round(pos.unrealized_pnl, 4),
+                        "pnl_pct":       round(pos.pnl_pct, 2),
+                    })
+
                     if exit_decision.should_exit:
                         _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
                         _last_snapshot_time.pop(market_id, None)

@@ -121,6 +121,27 @@ function initSSE() {
     });
   });
 
+  src.addEventListener('position_price_update', e => {
+    const d       = JSON.parse(e.data);
+    const safeMid = d.market_id.replace(/-/g, '_');
+    const sign    = d.unrealized_pnl >= 0 ? '+' : '';
+
+    const bidEl = document.getElementById(`pos-bid-${safeMid}`);
+    if (bidEl) bidEl.textContent = `$${d.current_bid.toFixed(2)}`;
+
+    const badgeEl = document.getElementById(`pos-badge-${safeMid}`);
+    if (badgeEl) {
+      badgeEl.textContent = `$${sign}${d.unrealized_pnl.toFixed(2)}`;
+      badgeEl.className   = `badge ${d.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger'} fs-6`;
+    }
+
+    const pctEl = document.getElementById(`pos-pct-${safeMid}`);
+    if (pctEl) {
+      pctEl.textContent = `${d.pnl_pct >= 0 ? '+' : ''}${d.pnl_pct.toFixed(1)}%`;
+      pctEl.className   = `${d.pnl_pct >= 0 ? 'text-success' : 'text-danger'} fw-bold`;
+    }
+  });
+
   src.addEventListener('position_closed', e => {
     const d = JSON.parse(e.data);
     removeCarouselCard(d.market_id);
