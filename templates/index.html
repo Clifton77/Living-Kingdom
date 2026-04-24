@@ -296,6 +296,7 @@
           {% endif %}
 
           <!-- ── Top bucket row ── -->
+          {% if sig.decision not in ('SKIP', 'HARD_SKIP') %}
           <div class="wb-bucket-highlight rounded p-2 mb-2">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
@@ -312,6 +313,11 @@
               </span>
             </div>
           </div>
+          {% else %}
+          <div class="wb-bucket-highlight rounded p-2 mb-2 text-muted small">
+            {{ sig.reasoning if sig.reasoning is string else sig.reasoning.decision_rationale if sig.reasoning else 'Skipped' }}
+          </div>
+          {% endif %}
 
           <!-- ── Kelly row ── -->
           <div class="text-muted small mb-2">

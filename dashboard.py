@@ -27,6 +27,7 @@ from utils.logging_config import setup_logging
 logger = setup_logging("dashboard")
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # ---------------------------------------------------------------------------
 # Settings override — live threshold adjustments persist across restarts
