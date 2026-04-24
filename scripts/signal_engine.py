@@ -44,6 +44,7 @@ from config import (
     MAX_STAKE_PCT,
     MIN_N_OBS,
     MIN_EDGE,
+    BROKEN_SKY_MIN_EDGE,
     BIAS_STD_GATE,
     CONFIDENCE_KELLY_SCALE,
     MIN_PROB_RATIO,
@@ -134,7 +135,7 @@ class TradeSignal:
     kelly_contracts:    int
 
     # Weather gate
-    weather_gate:       str            # "trade" | "skip" | "hard_skip"
+    weather_gate:       str            # "trade" | "trade_cautious" | "skip" | "hard_skip"
     taf:                TafResult
     metar:              MetarResult
 
@@ -857,6 +858,12 @@ def _build_reasoning(
         penalty_note = f"Weather gate: HARD SKIP ({cond_desc}) — conditions too dangerous to trade."
     elif weather_gate == "skip":
         penalty_note = f"Weather gate: SKIP ({cond_desc}) — elevated uncertainty, not trading today."
+    elif weather_gate == "trade_cautious":
+        gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
+        penalty_note = (
+            f"Weather gate: CAUTIOUS TRADE ({cond_desc}) — broken/overcast skies. "
+            f"Edge must clear {BROKEN_SKY_MIN_EDGE:.0%} minimum (vs normal {MIN_EDGE:.0%}).{gate_suffix}"
+        )
     else:
         gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
         penalty_note = (
@@ -884,9 +891,12 @@ def _build_reasoning(
             f"Edge of {top_bucket.edge:+.3f} clears our required threshold."
         )
     elif decision == "WATCH":
+        _watch_threshold = BROKEN_SKY_MIN_EDGE if weather_gate == "trade_cautious" else MIN_EDGE
         decision_rationale = (
             f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
-            f"our {MIN_EDGE:.2f} minimum. Not enough margin to trade today."
+            f"our {_watch_threshold:.2f} minimum"
+            + (" (raised for broken/overcast conditions)" if weather_gate == "trade_cautious" else "")
+            + ". Not enough margin to trade today."
         )
     elif decision == "HARD_SKIP":
         decision_rationale = (
@@ -1251,10 +1261,11 @@ def generate_signal(
             **_fcst_kwargs,
         )
 
-    # Entry decision — edge must clear MIN_EDGE (weather and uncertainty already gated above).
+    # Entry decision — edge must clear MIN_EDGE (or BROKEN_SKY_MIN_EDGE for broken/overcast).
     # WATCH means edge is positive but below minimum; Tier1 re-checks live price
-    # every 5 min and promotes to TRADE if the ask drops enough to clear MIN_EDGE.
-    if top.edge >= MIN_EDGE:
+    # every 5 min and promotes to TRADE if the ask drops enough to clear the threshold.
+    edge_threshold = BROKEN_SKY_MIN_EDGE if weather_gate == "trade_cautious" else MIN_EDGE
+    if top.edge >= edge_threshold:
         decision = "TRADE"
     else:
         decision = "WATCH"

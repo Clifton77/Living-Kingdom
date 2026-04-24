@@ -89,6 +89,7 @@ from config import (
     SNAPSHOT_INTERVAL_MIN,
     ENTRY_CUTOFF_PRE_PEAK_HOURS,
     MIN_EDGE,
+    BROKEN_SKY_MIN_EDGE,
 )
 
 logger = setup_logging("scheduler")
@@ -627,11 +628,12 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         if snap_pre is None or not snap_pre.is_open:
             return
         fresh_edge = sig.top_model_prob - snap_pre.yes_ask
-        if fresh_edge < MIN_EDGE:
+        watch_threshold = BROKEN_SKY_MIN_EDGE if sig.weather_gate == "trade_cautious" else MIN_EDGE
+        if fresh_edge < watch_threshold:
             return  # still below minimum — remain WATCH
         logger.info(
             "[Tier1] %s WATCH promoted: live edge=%+.3f ≥ min_edge=%.2f — entering",
-            station, fresh_edge, MIN_EDGE,
+            station, fresh_edge, watch_threshold,
         )
         # Fall through to new-position entry logic below
 
