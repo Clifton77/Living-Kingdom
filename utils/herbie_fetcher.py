@@ -39,10 +39,14 @@ def fetch_nbm_tmax(lat: float, lon: float, event_date: date) -> Optional[float]:
                     fxx=fxx,
                     verbose=False,
                 )
-                ds = H.xarray(":TMAX:2 m above ground:", remove_grib=True)
-                val = float(
-                    ds["tmax"].sel(latitude=lat, longitude=lon360, method="nearest").values
-                )
+                ds = H.xarray(":TMAX:2 m above ground:12-24 hour max fcst:", remove_grib=True)
+                tmax_var = [v for v in ds.data_vars if "tmax" in v.lower()][0]
+                # Grid uses (y,x) dims — find nearest point by distance
+                lats2d = ds["latitude"].values
+                lons2d = ds["longitude"].values
+                dist   = (lats2d - lat) ** 2 + (lons2d - lon360) ** 2
+                yi, xi = np.unravel_index(dist.argmin(), dist.shape)
+                val = float(ds[tmax_var].values[yi, xi])
                 # NBM TMAX is in Kelvin
                 temp_f = (val - 273.15) * 9.0 / 5.0 + 32.0
                 if 0.0 < temp_f < 135.0:
@@ -99,13 +103,24 @@ def fetch_gfs_z500(target_date: date) -> Optional[pd.Series]:
         lats     = np.arange(LAT_BOUNDS[0],  LAT_BOUNDS[1]  + 0.01, 2.5)
         lons_360 = np.arange(LON_BOUNDS[0],  LON_BOUNDS[1]  + 0.01, 2.5)
 
+        gh_vals  = ds["gh"].values  # may be (lat, lon) or (y, x)
+        lat_coord = ds["latitude"].values
+        lon_coord = ds["longitude"].values
+
         cols = {}
         for lat in lats:
             for lon in lons_360:
                 col = f"lat_{lat:.1f}_lon_{lon:.1f}"
-                val = float(
-                    ds["gh"].sel(latitude=lat, longitude=lon, method="nearest").values
-                )
+                if lat_coord.ndim == 1:
+                    # Regular grid — direct index
+                    li = int(np.argmin(np.abs(lat_coord - lat)))
+                    lo = int(np.argmin(np.abs(lon_coord - lon)))
+                    val = float(gh_vals[li, lo])
+                else:
+                    # Curvilinear grid (y, x) — find nearest by distance
+                    dist = (lat_coord - lat) ** 2 + (lon_coord - lon) ** 2
+                    yi, xi = np.unravel_index(dist.argmin(), dist.shape)
+                    val = float(gh_vals[yi, xi])
                 cols[col] = val
 
         series = pd.Series(cols)
