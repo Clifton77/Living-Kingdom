@@ -1403,12 +1403,16 @@ def generate_signal(
         kelly_contracts = int(math.floor(kelly_usd / top.yes_ask)) if top.yes_ask > 0 else 0
         kelly_usd       = round(kelly_contracts * top.yes_ask, 2)
 
-    # Enforce minimum stake
+    # Enforce minimum stake — floor at MIN_KELLY_STAKE rather than downgrading to WATCH.
+    # With market-led selection the top bucket often has yes_ask > model_prob (negative
+    # Kelly edge), but we enter anyway with minimum size since the market confirms the range.
     if decision == "TRADE" and kelly_usd < MIN_KELLY_STAKE:
-        decision = "WATCH"
+        kelly_contracts = max(1, int(math.floor(MIN_KELLY_STAKE / top.yes_ask))) if top.yes_ask > 0 else 1
+        kelly_usd       = round(kelly_contracts * top.yes_ask, 2)
+        kelly_frac      = round(kelly_usd / bankroll, 6) if bankroll > 0 else 0.0
         logger.info(
-            "%s — Kelly stake $%.2f below minimum $%.2f → WATCH",
-            station, kelly_usd, MIN_KELLY_STAKE,
+            "%s — Kelly floored to min stake: %d contract(s) @ $%.2f = $%.2f",
+            station, kelly_contracts, top.yes_ask, kelly_usd,
         )
 
     # ── 9. Structured plain-English reasoning ────────────────────────────
