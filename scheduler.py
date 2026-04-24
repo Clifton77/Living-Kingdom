@@ -603,6 +603,17 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if sig is None:
         return
 
+    # Guard: signal must be for the intended event date.
+    # Mismatches happen when _latest_signals holds a stale signal from a
+    # different day (e.g. Day-1 trigger wrote tomorrow's signal but
+    # same-day window is still open for this station).
+    if sig.event_date != event_date:
+        logger.debug(
+            "[Tier1] %s signal date %s ≠ target %s — skipping entry",
+            station, sig.event_date, event_date,
+        )
+        return
+
     # No trades on weather prohibits or stale model data
     if sig.decision == "HARD_SKIP":
         return
@@ -845,11 +856,14 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
 
 def _tier3_day1_market_open():
     """
-    Wrapper for the 14:05 UTC Day-1 market-open trigger.
-    Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC).
-    event_date must be tomorrow — computed at job runtime, not at scheduler init.
+    14:05 UTC Day-1 market-open trigger.
+    Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC), but most
+    stations are still in their same-day window at that hour (eastern cutoff
+    ~17:00 UTC, western ~21:00 UTC).  Using per-station dates avoids
+    overwriting active same-day signals with tomorrow's data.  Each station
+    naturally transitions to tomorrow's signal once its same-day cutoff passes.
     """
-    tier3_full_signal_pass(event_date=date.today() + timedelta(days=1))
+    tier3_full_signal_pass(event_date=None)  # per-station dates via _get_entry_event_date
 
 
 def tier3_full_signal_pass(event_date: date | None = None):
