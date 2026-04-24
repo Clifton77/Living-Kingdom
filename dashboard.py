@@ -15,9 +15,10 @@ import math
 import os
 import threading
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import config as cfg
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -112,6 +113,59 @@ def _safe_dict(obj) -> Any:
     return str(obj)
 
 
+def _enrich_position_display(pos: dict, now_utc: datetime) -> dict:
+    """Add display-friendly fields to a serialized position dict."""
+    station = pos.get("station", "")
+    tz      = ZoneInfo(cfg.STATION_TIMEZONES.get(station, "UTC"))
+
+    # ── Entry time: local clock + relative elapsed ────────────────────────
+    entry_iso = pos.get("entry_time", "")
+    if entry_iso:
+        try:
+            entry_utc   = datetime.fromisoformat(entry_iso)
+            entry_local = entry_utc.astimezone(tz)
+            # Cross-platform 12-hour format (avoid %-I which is Linux-only)
+            h    = entry_local.hour % 12 or 12
+            ampm = "AM" if entry_local.hour < 12 else "PM"
+            tz_abbr = entry_local.strftime("%Z")
+            local_str = f"{h}:{entry_local.strftime('%M')} {ampm} {tz_abbr}"
+
+            elapsed_s = int((now_utc - entry_utc).total_seconds())
+            if elapsed_s < 60:
+                rel = "just now"
+            elif elapsed_s < 3600:
+                rel = f"{elapsed_s // 60}m ago"
+            else:
+                rel = f"{elapsed_s // 3600}h ago"
+
+            pos["entry_time_display"] = f"{local_str} · {rel}"
+        except Exception:
+            pos["entry_time_display"] = entry_iso
+    else:
+        pos["entry_time_display"] = "—"
+
+    # ── Event date: Today / Tomorrow / date string ────────────────────────
+    event_date_str = pos.get("event_date", "")
+    if event_date_str:
+        try:
+            event_d   = date.fromisoformat(event_date_str)
+            today     = now_utc.date()
+            tomorrow  = today + timedelta(days=1)
+            month_day = event_d.strftime("%b ") + str(event_d.day)
+            if event_d == today:
+                pos["event_date_display"] = f"Today ({month_day})"
+            elif event_d == tomorrow:
+                pos["event_date_display"] = f"Tomorrow ({month_day})"
+            else:
+                pos["event_date_display"] = month_day
+        except Exception:
+            pos["event_date_display"] = event_date_str
+    else:
+        pos["event_date_display"] = "—"
+
+    return pos
+
+
 def _get_full_state() -> dict:
     """Build a complete state snapshot for initial page render or /api/state."""
     from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_closed_trades
@@ -120,9 +174,10 @@ def _get_full_state() -> dict:
     summary = rm.summary()
     signals = get_latest_signals()
 
+    now_utc = datetime.now(timezone.utc)
     positions_out = {}
     for mid, pos in rm.state.positions.items():
-        positions_out[mid] = _safe_dict(pos)
+        positions_out[mid] = _enrich_position_display(_safe_dict(pos), now_utc)
 
     signals_out = {}
     for station, sig in signals.items():

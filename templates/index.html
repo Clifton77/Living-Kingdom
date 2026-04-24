@@ -147,7 +147,7 @@
                   {% set pos_sig = initial_state.signals.get(pos.station) %}
                   {% set p_lower = pos_sig.live_lower_tail if pos_sig else 68 %}
                   {% set p_upper = pos_sig.live_upper_tail if pos_sig else 77 %}
-                  <span class="ms-2 text-muted">{% if pos.bucket_lower == p_lower %}≤{{ p_lower }}{% elif pos.bucket_lower == p_upper %}≥{{ p_upper }}{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
+                  <span class="badge bg-secondary ms-1">{% if pos.bucket_lower == p_lower %}≤{{ p_lower }}{% elif pos.bucket_lower == p_upper %}≥{{ p_upper }}{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
                 </div>
                 <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
                       id="pos-badge-{{ market_id|replace('-','_') }}">
@@ -178,8 +178,8 @@
               <div class="row g-1 text-muted small mb-3">
                 <div class="col-6">Contracts: <span class="text-body">{{ pos.contracts }}</span></div>
                 <div class="col-6">Stake: <span class="text-body">${{ "%.2f"|format(pos.entry_usd) }}</span></div>
-                <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time }}</span></div>
-                <div class="col-12">Event: <span class="text-body">{{ pos.event_date }}</span></div>
+                <div class="col-12">Entered: <span class="text-body">{{ pos.entry_time_display }}</span></div>
+                <div class="col-12">Market: <span class="text-body">{{ pos.event_date_display }}</span></div>
               </div>
               <!-- Actions -->
               <div class="d-flex gap-2">
