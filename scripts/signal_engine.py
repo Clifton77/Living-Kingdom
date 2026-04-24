@@ -1077,10 +1077,18 @@ def generate_signal(
             pattern, forecast_raw, bias_info, forecast_adjusted,
         )
 
+    _fcst_kwargs = dict(
+        forecast_raw=forecast_raw, forecast_adjusted=forecast_adjusted,
+        bias_mean=bias_mean, bias_std=bias_std, n_obs=bias_info["n_obs"],
+        mos_forecast_raw=mos_forecast_raw, model_divergence_f=model_divergence_f,
+        nbm_forecast_raw=nbm_forecast_raw, nbm_divergence_f=nbm_divergence_f,
+    )
+
     if weather_gate == "skip":
         return _skip_signal(
             station, event_date, local_time_str, taf, metar,
             pattern, f"Weather gate SKIP: {taf.condition} — {taf.summary}",
+            **_fcst_kwargs,
         )
 
     # ── 4b. Forecast uncertainty gate ───────────────────────────────────
@@ -1093,6 +1101,7 @@ def generate_signal(
         return _skip_signal(
             station, event_date, local_time_str, taf, metar,
             pattern, f"Forecast uncertainty too high: bias_std={bias_std:.1f}°F > {BIAS_STD_GATE}°F",
+            **_fcst_kwargs,
         )
 
     # ── 5. Kalshi snapshots (fetch first — needed for live bucket bounds) ───
@@ -1101,7 +1110,7 @@ def generate_signal(
     if not snapshots:
         logger.warning("%s — no Kalshi snapshots available", station)
         return _skip_signal(station, event_date, local_time_str, taf, metar,
-                            pattern, "No Kalshi market data")
+                            pattern, "No Kalshi market data", **_fcst_kwargs)
 
     # ── 6. Probability distribution over live Kalshi buckets ─────────────
     live_buckets = sorted(snapshots.keys())
@@ -1157,7 +1166,8 @@ def generate_signal(
 
     if not bucket_analyses:
         return _skip_signal(station, event_date, local_time_str, taf, metar,
-                            pattern, "No bucket overlap between model and Kalshi")
+                            pattern, "No bucket overlap between model and Kalshi",
+                            **_fcst_kwargs)
 
     # Log low-probability buckets for informational purposes
     peak_prob = max(b.model_prob for b in bucket_analyses)
@@ -1223,6 +1233,7 @@ def generate_signal(
                 station, event_date, local_time_str, taf, metar, pattern,
                 f"NWS/MOS divergence {abs(model_divergence_f):.1f}°F > "
                 f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
+                **_fcst_kwargs,
             )
 
     # NBM divergence gate — tighter than MOS since NBM is higher-quality guidance
@@ -1237,6 +1248,7 @@ def generate_signal(
             station, event_date, local_time_str, taf, metar, pattern,
             f"NWS/NBM divergence {abs(nbm_divergence_f):.1f}°F > "
             f"{NBM_DIVERGENCE_GATE}°F — sources disagree",
+            **_fcst_kwargs,
         )
 
     # Entry decision — edge must clear MIN_EDGE (weather and uncertainty already gated above).
@@ -1335,18 +1347,25 @@ def generate_signal(
 
 
 def _skip_signal(station, event_date, local_time, taf, metar,
-                 pattern, reason) -> TradeSignal:
+                 pattern, reason,
+                 forecast_raw=0.0, forecast_adjusted=0.0,
+                 bias_mean=0.0, bias_std=0.0, n_obs=0,
+                 mos_forecast_raw=None, model_divergence_f=None,
+                 nbm_forecast_raw=None, nbm_divergence_f=None) -> TradeSignal:
     return TradeSignal(
         station=station, event_date=event_date, local_time=local_time,
         decision="SKIP",
-        forecast_raw=0.0, bias_mean=0.0, bias_std=0.0, forecast_adjusted=0.0,
+        forecast_raw=forecast_raw, bias_mean=bias_mean,
+        bias_std=bias_std, forecast_adjusted=forecast_adjusted,
         cluster_id=pattern.get("cluster_id", -1),
         season=pattern.get("season", "?"),
-        n_obs=0, pattern_confidence="low",
+        n_obs=n_obs, pattern_confidence=pattern.get("confidence", "low"),
         top_bucket=0, top_edge=0.0, top_model_prob=0.0,
         top_kalshi_prob=0.0, top_yes_ask=0.0,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
         weather_gate="skip", taf=taf, metar=metar,
+        mos_forecast_raw=mos_forecast_raw, model_divergence_f=model_divergence_f,
+        nbm_forecast_raw=nbm_forecast_raw, nbm_divergence_f=nbm_divergence_f,
         buckets=[], reasoning=f"Skipped: {reason}",
     )
 
