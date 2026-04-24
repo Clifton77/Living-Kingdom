@@ -198,6 +198,15 @@ def tier2_taf_monitor():
             else:
                 taf = interpret_taf(station)
 
+            # Push TAF condition to dashboard for every station every Tier 2 cycle
+            push_event("taf_update", {
+                "station":   station,
+                "sky_cover": taf.sky_cover,
+                "condition": taf.condition,
+                "has_amd":   taf.has_amd,
+                "summary":   taf.summary or "",
+            })
+
             if not taf.has_amd:
                 continue
 
@@ -669,6 +678,14 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             )
             return
         fresh_edge = sig.top_model_prob - snap_pre.yes_ask
+        push_event("kalshi_top_update", {
+            "station":        station,
+            "top_bucket":     sig.top_bucket,
+            "yes_ask":        snap_pre.yes_ask,
+            "yes_bid":        snap_pre.yes_bid,
+            "fresh_edge":     round(fresh_edge, 4),
+            "top_model_prob": sig.top_model_prob,
+        })
         watch_threshold = BROKEN_SKY_MIN_EDGE if sig.weather_gate == "trade_cautious" else MIN_EDGE
         if fresh_edge < watch_threshold:
             return  # still below minimum — remain WATCH
@@ -787,6 +804,14 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             return
 
     fresh_edge = sig.top_model_prob - snap.yes_ask
+    push_event("kalshi_top_update", {
+        "station":        station,
+        "top_bucket":     sig.top_bucket,
+        "yes_ask":        snap.yes_ask,
+        "yes_bid":        snap.yes_bid,
+        "fresh_edge":     round(fresh_edge, 4),
+        "top_model_prob": sig.top_model_prob,
+    })
     if fresh_edge < MIN_EDGE:
         logger.info("[Tier1] %s edge %+.3f below min_edge %.2f — skip",
                     station, fresh_edge, MIN_EDGE)

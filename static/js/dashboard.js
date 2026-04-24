@@ -155,6 +155,44 @@ function initSSE() {
   const _noCardsOnLoad = document.querySelectorAll('#signal-cards [data-station]').length === 0;
   let _reloadScheduled = false;
 
+  src.addEventListener('taf_update', e => {
+    const d = JSON.parse(e.data);
+    const s = d.station;
+    // Update sky badge in weather widget (TAF sky_cover takes precedence over METAR)
+    const skyEl = document.getElementById(`wx-sky-${s}`);
+    if (skyEl && d.sky_cover) skyEl.textContent = d.sky_cover;
+    // Update weather icon class to reflect TAF condition
+    const iconEl = document.getElementById(`wx-icon-${s}`);
+    if (iconEl && d.condition) {
+      iconEl.className = `wb-wx-icon wb-wx-${d.condition.replace(/ /g, '_')} mb-1`;
+    }
+    // AMD badge on decision badge parent
+    const card = document.querySelector(`[data-station="${s}"]`);
+    if (card && d.has_amd) {
+      const badge = card.querySelector('.wb-decision-badge');
+      if (badge && !badge.nextElementSibling?.classList.contains('wb-amd-badge')) {
+        const amd = document.createElement('span');
+        amd.className = 'badge bg-warning text-dark ms-1 wb-amd-badge';
+        amd.textContent = 'AMD';
+        badge.insertAdjacentElement('afterend', amd);
+      }
+    }
+  });
+
+  src.addEventListener('kalshi_top_update', e => {
+    const d = JSON.parse(e.data);
+    const s = d.station;
+    // Kalshi prob = yes_ask
+    const kalshiEl = document.getElementById(`top-kalshi-prob-${s}`);
+    if (kalshiEl && d.yes_ask != null) kalshiEl.textContent = `${Math.round(d.yes_ask * 100)}%`;
+    // Edge = model_prob - yes_ask
+    const edgeEl = document.getElementById(`top-edge-${s}`);
+    if (edgeEl && d.fresh_edge != null) {
+      edgeEl.textContent = `${d.fresh_edge >= 0 ? '+' : ''}${d.fresh_edge.toFixed(2)}`;
+      edgeEl.className   = d.fresh_edge > 0 ? 'text-success fw-bold' : 'text-danger';
+    }
+  });
+
   src.addEventListener('metar_update', e => {
     const d = JSON.parse(e.data);
     const s = d.station;
