@@ -382,8 +382,13 @@ EARLY_EXIT_BID_THRESHOLD = 0.85   # exit at 85¢ rather than wait for LCD
 NOMADS_GFS_URL = (
     "https://nomads.ncep.noaa.gov/dods/gfs_0p25/gfs{date}/gfs_0p25_00z"
 )
-# Open-Meteo forecast API (current day, not archive)
-OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+# Open-Meteo forecast API — replaced by Herbie (NOAA-direct, no throttling)
+# OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Forecast blending — NWS AFM + NBM
+NWS_BLEND_WEIGHT    = 0.60   # weight for NWS human-adjusted AFM
+NBM_BLEND_WEIGHT    = 0.40   # weight for NBM (HRRR/GFS/ECMWF calibrated blend)
+NBM_DIVERGENCE_GATE = 3.0    # °F — skip if NWS vs NBM spread exceeds this
 
 # METAR/TAF source
 AVWX_TAF_URL  = "https://aviationweather.gov/api/data/taf"

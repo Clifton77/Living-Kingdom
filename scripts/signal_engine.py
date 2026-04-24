@@ -37,7 +37,6 @@ from config import (
     KALSHI_BUCKET_LOWER_TAIL,
     KALSHI_BUCKET_UPPER_TAIL,
     KALSHI_BUCKET_STARTS,
-    OPEN_METEO_FORECAST_URL,
     STATION_COORDS,
     MIN_KELLY_STAKE,
     settlement_station,
@@ -50,6 +49,9 @@ from config import (
     MIN_PROB_RATIO,
     MIN_BUCKET_PROB,
     MOS_DIVERGENCE_THRESHOLD,
+    NWS_BLEND_WEIGHT,
+    NBM_BLEND_WEIGHT,
+    NBM_DIVERGENCE_GATE,
 )
 
 logger = setup_logging("signal_engine")
@@ -139,6 +141,10 @@ class TradeSignal:
     # GFS-MOS cross-check (optional — None when IEM MAV unavailable)
     mos_forecast_raw:   Optional[float] = None   # GFS-MOS Day-1 max forecast
     model_divergence_f: Optional[float] = None   # AFM - MOS (+ means NWS warmer than model)
+
+    # NBM cross-check (optional — None when Herbie unavailable)
+    nbm_forecast_raw:   Optional[float] = None   # NBM daily max temp forecast
+    nbm_divergence_f:   Optional[float] = None   # NWS_AFM - NBM (+ means NWS warmer)
 
     # Full distribution
     buckets:            list[BucketAnalysis] = field(default_factory=list)
@@ -491,6 +497,37 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
         return None
 
 
+# Per-station NBM cache: key = "{station}_{date_iso}", value = °F or None
+_nbm_cache: dict[str, float | None] = {}
+
+
+def fetch_nbm_forecast(station: str, target_date: date) -> float | None:
+    """Fetch NBM daily max temperature for a station. Cached per (station, date)."""
+    from utils.herbie_fetcher import fetch_nbm_tmax
+
+    cache_key = f"{station}_{target_date.isoformat()}"
+    if cache_key in _nbm_cache:
+        return _nbm_cache[cache_key]
+
+    settle = settlement_station(station)
+    coords = STATION_COORDS.get(settle)
+    if coords is None:
+        _nbm_cache[cache_key] = None
+        return None
+
+    lat, lon = coords
+    result = fetch_nbm_tmax(lat, lon, target_date)
+    _nbm_cache[cache_key] = result
+    return result
+
+
+def _blend_nws_nbm(nws: float, nbm: float | None) -> float:
+    """60% NWS AFM + 40% NBM when both available; pure NWS when NBM missing."""
+    if nbm is None:
+        return nws
+    return round(NWS_BLEND_WEIGHT * nws + NBM_BLEND_WEIGHT * nbm, 2)
+
+
 def _fetch_nws_forecast(station: str, target_date: date) -> float | None:
     """
     Fetch today's max temperature from NWS api.weather.gov gridded forecast.
@@ -555,76 +592,42 @@ def _fetch_nws_forecast(station: str, target_date: date) -> float | None:
     return None
 
 
-def _fetch_openmeteo_live(station: str, target_date: date) -> float | None:
-    """Open-Meteo current forecast — fallback when NWS and IEM unavailable."""
-    import requests
-    lat, lon = STATION_COORDS[settlement_station(station)]
-    import time as _time
-    params = {
-        "latitude":         lat,
-        "longitude":        lon,
-        "daily":            "temperature_2m_max",
-        "temperature_unit": "fahrenheit",
-        "forecast_days":    3,
-        "timezone":         "UTC",
-    }
-    try:
-        for attempt in range(4):
-            resp = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=10)
-            if resp.status_code == 429:
-                wait = 2 ** attempt
-                logger.warning("%s Open-Meteo rate limited — waiting %ds", station, wait)
-                _time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            break
-        else:
-            logger.warning("%s Open-Meteo rate limited after 4 attempts", station)
-            return None
-        data     = resp.json()
-        dates    = data["daily"]["time"]
-        temps    = data["daily"]["temperature_2m_max"]
-        date_str = target_date.isoformat()
-        if date_str in dates:
-            val = temps[dates.index(date_str)]
-            if val is not None:
-                logger.info("%s Open-Meteo forecast: %.1f°F", station, float(val))
-                return float(val)
-    except Exception as exc:
-        logger.warning("%s Open-Meteo fetch failed: %s", station, exc)
-    return None
-
-
-def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, float | None, str]:
+def fetch_live_forecast(
+    station: str, target_date: date
+) -> tuple[float | None, float | None, str, float | None]:
     """
     Fetch today's max temperature forecast.
 
     Priority:
-      1. NWS api.weather.gov gridded forecast  → model_source='IEM_AFM' (same bias dist)
-      2. IEM AFM (NWS human-adjusted)          → model_source='IEM_AFM'
-      3. Open-Meteo GFS forecast               → model_source='ERA5'
-      4. Historical parquet (CDO/ERA5 actuals) → last resort, ≤30 days old only
+      1. NWS api.weather.gov gridded forecast + NBM blend → model_source='IEM_AFM'
+      2. IEM AFM + NBM blend                              → model_source='IEM_AFM'
+      3. NBM alone                                        → model_source='NBM'
+      4. Historical parquet (CDO/ERA5 actuals)            → last resort, ≤30 days old only
 
     MOS is fetched independently for divergence signaling (not used as primary).
+    NBM is fetched in parallel for blending and divergence checking.
 
-    Returns: (primary_forecast, mos_forecast, model_source_used)
+    Returns: (primary_forecast, mos_forecast, model_source_used, nbm_forecast)
     """
     mos = fetch_live_mos_forecast(station, target_date)
+    nbm = fetch_nbm_forecast(station, target_date)
 
     # 1. NWS gridded — primary: official, no auth, no rate limits, hourly updates
     nws = _fetch_nws_forecast(station, target_date)
     if nws is not None:
-        return nws, mos, "IEM_AFM"
+        blended = _blend_nws_nbm(nws, nbm)
+        return blended, mos, "IEM_AFM", nbm
 
     # 2. IEM AFM — human NWS forecaster output
     afm = fetch_live_afm_forecast(station, target_date)
     if afm is not None:
-        return afm, mos, "IEM_AFM"
+        blended = _blend_nws_nbm(afm, nbm)
+        return blended, mos, "IEM_AFM", nbm
 
-    # 3. Open-Meteo — third-party GFS model, rate-limited on free tier
-    om = _fetch_openmeteo_live(station, target_date)
-    if om is not None:
-        return om, mos, "ERA5"
+    # 3. NBM alone — NOAA-direct, no throttling
+    if nbm is not None:
+        logger.info("%s using NBM as primary forecast: %.1f°F", station, nbm)
+        return nbm, mos, "NBM", nbm
 
     # Last resort: most recent row from historical parquet — only if recent (≤30 days old)
     try:
@@ -632,7 +635,7 @@ def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, 
         src_col = "model_source" if "model_source" in fcst_df.columns else "source"
         subset  = fcst_df[
             (fcst_df["station"] == station) &
-            (fcst_df[src_col].isin(["IEM_AFM", "CDO_OBS", "ERA5"]))
+            (fcst_df[src_col].isin(["IEM_AFM", "CDO_OBS", "ERA5", "NBM"]))
         ] if src_col in fcst_df.columns else fcst_df[fcst_df["station"] == station]
         if len(subset) > 0:
             last_row  = subset.sort_values("date").iloc[-1]
@@ -642,14 +645,14 @@ def fetch_live_forecast(station: str, target_date: date) -> tuple[float | None, 
                 val = float(last_row["forecast_tmax_f"])
                 logger.warning("%s using historical parquet fallback: %.1f°F (data from %s, %d days old)",
                                station, val, last_date, staleness)
-                return val, mos, "IEM_AFM"
+                return val, mos, "IEM_AFM", nbm
             else:
                 logger.warning("%s parquet fallback too stale (%d days old, last=%s) — skipping",
                                station, staleness, last_date)
     except Exception:
         pass
 
-    return None, mos, "ERA5"
+    return None, mos, "ERA5", nbm
 
 
 # ---------------------------------------------------------------------------
@@ -1000,9 +1003,9 @@ def generate_signal(
     taf   = interpret_taf(station, event_date=event_date, peak_hour_local=peak_hour_local)
     metar = get_metar(station)
 
-    # ── 2. Live forecast (AFM primary, MOS cross-check) ─────────────────
-    forecast_raw, mos_forecast_raw, model_source_used = fetch_live_forecast(
-        station, event_date
+    # ── 2. Live forecast (AFM+NBM blend primary, MOS cross-check) ──────
+    forecast_raw, mos_forecast_raw, model_source_used, nbm_forecast_raw = (
+        fetch_live_forecast(station, event_date)
     )
     if forecast_raw is None:
         logger.error("%s — no forecast available, skipping", station)
@@ -1017,6 +1020,16 @@ def generate_signal(
         logger.info(
             "%s AFM=%.1f°F  GFS-MOS=%.1f°F  divergence=%+.1f°F",
             station, forecast_raw, mos_forecast_raw, model_divergence_f,
+        )
+
+    nbm_divergence_f = (
+        round(forecast_raw - nbm_forecast_raw, 1)
+        if nbm_forecast_raw is not None else None
+    )
+    if nbm_divergence_f is not None:
+        logger.info(
+            "%s NWS=%.1f°F  NBM=%.1f°F  nbm_divergence=%+.1f°F",
+            station, forecast_raw, nbm_forecast_raw, nbm_divergence_f,
         )
 
     # ── 3. Bias correction ───────────────────────────────────────────────
@@ -1212,6 +1225,20 @@ def generate_signal(
                 f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
             )
 
+    # NBM divergence gate — tighter than MOS since NBM is higher-quality guidance
+    if nbm_divergence_f is not None and abs(nbm_divergence_f) > NBM_DIVERGENCE_GATE:
+        logger.info(
+            "%s NBM divergence %.1f°F exceeds %.1f°F threshold — skipping "
+            "(NWS=%.1f°F, NBM=%.1f°F)",
+            station, abs(nbm_divergence_f), NBM_DIVERGENCE_GATE,
+            forecast_raw, nbm_forecast_raw,
+        )
+        return _skip_signal(
+            station, event_date, local_time_str, taf, metar, pattern,
+            f"NWS/NBM divergence {abs(nbm_divergence_f):.1f}°F > "
+            f"{NBM_DIVERGENCE_GATE}°F — sources disagree",
+        )
+
     # Entry decision — edge must clear MIN_EDGE (weather and uncertainty already gated above).
     # WATCH means edge is positive but below minimum; Tier1 re-checks live price
     # every 5 min and promotes to TRADE if the ask drops enough to clear MIN_EDGE.
@@ -1287,6 +1314,8 @@ def generate_signal(
         pattern_confidence=pattern["confidence"],
         mos_forecast_raw=mos_forecast_raw,
         model_divergence_f=model_divergence_f,
+        nbm_forecast_raw=nbm_forecast_raw,
+        nbm_divergence_f=nbm_divergence_f,
         top_bucket=top.bucket_lower,
         top_edge=top.edge,
         top_model_prob=top.model_prob,

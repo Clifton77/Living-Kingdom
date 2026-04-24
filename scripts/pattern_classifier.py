@@ -23,7 +23,6 @@ from __future__ import annotations
 import pickle
 import numpy as np
 import pandas as pd
-import requests
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -31,7 +30,6 @@ from utils.logging_config import setup_logging
 from config import (
     CLUSTER_PKL,
     Z500_PARQUET,
-    OPEN_METEO_FORECAST_URL,
     LAT_BOUNDS,
     LON_BOUNDS,
     SEASONS,
@@ -61,78 +59,13 @@ def assign_season(dt: date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Live 500mb fetch — Open-Meteo pressure level API
+# Live 500mb fetch — GFS via Herbie (NOAA-direct, no throttling)
 # ---------------------------------------------------------------------------
 
-def _fetch_openmeteo_z500(target_date: date) -> pd.Series | None:
-    """
-    Fetch 500mb geopotential height from Open-Meteo pressure-level forecast API.
-    Queries the same 2.5-degree grid used by the NCEP reanalysis training data
-    (LAT_BOUNDS/LON_BOUNDS in config). Returns a pd.Series with column names
-    matching z500_anomaly.parquet (lat_{:.1f}_lon_{:.1f}, 0-360 lon convention).
-    """
-    try:
-        # Build 2.5-degree grid matching NCEP reanalysis
-        lats = np.arange(LAT_BOUNDS[0], LAT_BOUNDS[1] + 0.01, 2.5)
-        lons_360 = np.arange(LON_BOUNDS[0], LON_BOUNDS[1] + 0.01, 2.5)
-        lons_api = lons_360 - 360.0  # Open-Meteo uses -180/180
-
-        grid = [
-            (float(la), float(lo_api), float(lo_360))
-            for la in lats
-            for lo_api, lo_360 in zip(lons_api, lons_360)
-        ]
-
-        date_str = target_date.isoformat()
-        BATCH = 100
-        results: dict[str, float] = {}
-
-        for i in range(0, len(grid), BATCH):
-            chunk = grid[i : i + BATCH]
-            lat_str = ",".join(f"{p[0]:.1f}" for p in chunk)
-            lon_str = ",".join(f"{p[1]:.1f}" for p in chunk)
-            url = (
-                f"{OPEN_METEO_FORECAST_URL}"
-                f"?latitude={lat_str}&longitude={lon_str}"
-                f"&hourly=geopotential_height_500hPa"
-                f"&start_date={date_str}&end_date={date_str}"
-            )
-            logger.debug("Open-Meteo z500 batch %d–%d", i, i + len(chunk) - 1)
-            for attempt in range(4):
-                resp = requests.get(url, timeout=30)
-                if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning("Open-Meteo z500 rate limited — waiting %ds", wait)
-                    import time as _time; _time.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                break
-            else:
-                raise RuntimeError("Open-Meteo z500 rate limited after 4 attempts")
-            data = resp.json()
-            if i + BATCH < len(grid):
-                import time as _time; _time.sleep(1.0)  # stay within free-tier burst limit
-
-            # Multi-location → list; single location → dict
-            locations = data if isinstance(data, list) else [data]
-            for loc_idx, loc in enumerate(locations):
-                la, _, lo_360 = chunk[loc_idx]
-                vals = loc.get("hourly", {}).get("geopotential_height_500hPa", [])
-                col = f"lat_{la:.1f}_lon_{lo_360:.1f}"
-                results[col] = float(vals[0]) if vals else float("nan")
-
-        series = pd.Series(results)
-        n_nan = int(series.isna().sum())
-        if n_nan > len(series) * 0.10:
-            logger.warning("Open-Meteo z500: %d/%d NaN — falling back", n_nan, len(series))
-            return None
-
-        logger.info("Open-Meteo z500 fetched: %d grid points for %s", len(series), target_date)
-        return series
-
-    except Exception as exc:
-        logger.warning("Open-Meteo z500 fetch failed: %s", exc)
-        return None
+def _fetch_herbie_z500(target_date: date) -> pd.Series | None:
+    """Fetch GFS 500mb height via Herbie. Replaces Open-Meteo pressure-level API."""
+    from utils.herbie_fetcher import fetch_gfs_z500
+    return fetch_gfs_z500(target_date)
 
 
 def _fallback_z500() -> tuple[pd.Series, date]:
@@ -231,11 +164,11 @@ def classify_pattern(target_date: date | None = None) -> dict:
     feature_cols = cluster_models[season]["feature_cols"]
 
     # ── Fetch live z500 ───────────────────────────────────────────────────
-    data_source = "openmeteo"
-    raw = _fetch_openmeteo_z500(target_date)
+    data_source = "herbie_gfs"
+    raw = _fetch_herbie_z500(target_date)
 
     if raw is not None:
-        # Open-Meteo gives raw heights — compute anomaly to match training
+        # GFS gives raw heights — compute anomaly to match training
         feature_row = _compute_anomaly(raw, season)
         if feature_row is None:
             raw = None  # anomaly failed, fall to reanalysis

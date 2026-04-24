@@ -30,6 +30,7 @@ from config import (
     STATIONS, WFO_MAP, STATION_COORDS, START_DATE, END_DATE,
     FCST_PARQUET, LOGS_DIR, RAW_DIR,
     settlement_station,
+    KALSHI_SETTLEMENT_STATION,
 )
 from utils.retry import retry_request
 from utils.logging_config import setup_logging
@@ -356,6 +357,50 @@ def fetch_afm_forecasts(station: str, start_date: str, end_date: str) -> pd.Data
 
 
 # ---------------------------------------------------------------------------
+# NBM archive fetch via Herbie
+# ---------------------------------------------------------------------------
+
+def fetch_nbm_forecasts(stations: list, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch NBM daily max temperature archive for all stations.
+    Returns DataFrame: [station, date, forecast_tmax_f, model_source]
+    model_source = 'NBM'
+    """
+    from utils.herbie_fetcher import fetch_nbm_tmax
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d").date()
+    rows = []
+
+    for station in tqdm(stations, desc="Fetching NBM forecasts", leave=False):
+        settle = KALSHI_SETTLEMENT_STATION.get(station, station)
+        coords = STATION_COORDS.get(settle)
+        if coords is None:
+            logger.warning("No coordinates for %s — skipping NBM", station)
+            continue
+        lat, lon = coords
+
+        current = start_dt
+        while current <= end_dt:
+            val = fetch_nbm_tmax(lat, lon, current)
+            if val is not None:
+                rows.append({
+                    "station":         station,
+                    "date":            pd.Timestamp(current),
+                    "forecast_tmax_f": val,
+                    "model_source":    "NBM",
+                })
+            current += timedelta(days=1)
+            time.sleep(0.1)
+
+        logger.info("NBM %s: %d records", station, sum(1 for r in rows if r["station"] == station))
+
+    if not rows:
+        return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "model_source"])
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # Open-Meteo ERA5 fallback
 # ---------------------------------------------------------------------------
 @retry_request(max_attempts=3, backoff_base=2.0)
@@ -497,6 +542,15 @@ def build_model_forecast_archive() -> None:
         mos_df = mos_df.sort_values("date").drop_duplicates(subset=["date"], keep="last")
 
         all_dfs.extend([afm_df, mos_df])
+
+    # ── NBM archive (Herbie — NOAA-direct, no throttling) ───────────────────
+    logger.info("Fetching NBM archive for all stations...")
+    nbm_df = fetch_nbm_forecasts(STATIONS, START_DATE, END_DATE)
+    if len(nbm_df) > 0:
+        nbm_df["date"] = pd.to_datetime(nbm_df["date"])
+        nbm_df = nbm_df.sort_values("date").drop_duplicates(subset=["station", "date"], keep="last")
+        all_dfs.append(nbm_df)
+        logger.info("NBM archive: %d total rows", len(nbm_df))
 
         # Log remaining gaps per model source
         for label, df in [("IEM_AFM", afm_df), ("GFS_MOS", mos_df)]:
