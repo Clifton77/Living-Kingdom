@@ -89,7 +89,6 @@ from config import (
     SNAPSHOT_INTERVAL_MIN,
     ENTRY_CUTOFF_PRE_PEAK_HOURS,
     MIN_EDGE,
-    BROKEN_SKY_MIN_EDGE,
     MIN_YES_ASK,
 )
 
@@ -686,7 +685,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "fresh_edge":     round(fresh_edge, 4),
             "top_model_prob": sig.top_model_prob,
         })
-        watch_threshold = BROKEN_SKY_MIN_EDGE if sig.weather_gate == "trade_cautious" else MIN_EDGE
+        watch_threshold = MIN_EDGE
         if fresh_edge < watch_threshold:
             return  # still below minimum — remain WATCH
         logger.info(
@@ -893,10 +892,118 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             station, sig.top_bucket, live_contracts, max_price,
             fresh_edge, live_stake,
         )
+        _attempt_dual_entry(station, sig, now_utc, rm, kalshi)
     else:
         logger.error("[Tier1] Order failed for %s bucket %d: %s",
                      station, sig.top_bucket, result.error)
         alert_order_failure(station, market_id, result.error or "unknown")
+
+
+def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
+    """
+    If top two Kalshi buckets by yes_ask are within 10pp and second ≥ 15%,
+    also enter the second bucket (up to MAX_STATION_POSITIONS).
+    """
+    import math as _math
+
+    if not sig.buckets:
+        return
+    if len(rm.station_positions(station)) >= MAX_STATION_POSITIONS:
+        return
+
+    ranked = sorted(sig.buckets, key=lambda b: b.yes_ask, reverse=True)
+    if len(ranked) < 2:
+        return
+
+    first, second = ranked[0], ranked[1]
+    gap = first.yes_ask - second.yes_ask
+
+    if not (gap <= 0.10 and second.yes_ask >= 0.15):
+        return
+
+    if second.edge < MIN_EDGE:
+        logger.info(
+            "[Tier1] %s dual-entry: bucket %d edge %+.3f below min — skip",
+            station, second.bucket_lower, second.edge,
+        )
+        return
+
+    snap2 = kalshi.get_market_snapshot(station, sig.event_date, second.bucket_lower)
+    if snap2 is None or not snap2.is_open or snap2.yes_ask < MIN_YES_ASK:
+        return
+
+    spread2 = snap2.yes_ask - snap2.yes_bid
+    if spread2 > MAX_BID_ASK_SPREAD or snap2.volume < MIN_MARKET_VOLUME:
+        return
+
+    # Running-max guard: skip if intraday observed high has already cleared the bucket ceiling
+    _rm_cached = _running_max_cache.get(station)
+    if _rm_cached and (now_utc - _rm_cached[1]).total_seconds() < 600:
+        entry_rm = _rm_cached[0]
+        if second.bucket_lower not in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
+            if entry_rm >= second.bucket_lower + 2:
+                logger.info(
+                    "[Tier1] %s dual-entry: bucket %d running_max %.1f°F ≥ ceiling — skip",
+                    station, second.bucket_lower, entry_rm,
+                )
+                return
+
+    ok, risk_reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    if not ok:
+        logger.info("[Tier1] %s dual-entry: risk gate: %s", station, risk_reason)
+        return
+
+    fresh_edge2 = second.model_prob - snap2.yes_ask
+    max_price2  = max(round(second.model_prob - MIN_EDGE, 4), snap2.yes_ask)
+    live_contracts2 = int(_math.floor(sig.kelly_stake_usd / max_price2)) if max_price2 > 0 else 0
+    if live_contracts2 < 1:
+        return
+    live_stake2 = round(live_contracts2 * max_price2, 4)
+
+    market_id2 = snap2.market_id
+    result2 = kalshi.place_order_with_fill_check(
+        market_id=market_id2,
+        contracts=live_contracts2,
+        limit_price=max_price2,
+        side="yes",
+    )
+
+    if result2.success:
+        rm.open_position(
+            station=station, market_id=market_id2,
+            bucket_lower=second.bucket_lower, contracts=live_contracts2,
+            entry_price=max_price2, event_date=sig.event_date,
+        )
+        get_sheets_logger().log_trade_opened(
+            station=station, event_date=sig.event_date, market_id=market_id2,
+            bucket_lower=second.bucket_lower, entry_price=max_price2,
+            contracts=live_contracts2, stake_usd=live_stake2, sig=sig,
+        )
+        journal_entry(
+            station=station, market_id=market_id2, bucket_lower=second.bucket_lower,
+            entry_price=max_price2, contracts=live_contracts2, stake_usd=live_stake2,
+            model_prob=second.model_prob, edge=fresh_edge2,
+            forecast_adjusted=sig.forecast_adjusted, sig=sig,
+        )
+        push_event("position_opened", {
+            "market_id":    market_id2,
+            "station":      station,
+            "bucket_lower": second.bucket_lower,
+            "entry_price":  max_price2,
+            "contracts":    live_contracts2,
+            "stake_usd":    live_stake2,
+            "entry_reason": "dual_entry",
+        })
+        push_event("state_update", rm.summary())
+        logger.info(
+            "[Tier1] Dual entry: %s | bucket %d | %d contracts @ $%.2f | "
+            "gap=%.2f second_ask=%.2f | stake $%.2f",
+            station, second.bucket_lower, live_contracts2, max_price2,
+            gap, second.yes_ask, live_stake2,
+        )
+    else:
+        logger.info("[Tier1] Dual entry order failed for %s bucket %d: %s",
+                    station, second.bucket_lower, result2.error)
 
 
 def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):

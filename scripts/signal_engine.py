@@ -44,7 +44,6 @@ from config import (
     MAX_STAKE_PCT,
     MIN_N_OBS,
     MIN_EDGE,
-    BROKEN_SKY_MIN_EDGE,
     BIAS_STD_GATE,
     CONFIDENCE_KELLY_SCALE,
     MIN_PROB_RATIO,
@@ -135,7 +134,7 @@ class TradeSignal:
     kelly_contracts:    int
 
     # Weather gate
-    weather_gate:       str            # "trade" | "trade_cautious" | "skip" | "hard_skip"
+    weather_gate:       str            # "trade" | "skip" | "hard_skip"
     taf:                TafResult
     metar:              MetarResult
 
@@ -957,12 +956,6 @@ def _build_reasoning(
             "Fog/marine layer burn-off timing is uncertain and could suppress or delay the high. "
             "Elevated uncertainty — not trading today."
         )
-    elif weather_gate == "trade_cautious":
-        taf_note = (
-            f"TAF shows {cond_desc.lower()} (mostly cloudy) during peak heating hours — "
-            "cloud cover limits solar insolation and may keep the high 1–2°F below a clear-sky day. "
-            f"Trading with a raised edge requirement ({BROKEN_SKY_MIN_EDGE:.0%} vs normal {MIN_EDGE:.0%})."
-        )
     elif taf.has_ts:
         taf_note = (
             "TAF mentions convective activity during or near peak heating — "
@@ -1006,12 +999,6 @@ def _build_reasoning(
         penalty_note = f"Weather gate: HARD SKIP ({cond_desc}) — conditions too dangerous to trade."
     elif weather_gate == "skip":
         penalty_note = f"Weather gate: SKIP ({cond_desc}) — elevated uncertainty, not trading today."
-    elif weather_gate == "trade_cautious":
-        gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
-        penalty_note = (
-            f"Weather gate: CAUTIOUS TRADE ({cond_desc}) — broken/overcast skies. "
-            f"Edge must clear {BROKEN_SKY_MIN_EDGE:.0%} minimum (vs normal {MIN_EDGE:.0%}).{gate_suffix}"
-        )
     else:
         gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
         penalty_note = (
@@ -1039,12 +1026,9 @@ def _build_reasoning(
             f"Edge of {top_bucket.edge:+.3f} clears our required threshold."
         )
     elif decision == "WATCH":
-        _watch_threshold = BROKEN_SKY_MIN_EDGE if weather_gate == "trade_cautious" else MIN_EDGE
         decision_rationale = (
             f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
-            f"our {_watch_threshold:.2f} minimum"
-            + (" (raised for broken/overcast conditions)" if weather_gate == "trade_cautious" else "")
-            + ". Not enough margin to trade today."
+            f"our {MIN_EDGE:.2f} minimum. Not enough margin to trade today."
         )
     elif decision == "HARD_SKIP":
         decision_rationale = (
@@ -1338,46 +1322,41 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Bucket selection: find the bucket the forecast actually falls in.
-    # The market's pricing of low-probability buckets reflects real-world
-    # likelihood — cheap tails are cheap for a reason. We trade what our
-    # forecast points to, not whatever bucket happens to have computed edge.
-    interior_buckets = [
-        b for b in bucket_analyses
-        if b.bucket_lower not in (live_lower_tail, live_upper_tail)
-    ]
+    # Bucket selection: market-led. Rank all buckets by Kalshi yes_ask (implied probability)
+    # and enter the one the market consensus favors most. Model acts as a confirmation gate —
+    # if the model's forecast doesn't physically land in the top-3 by yes_ask, HARD_SKIP.
+    ranked = sorted(bucket_analyses, key=lambda b: b.yes_ask, reverse=True)
+    top3 = ranked[:3]
+
     logger.info(
-        "%s bucket selection: lower_tail=%s upper_tail=%s interior=%s forecast=%.1f",
-        station, live_lower_tail, live_upper_tail,
-        [b.bucket_lower for b in interior_buckets], forecast_adjusted,
+        "%s market-led top3: %s | forecast=%.1f°F (lower_tail=%s upper_tail=%s)",
+        station,
+        [(b.bucket_lower, round(b.yes_ask, 3)) for b in top3],
+        forecast_adjusted, live_lower_tail, live_upper_tail,
     )
 
-    # Find the bucket the forecast lands in.
-    # For the lower tail: forecast < lower_tail + 1.0 (bucket covers −∞ to lower_tail+0.5)
-    # For the upper tail: forecast >= upper_tail − 0.5
-    # For interior: forecast falls between bucket_lower−0.5 and bucket_lower+1.5
-    def _forecast_bucket(fc: float) -> BucketAnalysis | None:
-        for b in bucket_analyses:
-            if b.bucket_lower == live_lower_tail:
-                if fc < live_lower_tail + 1.0:
-                    return b
-            elif b.bucket_lower == live_upper_tail:
-                if fc >= live_upper_tail - 0.5:
-                    return b
-            else:
-                if b.bucket_lower - 0.5 <= fc < b.bucket_lower + 1.5:
-                    return b
-        return None
+    def _in_bucket_range(b: BucketAnalysis, fc: float) -> bool:
+        if b.bucket_lower == live_lower_tail:
+            return fc < live_lower_tail + 1.0
+        if b.bucket_lower == live_upper_tail:
+            return fc >= live_upper_tail - 0.5
+        return b.bucket_lower - 0.5 <= fc < b.bucket_lower + 1.5
 
-    forecast_bucket = _forecast_bucket(forecast_adjusted)
-    if forecast_bucket is None:
-        # Fallback: nearest interior bucket by distance
-        forecast_bucket = (
-            min(interior_buckets, key=lambda b: abs((b.bucket_lower + 0.5) - forecast_adjusted))
-            if interior_buckets else max(bucket_analyses, key=lambda b: b.model_prob)
+    if not any(_in_bucket_range(b, forecast_adjusted) for b in top3):
+        logger.info(
+            "%s HARD SKIP: forecast %.1f°F outside market top-3 %s",
+            station, forecast_adjusted, [b.bucket_lower for b in top3],
+        )
+        return _hard_skip_signal(
+            station, event_date, local_time_str, taf, metar,
+            pattern, forecast_raw, bias_info, forecast_adjusted,
+            reason=(
+                f"Model forecast {forecast_adjusted:.1f}°F outside market top-3 "
+                f"{[b.bucket_lower for b in top3]} — model/market divergence"
+            ),
         )
 
-    top = forecast_bucket
+    top = top3[0]  # Market consensus leader (highest yes_ask)
 
     # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
     if mos_forecast_raw is not None and model_divergence_f is not None:
@@ -1410,11 +1389,10 @@ def generate_signal(
             **_fcst_kwargs,
         )
 
-    # Entry decision — edge must clear MIN_EDGE (or BROKEN_SKY_MIN_EDGE for broken/overcast).
-    # WATCH means edge is positive but below minimum; Tier1 re-checks live price
+    # Entry decision — edge must clear MIN_EDGE.
+    # WATCH means edge is positive but below minimum; Tier 1 re-checks live price
     # every 5 min and promotes to TRADE if the ask drops enough to clear the threshold.
-    edge_threshold = BROKEN_SKY_MIN_EDGE if weather_gate == "trade_cautious" else MIN_EDGE
-    if top.edge >= edge_threshold:
+    if top.edge >= MIN_EDGE:
         decision = "TRADE"
     else:
         decision = "WATCH"
@@ -1533,7 +1511,9 @@ def _skip_signal(station, event_date, local_time, taf, metar,
 
 
 def _hard_skip_signal(station, event_date, local_time, taf, metar,
-                      pattern, forecast_raw, bias_info, forecast_adjusted) -> TradeSignal:
+                      pattern, forecast_raw, bias_info, forecast_adjusted,
+                      reason: str | None = None) -> TradeSignal:
+    note = reason or f"HARD SKIP: {taf.summary} — weather gate forces skip."
     return TradeSignal(
         station=station, event_date=event_date, local_time=local_time,
         decision="HARD_SKIP",
@@ -1548,7 +1528,7 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
         weather_gate="hard_skip", taf=taf, metar=metar,
         buckets=[],
-        reasoning=f"HARD SKIP: {taf.summary} — weather gate forces skip.",
+        reasoning=note,
     )
 
 
