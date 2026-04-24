@@ -1001,10 +1001,7 @@ def _build_reasoning(
         penalty_note = f"Weather gate: SKIP ({cond_desc}) — elevated uncertainty, not trading today."
     else:
         gate_suffix = " Forecast uncertainty gate fired (bias_std too high)." if bias_std_gate_fired else ""
-        penalty_note = (
-            f"Weather gate: TRADE ({cond_desc}). "
-            f"Edge must clear {MIN_EDGE:.0%} minimum.{gate_suffix}"
-        )
+        penalty_note = f"Weather gate: TRADE ({cond_desc}).{gate_suffix}"
 
     market_analysis = (
         f"Kalshi is pricing the {top_bucket.bucket_label} bucket at {kalshi_pct:.0f}% "
@@ -1028,7 +1025,7 @@ def _build_reasoning(
     elif decision == "WATCH":
         decision_rationale = (
             f"Watching — edge of {top_bucket.edge:+.3f} is real but falls below "
-            f"our {MIN_EDGE:.2f} minimum. Not enough margin to trade today."
+            "the minimum stake threshold. Kelly stake too small to place."
         )
     elif decision == "HARD_SKIP":
         decision_rationale = (
@@ -1075,9 +1072,9 @@ def _build_reasoning(
         ),
     })
     threshold_checks.append({
-        "name":   "Edge vs minimum",
-        "passed": top_bucket.edge >= MIN_EDGE,
-        "detail": f"Edge {top_bucket.edge:+.3f} vs required {MIN_EDGE:.2f}",
+        "name":   "Edge",
+        "passed": True,
+        "detail": f"Edge {top_bucket.edge:+.3f} (no floor — Kelly self-regulates)",
     })
     threshold_checks.append({
         "name":   "Minimum stake",
@@ -1389,13 +1386,9 @@ def generate_signal(
             **_fcst_kwargs,
         )
 
-    # Entry decision — edge must clear MIN_EDGE.
-    # WATCH means edge is positive but below minimum; Tier 1 re-checks live price
-    # every 5 min and promotes to TRADE if the ask drops enough to clear the threshold.
-    if top.edge >= MIN_EDGE:
-        decision = "TRADE"
-    else:
-        decision = "WATCH"
+    # Entry decision — TRADE whenever model confirms the market's top-3 consensus.
+    # Kelly self-regulates stake size based on edge magnitude; no edge floor required.
+    decision = "TRADE"
 
     # ── 8. Kelly sizing with confidence scaling ──────────────────────────
     kelly_frac, kelly_usd, kelly_contracts = kelly_stake(

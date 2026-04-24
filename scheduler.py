@@ -685,12 +685,9 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "fresh_edge":     round(fresh_edge, 4),
             "top_model_prob": sig.top_model_prob,
         })
-        watch_threshold = MIN_EDGE
-        if fresh_edge < watch_threshold:
-            return  # still below minimum — remain WATCH
         logger.info(
-            "[Tier1] %s WATCH promoted: live edge=%+.3f ≥ min_edge=%.2f — entering",
-            station, fresh_edge, watch_threshold,
+            "[Tier1] %s WATCH promoted: live edge=%+.3f — entering",
+            station, fresh_edge,
         )
         # Fall through to new-position entry logic below
 
@@ -811,18 +808,12 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         "fresh_edge":     round(fresh_edge, 4),
         "top_model_prob": sig.top_model_prob,
     })
-    if fresh_edge < MIN_EDGE:
-        logger.info("[Tier1] %s edge %+.3f below min_edge %.2f — skip",
-                    station, fresh_edge, MIN_EDGE)
-        return
-
     ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
     if not ok:
         logger.info("[Tier1] %s risk gate: %s", station, reason)
         return
 
-    max_price = round(sig.top_model_prob - MIN_EDGE, 4)
-    max_price = max(max_price, snap.yes_ask)
+    max_price = snap.yes_ask
 
     # Recompute contracts at the live execution price — the signal's kelly_contracts
     # was sized against the Tier3 ask, which may have risen by Tier1 execution.
@@ -921,13 +912,6 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
     if not (gap <= 0.10 and second.yes_ask >= 0.15):
         return
 
-    if second.edge < MIN_EDGE:
-        logger.info(
-            "[Tier1] %s dual-entry: bucket %d edge %+.3f below min — skip",
-            station, second.bucket_lower, second.edge,
-        )
-        return
-
     snap2 = kalshi.get_market_snapshot(station, sig.event_date, second.bucket_lower)
     if snap2 is None or not snap2.is_open or snap2.yes_ask < MIN_YES_ASK:
         return
@@ -954,7 +938,7 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
         return
 
     fresh_edge2 = second.model_prob - snap2.yes_ask
-    max_price2  = max(round(second.model_prob - MIN_EDGE, 4), snap2.yes_ask)
+    max_price2  = snap2.yes_ask
     live_contracts2 = int(_math.floor(sig.kelly_stake_usd / max_price2)) if max_price2 > 0 else 0
     if live_contracts2 < 1:
         return
@@ -1398,8 +1382,7 @@ def _execute_reposition(
         logger.warning("[Tier3] Reposition open blocked for %s: %s", station, reason)
         return
 
-    max_price = round(new_sig.top_model_prob - MIN_EDGE, 4)
-    max_price = max(max_price, new_sig.top_yes_ask)
+    max_price = new_sig.top_yes_ask
 
     result = kalshi.place_order_with_fill_check(
         market_id=new_market_id,
@@ -1630,8 +1613,7 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
         get_sheets_logger().log_skipped_signal(sig, f"Liquidity retry entry blocked: {reason}")
         return
 
-    max_price = round(sig.top_model_prob - MIN_EDGE, 4)
-    max_price = max(max_price, snap.yes_ask)
+    max_price = snap.yes_ask
 
     real_market_id = snap.market_id  # use API ticker (avoids B68 vs T68 mismatch)
     result = kalshi.place_order_with_fill_check(
