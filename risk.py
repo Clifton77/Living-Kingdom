@@ -30,7 +30,6 @@ from utils.logging_config import setup_logging
 from config import (
     STARTING_BANKROLL,
     STOP_LOSS_PCT,
-    REVERSAL_EDGE_THRESHOLD,
     DAILY_LOSS_LIMIT_PCT,
     MAX_EXPOSURE_PCT,
     EARLY_EXIT_BID_THRESHOLD,
@@ -122,13 +121,12 @@ def evaluate_exit(
     Evaluate whether an open position should be exited.
 
     Checks in priority order:
-    1. Static stop-loss      — bid fell to ≤ STOP_LOSS_PCT of entry
-    2. Signal reversal stop  — edge reversed past REVERSAL_EDGE_THRESHOLD
-    3. Undershoot exit       — past peak hour, running max below bucket (definitive miss)
-    4. Undershoot warning    — approaching peak hour, running max below bucket (alert only)
-    5. Overshoot exit        — before peak hour, running max ≥ bucket_upper (lock profit)
-    6. Early profit exit     — bid ≥ EARLY_EXIT_BID_THRESHOLD (85¢), temp in bucket
-    7. Hold                  — no exit condition met
+    1. Static stop-loss   — bid fell to ≤ STOP_LOSS_PCT of entry
+    2. Undershoot exit    — past peak hour, running max below bucket (definitive miss)
+    3. Undershoot warning — approaching peak hour, running max below bucket (alert only)
+    4. Overshoot exit     — before peak hour, running max ≥ bucket_upper (lock profit)
+    5. Early profit exit  — bid ≥ EARLY_EXIT_BID_THRESHOLD (85¢), temp in bucket
+    6. Hold               — no exit condition met
 
     Parameters
     ----------
@@ -161,19 +159,7 @@ def evaluate_exit(
             exit_type="stop_loss",
         )
 
-    # ── 2. Signal reversal stop ───────────────────────────────────────────
-    if current_edge < REVERSAL_EDGE_THRESHOLD:
-        return ExitDecision(
-            should_exit=True,
-            reason=(
-                f"Reversal stop: edge {current_edge:+.3f} below "
-                f"threshold {REVERSAL_EDGE_THRESHOLD:+.3f}"
-            ),
-            urgency="immediate",
-            exit_type="reversal",
-        )
-
-    # ── 3 & 4. Undershoot protection (requires intraday running max) ──────
+    # ── 2 & 3. Undershoot protection (requires intraday running max) ────────
     if running_max is not None and local_hour is not None and peak_heating_hour is not None:
         undershoot_trigger = bucket_lo - UNDERSHOOT_EXIT_BUFFER_F
 

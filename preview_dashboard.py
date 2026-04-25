@@ -197,8 +197,7 @@ MOCK_STATE = {
     "tier_status": {"tier1": "14:30 UTC", "tier2": "14:30 UTC", "tier3": "14:05 UTC", "settlement": "09:00 UTC"},
     "adjustable_settings": {
         "STOP_LOSS_PCT":                  {"label": "Stop-loss %",              "min": 0.1, "max": 0.9, "value": 0.40},
-        "REVERSAL_EDGE_THRESHOLD":        {"label": "Reversal edge threshold",  "min": -0.5,"max": 0.0,"value": -0.15},
-        "PROFIT_REVERSAL_THRESHOLD":      {"label": "Profit reversal threshold","min": 0.0, "max": 0.5,"value": 0.10},
+"PROFIT_REVERSAL_THRESHOLD":      {"label": "Profit reversal threshold","min": 0.0, "max": 0.5,"value": 0.10},
         "EXPANSION_EDGE_MIN":             {"label": "Expansion edge min",        "min": 0.1, "max": 0.5,"value": 0.18},
         "SIGNIFICANT_REPOSITION_EDGE_MIN":{"label": "Significant reposition edge","min":0.1,"max":0.5,"value": 0.22},
         "MAJOR_REPOSITION_EDGE_MIN":      {"label": "Major reposition edge",    "min": 0.1, "max": 0.5,"value": 0.25},

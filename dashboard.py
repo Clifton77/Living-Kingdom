@@ -37,7 +37,6 @@ _SETTINGS_FILE = os.path.join(cfg.LOGS_DIR, "settings_override.json")
 
 _ADJUSTABLE_SETTINGS = {
     "STOP_LOSS_PCT":                 ("Stop-loss %",              0.1,  0.9),
-    "REVERSAL_EDGE_THRESHOLD":       ("Reversal edge threshold",  -0.5, 0.0),
     "PROFIT_REVERSAL_THRESHOLD":     ("Profit reversal threshold", 0.0, 0.5),
     "EXPANSION_EDGE_MIN":            ("Expansion edge min",        0.1,  0.5),
     "SIGNIFICANT_REPOSITION_EDGE_MIN": ("Significant reposition edge", 0.1, 0.5),
