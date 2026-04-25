@@ -26,9 +26,10 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from utils.logging_config import setup_logging
-from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS, SNAPSHOT_INTERVAL_MIN, MIN_EDGE
+from config import GOOGLE_SHEET_ID, GOOGLE_CREDENTIALS_JSON, SHEET_TABS, SNAPSHOT_INTERVAL_MIN, MIN_EDGE, STATION_TIMEZONES
 
 logger = setup_logging("sheets")
 
@@ -43,7 +44,7 @@ _HEADERS = {
         "Trades Today", "Wins", "Losses", "Win Rate (%)",
     ]],
     SHEET_TABS["trade_log"]: [[
-        "Timestamp (UTC)", "Event Date", "Station", "Bucket", "Direction",
+        "Timestamp (Local)", "Event Date", "Station", "Bucket", "Direction",
         "Entry Price", "Exit Price", "Contracts", "Stake ($)", "P&L ($)",
         "Exit Reason", "Cluster ID", "Season", "Pattern Confidence",
         "Weather Condition", "Edge at Entry", "Forecast Adjusted (°F)",
@@ -175,6 +176,14 @@ class GoogleSheetsLogger:
     def _now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    @staticmethod
+    def _local_time(station: str) -> str:
+        tz = ZoneInfo(STATION_TIMEZONES.get(station, "UTC"))
+        now_local = datetime.now(tz)
+        h = now_local.hour % 12 or 12
+        ampm = "AM" if now_local.hour < 12 else "PM"
+        return f"{now_local.strftime('%Y-%m-%d')} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def update_dashboard(self, summary: dict, mode: str = "DEMO"):
@@ -211,7 +220,7 @@ class GoogleSheetsLogger:
         """Append a row when a position is opened. Exit fields blank until close."""
         try:
             row = [[
-                self._now(),
+                self._local_time(station),
                 str(event_date),
                 station,
                 bucket_lower,
@@ -237,23 +246,18 @@ class GoogleSheetsLogger:
 
     def log_trade_closed(
         self,
+        station: str,
         market_id: str,
         exit_price: float,
         realized_pnl: float,
         exit_reason: str,
     ):
-        """
-        Find the most recent open row for this market_id in Trade Log
-        and fill in exit price, P&L, and reason.
-        Uses a search approach — scans column A (market_id is in col F area).
-        For simplicity we append a close row; the dashboard reads totals from
-        the risk summary, not individual rows.
-        """
+        """Append a CLOSE row to Trade Log; the matching OPEN row has full context."""
         try:
             row = [[
-                self._now(),
+                self._local_time(station),
                 "",         # event_date already in open row
-                "",         # station already in open row
+                station,
                 "",         # bucket already in open row
                 "CLOSE",
                 "",         # entry price in open row

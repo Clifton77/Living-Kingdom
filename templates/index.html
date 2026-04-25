@@ -491,7 +491,8 @@
       <table class="table table-sm wb-history-table mb-0" id="trade-history-table">
         <thead>
           <tr>
-            <th>Time</th>
+            <th>Date/Time</th>
+            <th>Type</th>
             <th>Station</th>
             <th>Bucket</th>
             <th>Entry</th>
@@ -501,23 +502,31 @@
           </tr>
         </thead>
         <tbody id="trade-history-body">
-          {% if initial_state.closed_trades %}
-            {% for t in initial_state.closed_trades %}
+          {% if initial_state.trade_history %}
+            {% for t in initial_state.trade_history %}
             {% set pnl = t.realized_pnl or 0 %}
+            {% set is_open = t.type == 'OPEN' %}
             <tr>
-              <td>{{ t.ts or '—' }}</td>
+              <td class="text-nowrap small">{{ t.ts or '—' }}</td>
+              <td>
+                {% if is_open %}
+                  <span class="badge bg-primary">OPEN</span>
+                {% else %}
+                  <span class="badge bg-secondary">CLOSE</span>
+                {% endif %}
+              </td>
               <td>{{ t.station or '—' }}</td>
               <td>{{ t.bucket_lower }}°F</td>
               <td>{{ (t.entry_price * 100)|int }}¢</td>
-              <td>{{ (t.exit_price * 100)|int }}¢</td>
-              <td class="fw-bold {% if pnl >= 0 %}text-success{% else %}text-danger{% endif %}">
-                ${{ "%+.2f"|format(pnl) }}
+              <td>{% if not is_open and t.exit_price %}{{ (t.exit_price * 100)|int }}¢{% else %}—{% endif %}</td>
+              <td class="fw-bold {% if not is_open %}{% if pnl >= 0 %}text-success{% else %}text-danger{% endif %}{% else %}text-muted{% endif %}">
+                {% if not is_open %}${{ "%+.2f"|format(pnl) }}{% else %}—{% endif %}
               </td>
               <td class="d-none d-md-table-cell text-muted small">{{ t.reason or '—' }}</td>
             </tr>
             {% endfor %}
           {% else %}
-            <tr><td colspan="7" class="text-muted text-center py-3">No closed trades today.</td></tr>
+            <tr><td colspan="8" class="text-muted text-center py-3">No trades today.</td></tr>
           {% endif %}
         </tbody>
       </table>

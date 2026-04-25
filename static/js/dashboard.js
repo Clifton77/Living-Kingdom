@@ -113,7 +113,7 @@ function initSSE() {
 
   src.addEventListener('position_opened', e => {
     const d = JSON.parse(e.data);
-    // Full state will arrive shortly via state_update; refresh carousel
+    appendTradeHistoryRow(d);
     fetch('/api/state').then(r => r.json()).then(state => {
       if (state.signals) _signals = state.signals;
       rebuildCarousel(state.positions);
@@ -340,7 +340,7 @@ function applyFullState(state) {
   if (state.signals) _signals = state.signals;
   updateSummaryStrip(state.summary);
   if (state.positions) rebuildCarousel(state.positions);
-  if (state.closed_trades) populateTradeHistory(state.closed_trades);
+  if (state.trade_history) populateTradeHistory(state.trade_history);
   if (state.tier_status) {
     ['tier1','tier2','tier3','settlement'].forEach(t => {
       if (state.tier_status[t]) setTierTime(`${t}-last`, state.tier_status[t]);
@@ -496,56 +496,50 @@ function flashSignalCard(station, decision) {
 }
 
 // ── Trade history ────────────────────────────────────────────
+function _tradeRow(d) {
+  const isOpen   = d.type === 'OPEN';
+  const ts       = escHtml(d.ts || nowStr());
+  const typeBadge = isOpen
+    ? '<span class="badge bg-primary">OPEN</span>'
+    : '<span class="badge bg-secondary">CLOSE</span>';
+  const bucket  = d.bucket_lower != null ? `${d.bucket_lower}°F` : '—';
+  const entry   = d.entry_price  != null ? `${(d.entry_price * 100).toFixed(0)}¢` : '—';
+  const exitStr = (!isOpen && d.exit_price != null) ? `${(d.exit_price * 100).toFixed(0)}¢` : '—';
+  let pnlHtml;
+  if (isOpen) {
+    pnlHtml = '<span class="text-muted">—</span>';
+  } else {
+    const pnl = d.realized_pnl || 0;
+    const pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
+    const sign = pnl >= 0 ? '+' : '';
+    pnlHtml = `<span class="${pnlClass} fw-bold">$${sign}${pnl.toFixed(2)}</span>`;
+  }
+  const row = document.createElement('tr');
+  row.innerHTML = `
+    <td class="text-nowrap small">${ts}</td>
+    <td>${typeBadge}</td>
+    <td>${escHtml(d.station || '—')}</td>
+    <td>${bucket}</td>
+    <td>${entry}</td>
+    <td>${exitStr}</td>
+    <td>${pnlHtml}</td>
+    <td class="d-none d-md-table-cell text-muted small">${escHtml(d.reason || '—')}</td>`;
+  return row;
+}
+
 function appendTradeHistoryRow(d) {
   const tbody = document.getElementById('trade-history-body');
   if (!tbody) return;
-
-  // Remove "no trades" placeholder if present
   const placeholder = tbody.querySelector('td[colspan]');
   if (placeholder) placeholder.closest('tr').remove();
-
-  const pnl = d.realized_pnl || 0;
-  const pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
-  const sign = pnl >= 0 ? '+' : '';
-
-  const bucket = d.bucket_lower != null ? `${d.bucket_lower}°F` : '—';
-  const entry  = d.entry_price  != null ? `$${(d.entry_price * 100).toFixed(0)}¢` : '—';
-  const exit   = d.exit_price   != null ? `$${(d.exit_price  * 100).toFixed(0)}¢` : '—';
-
-  const row = document.createElement('tr');
-  row.innerHTML = `
-    <td>${nowStr()}</td>
-    <td>${d.station || '—'}</td>
-    <td>${bucket}</td>
-    <td>${entry}</td>
-    <td>${exit}</td>
-    <td class="${pnlClass} fw-bold">$${sign}${pnl.toFixed(2)}</td>
-    <td class="d-none d-md-table-cell text-muted small">${d.reason || '—'}</td>`;
-  tbody.prepend(row);
+  tbody.prepend(_tradeRow(d));
 }
 
 function populateTradeHistory(trades) {
   const tbody = document.getElementById('trade-history-body');
   if (!tbody || !trades || trades.length === 0) return;
   tbody.innerHTML = '';
-  trades.forEach(d => {
-    const pnl = d.realized_pnl || 0;
-    const pnlClass = pnl >= 0 ? 'text-success' : 'text-danger';
-    const sign = pnl >= 0 ? '+' : '';
-    const bucket = d.bucket_lower != null ? `${d.bucket_lower}°F` : '—';
-    const entry  = d.entry_price  != null ? `${(d.entry_price  * 100).toFixed(0)}¢` : '—';
-    const exit_p = d.exit_price   != null ? `${(d.exit_price   * 100).toFixed(0)}¢` : '—';
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td>${escHtml(d.ts || '—')}</td>
-      <td>${escHtml(d.station || '—')}</td>
-      <td>${bucket}</td>
-      <td>${entry}</td>
-      <td>${exit_p}</td>
-      <td class="${pnlClass} fw-bold">$${sign}${pnl.toFixed(2)}</td>
-      <td class="d-none d-md-table-cell text-muted small">${escHtml(d.reason || '—')}</td>`;
-    tbody.appendChild(row);
-  });
+  trades.forEach(d => tbody.appendChild(_tradeRow(d)));
 }
 
 function loadMoreTrades() {

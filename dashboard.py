@@ -167,7 +167,7 @@ def _enrich_position_display(pos: dict, now_utc: datetime) -> dict:
 
 def _get_full_state() -> dict:
     """Build a complete state snapshot for initial page render or /api/state."""
-    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_closed_trades
+    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_trade_history
 
     rm      = get_risk_manager()
     summary = rm.summary()
@@ -211,7 +211,7 @@ def _get_full_state() -> dict:
         },
         "city_names":      dict(cfg.STATION_CITY_NAMES),
         "bias_updated":    bias_updated,
-        "closed_trades":   list(reversed(get_closed_trades())),
+        "trade_history":   list(reversed(get_trade_history())),
     }
 
 
@@ -319,7 +319,7 @@ def manual_signal_pass():
 @app.route("/api/close-position/<path:market_id>", methods=["POST"])
 @_require_auth
 def close_position(market_id: str):
-    from scheduler import get_risk_manager, get_kalshi
+    from scheduler import get_risk_manager, get_kalshi, append_trade_history
     rm     = get_risk_manager()
     kalshi = get_kalshi()
 
@@ -335,20 +335,42 @@ def close_position(market_id: str):
     if not result.success:
         return jsonify({"ok": False, "error": result.error}), 500
 
+    station      = pos.station
+    bucket_lower = pos.bucket_lower
+    entry_price  = pos.entry_price
+
     realized = rm.close_position(market_id, snap.yes_bid, "Manual close via dashboard")
 
-    from utils.sheets import get_sheets_logger
-    get_sheets_logger().log_trade_closed(market_id, snap.yes_bid, realized, "Manual close")
+    tz = ZoneInfo(cfg.STATION_TIMEZONES.get(station, "UTC"))
+    now_local = datetime.now(tz)
+    h = now_local.hour % 12 or 12
+    ampm = "AM" if now_local.hour < 12 else "PM"
+    ts = f"{now_local.strftime('%b')} {now_local.day} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
 
+    from utils.sheets import get_sheets_logger
+    get_sheets_logger().log_trade_closed(station, market_id, snap.yes_bid, realized, "Manual close via dashboard")
+
+    closed_record = {
+        "ts":           ts,
+        "type":         "CLOSE",
+        "market_id":    market_id,
+        "station":      station,
+        "bucket_lower": bucket_lower,
+        "entry_price":  entry_price,
+        "exit_price":   snap.yes_bid,
+        "realized_pnl": realized,
+        "reason":       "Manual close via dashboard",
+    }
+    append_trade_history(closed_record)
     push_event("state_update", rm.summary())
-    push_event("position_closed", {"market_id": market_id, "realized_pnl": realized})
+    push_event("position_closed", closed_record)
     return jsonify({"ok": True, "realized_pnl": round(realized, 4)})
 
 
 @app.route("/api/close-all", methods=["POST"])
 @_require_auth
 def close_all():
-    from scheduler import get_risk_manager, get_kalshi
+    from scheduler import get_risk_manager, get_kalshi, append_trade_history
     rm     = get_risk_manager()
     kalshi = get_kalshi()
 
@@ -358,7 +380,30 @@ def close_all():
         bid  = snap.yes_bid if snap else 0.0
         result = kalshi.close_position(market_id, pos.contracts, bid)
         if result.success:
+            station      = pos.station
+            bucket_lower = pos.bucket_lower
+            entry_price  = pos.entry_price
             realized = rm.close_position(market_id, bid, "Close all via dashboard")
+
+            tz = ZoneInfo(cfg.STATION_TIMEZONES.get(station, "UTC"))
+            now_local = datetime.now(tz)
+            h = now_local.hour % 12 or 12
+            ampm = "AM" if now_local.hour < 12 else "PM"
+            ts = f"{now_local.strftime('%b')} {now_local.day} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
+
+            closed_record = {
+                "ts":           ts,
+                "type":         "CLOSE",
+                "market_id":    market_id,
+                "station":      station,
+                "bucket_lower": bucket_lower,
+                "entry_price":  entry_price,
+                "exit_price":   bid,
+                "realized_pnl": round(realized, 4),
+                "reason":       "Close all via dashboard",
+            }
+            append_trade_history(closed_record)
+            push_event("position_closed", closed_record)
             results.append({"market_id": market_id, "realized_pnl": round(realized, 4), "ok": True})
         else:
             results.append({"market_id": market_id, "ok": False, "error": result.error})

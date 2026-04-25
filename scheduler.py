@@ -148,12 +148,24 @@ _entry_in_progress: set[str] = set()
 # Key = market_id, value = UTC datetime of last snapshot write.
 _last_snapshot_time: dict[str, datetime] = {}
 
-# In-memory closed trade history for the dashboard trade log (current session only).
-_closed_trades: list = []
+# In-memory trade history for the dashboard (both opens and closes, current session only).
+_trade_history: list = []
 
 
-def get_closed_trades() -> list:
-    return list(_closed_trades)
+def get_trade_history() -> list:
+    return list(_trade_history)
+
+
+def append_trade_history(record: dict) -> None:
+    _trade_history.append(record)
+
+
+def _make_local_ts(station: str) -> str:
+    tz = ZoneInfo(STATION_TIMEZONES.get(station, "UTC"))
+    now_local = datetime.now(tz)
+    h = now_local.hour % 12 or 12
+    ampm = "AM" if now_local.hour < 12 else "PM"
+    return f"{now_local.strftime('%b')} {now_local.day} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
 
 
 # ---------------------------------------------------------------------------
@@ -934,15 +946,20 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             forecast_adjusted=sig.forecast_adjusted,
             sig=sig,
         )
-        push_event("position_opened", {
+        open_record = {
+            "ts":           _make_local_ts(station),
+            "type":         "OPEN",
             "market_id":    market_id,
             "station":      station,
             "bucket_lower": sig.top_bucket,
             "entry_price":  max_price,
             "contracts":    live_contracts,
             "stake_usd":    live_stake,
+            "event_date":   str(sig.event_date),
             "entry_reason": "tier1",
-        })
+        }
+        _trade_history.append(open_record)
+        push_event("position_opened", open_record)
         push_event("state_update", rm.summary())
         logger.info(
             "[Tier1] Entry: %s | bucket %d | %d contracts @ $%.2f | "
@@ -1049,15 +1066,20 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
             model_prob=second.model_prob, edge=fresh_edge2,
             forecast_adjusted=sig.forecast_adjusted, sig=sig,
         )
-        push_event("position_opened", {
+        open_record2 = {
+            "ts":           _make_local_ts(station),
+            "type":         "OPEN",
             "market_id":    market_id2,
             "station":      station,
             "bucket_lower": second.bucket_lower,
             "entry_price":  max_price2,
             "contracts":    live_contracts2,
             "stake_usd":    live_stake2,
+            "event_date":   str(sig.event_date),
             "entry_reason": "dual_entry",
-        })
+        }
+        _trade_history.append(open_record2)
+        push_event("position_opened", open_record2)
         push_event("state_update", rm.summary())
         logger.info(
             "[Tier1] Dual entry: %s | bucket %d | %d contracts @ $%.2f | "
@@ -1077,7 +1099,7 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     result = kalshi.close_position(market_id, pos.contracts, bid_price)
     if result.success:
         realized = rm.close_position(market_id, bid_price, reason)
-        get_sheets_logger().log_trade_closed(market_id, bid_price, realized, reason)
+        get_sheets_logger().log_trade_closed(pos.station, market_id, bid_price, realized, reason)
         journal_exit(
             station=pos.station,
             market_id=market_id,
@@ -1090,7 +1112,8 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
         mode = "DEMO" if USE_DEMO else "LIVE"
         get_sheets_logger().update_dashboard(rm.summary(), mode=mode)
         closed_record = {
-            "ts":           datetime.now(timezone.utc).strftime("%H:%M UTC"),
+            "ts":           _make_local_ts(pos.station),
+            "type":         "CLOSE",
             "market_id":    market_id,
             "station":      pos.station,
             "bucket_lower": pos.bucket_lower,
@@ -1100,7 +1123,7 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
             "realized_pnl": realized,
             "reason":       reason,
         }
-        _closed_trades.append(closed_record)
+        _trade_history.append(closed_record)
         push_event("position_closed", closed_record)
         push_event("state_update", rm.summary())
         logger.info("[Exit] Complete: %s | realized P/L $%+.4f", market_id, realized)
@@ -1451,7 +1474,7 @@ def _execute_reposition(
         f"({old_bucket}°F → {new_bucket}°F). Closing old position to open new."
     )
     realized = rm.close_position(existing_pos.market_id, old_snap.yes_bid, close_reason)
-    get_sheets_logger().log_trade_closed(existing_pos.market_id, old_snap.yes_bid, realized, close_reason)
+    get_sheets_logger().log_trade_closed(station, existing_pos.market_id, old_snap.yes_bid, realized, close_reason)
     logger.info(
         "[Tier3] Old position closed | %s | realized P/L $%+.4f",
         existing_pos.market_id, realized,
@@ -1775,7 +1798,7 @@ def tier_settlement_sweep():
             settlement_value = settlements[market_id]
             close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
             realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
-            sheets.log_trade_closed(market_id, settlement_value, realized, close_reason)
+            sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
             alert_settlement_detected(pos.station, market_id, realized)
 
             # Log model accuracy row — observed high comes from settlement bucket inference
