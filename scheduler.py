@@ -691,6 +691,21 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if sig.decision in ("SKIP", "CONSTRAINED"):
         return
 
+    # Block new entries on same-day markets once the station's local peak hour
+    # has passed. Tier 3 regenerates TRADE signals without knowing the peak has
+    # passed, which causes an immediate undershoot → re-entry loop.
+    today_utc = datetime.now(timezone.utc).date()
+    if event_date == today_utc:
+        station_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+        station_hour = station_now.hour
+        peak_hr      = get_peak_hour(station, event_date)
+        if station_hour >= peak_hr:
+            logger.info(
+                "[Tier1] %s same-day entry blocked — local hour %02dh ≥ peak %02dh",
+                station, station_hour, peak_hr,
+            )
+            return
+
     existing = rm.station_positions(station)
 
     # WATCH promotion — fetch a live Kalshi price and check whether edge has
