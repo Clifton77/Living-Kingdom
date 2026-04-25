@@ -321,7 +321,7 @@
           {% endif %}
 
           <!-- ── Kelly row ── -->
-          <div class="text-muted small mb-2">
+          <div class="text-muted small mb-2" id="kelly-row-{{ station }}">
             Kelly stake
             <span class="text-body fw-semibold ms-1">${{ "%.2f"|format(sig.kelly_stake_usd) }}</span>
             <span class="ms-1">({{ sig.kelly_contracts }} contracts @ ${{ "%.2f"|format(sig.top_yes_ask) }})</span>
@@ -391,7 +391,7 @@
                     <th class="d-none d-sm-table-cell">Bar</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody id="buckets-tbody-{{ station }}">
                   {% for b in sig.buckets %}
                   <tr class="{% if b.bucket_lower == sig.top_bucket %}wb-bucket-top-row{% endif %}">
                     <td class="fw-semibold">

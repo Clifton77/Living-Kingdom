@@ -51,11 +51,15 @@ def _push_signal_update(sig) -> None:
     """Push a signal_update SSE event so the dashboard card refreshes immediately."""
     push_event("signal_update", {
         "station":            sig.station,
+        "event_date":         str(sig.event_date),
         "decision":           sig.decision,
         "top_edge":           sig.top_edge,
         "top_bucket":         sig.top_bucket,
         "top_model_prob":     sig.top_model_prob,
         "top_kalshi_prob":    sig.top_kalshi_prob,
+        "top_yes_ask":        sig.top_yes_ask,
+        "kelly_stake_usd":    sig.kelly_stake_usd,
+        "kelly_contracts":    sig.kelly_contracts,
         "forecast_adjusted":  sig.forecast_adjusted,
         "bias_std":           sig.bias_std,
         "model_divergence_f": sig.model_divergence_f,
@@ -64,6 +68,18 @@ def _push_signal_update(sig) -> None:
         "cluster_id":         sig.cluster_id,
         "season":             sig.season,
         "n_obs":              sig.n_obs,
+        "buckets": [
+            {
+                "bucket_lower": b.bucket_lower,
+                "bucket_label": b.bucket_label,
+                "model_prob":   b.model_prob,
+                "kalshi_prob":  b.kalshi_prob,
+                "edge":         b.edge,
+                "yes_ask":      b.yes_ask,
+                "yes_bid":      b.yes_bid,
+            }
+            for b in sig.buckets
+        ],
     })
 from utils.dryrun_journal import log_entry as journal_entry, log_snapshot as journal_snapshot, log_exit as journal_exit
 from utils.alerting import (

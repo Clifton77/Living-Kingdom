@@ -237,58 +237,9 @@ function initSSE() {
       return;
     }
 
-    // Update _signals cache with fresh data
     _signals[d.station] = Object.assign(_signals[d.station] || {}, d);
-
-    // Decision badge + card border
     flashSignalCard(d.station, d.decision);
-    const badgeEl = document.querySelector(`[data-station="${d.station}"] .wb-decision-badge`);
-    if (badgeEl) {
-      badgeEl.textContent = d.decision;
-      badgeEl.className   = `wb-decision-badge badge wb-badge-${d.decision.toLowerCase()}`;
-    }
-
-    // Forecast temp
-    const fcstEl = document.getElementById(`fcst-temp-${d.station}`);
-    if (fcstEl && d.forecast_adjusted != null) {
-      const t   = Math.round(d.forecast_adjusted);
-      const cls = t < 45 ? 'cold' : (t > 95 ? 'hot' : (t > 80 ? 'warm' : 'mild'));
-      fcstEl.textContent = `${t}°F`;
-      fcstEl.className   = `fw-bold fs-5 wb-temp-${cls}`;
-    }
-    const stdEl = document.getElementById(`fcst-std-${d.station}`);
-    if (stdEl && d.bias_std != null) stdEl.textContent = `±${d.bias_std.toFixed(1)}°F`;
-
-    const divEl = document.getElementById(`fcst-div-${d.station}`);
-    if (divEl && d.model_divergence_f != null) {
-      const sign   = d.model_divergence_f >= 0 ? '+' : '';
-      const bgCls  = d.model_divergence_f > 2 ? 'bg-warning text-dark' : (d.model_divergence_f < -2 ? 'bg-info text-dark' : 'bg-secondary');
-      divEl.textContent = `NWS ${sign}${Math.round(d.model_divergence_f)}°F vs MOS`;
-      divEl.className   = `badge ${bgCls} wb-mos-badge`;
-    }
-
-    // Top bucket row
-    const lowerTail = d.live_lower_tail !== undefined ? d.live_lower_tail : 68;
-    const upperTail = d.live_upper_tail !== undefined ? d.live_upper_tail : 77;
-    const bucketEl  = document.getElementById(`top-bucket-${d.station}`);
-    if (bucketEl && d.top_bucket != null) bucketEl.textContent = fmtBucket(d.top_bucket, lowerTail, upperTail);
-
-    const modelProbEl = document.getElementById(`top-model-prob-${d.station}`);
-    if (modelProbEl && d.top_model_prob != null) modelProbEl.textContent = `${Math.round(d.top_model_prob * 100)}%`;
-
-    const kalshiProbEl = document.getElementById(`top-kalshi-prob-${d.station}`);
-    if (kalshiProbEl && d.top_kalshi_prob != null) kalshiProbEl.textContent = `${Math.round(d.top_kalshi_prob * 100)}%`;
-
-    const edgeEl = document.getElementById(`top-edge-${d.station}`);
-    if (edgeEl && d.top_edge != null) {
-      edgeEl.textContent = `${d.top_edge >= 0 ? '+' : ''}${d.top_edge.toFixed(2)}`;
-      edgeEl.className   = d.top_edge > 0 ? 'text-success fw-bold' : 'text-danger';
-    }
-
-    const clusterEl = document.getElementById(`fcst-cluster-${d.station}`);
-    if (clusterEl && d.cluster_id != null) {
-      clusterEl.textContent = `Cluster ${d.cluster_id} · ${d.season} · n=${d.n_obs}`;
-    }
+    _applySignalToCard(d.station, d);
 
     const signalsUpdated = document.getElementById('signals-updated');
     if (signalsUpdated) signalsUpdated.textContent = `Updated ${nowStr()}`;
@@ -337,7 +288,10 @@ function initSSE() {
 
 // ── Apply full state snapshot ────────────────────────────────
 function applyFullState(state) {
-  if (state.signals) _signals = state.signals;
+  if (state.signals) {
+    _signals = state.signals;
+    Object.entries(state.signals).forEach(([station, sig]) => _applySignalToCard(station, sig));
+  }
   updateSummaryStrip(state.summary);
   if (state.positions) rebuildCarousel(state.positions);
   if (state.trade_history) populateTradeHistory(state.trade_history);
@@ -347,6 +301,107 @@ function applyFullState(state) {
     });
   }
   updateTimestamp();
+}
+
+// ── Update all dynamic fields on a station signal card ───────
+function _applySignalToCard(station, sig) {
+  if (!sig) return;
+  const lowerTail = sig.live_lower_tail !== undefined ? sig.live_lower_tail : 68;
+  const upperTail = sig.live_upper_tail !== undefined ? sig.live_upper_tail : 77;
+
+  // Decision badge
+  const badgeEl = document.querySelector(`[data-station="${station}"] .wb-decision-badge`);
+  if (badgeEl && sig.decision) {
+    badgeEl.textContent = sig.decision;
+    badgeEl.className   = `wb-decision-badge badge wb-badge-${sig.decision.toLowerCase()}`;
+  }
+
+  // Forecast temp + std
+  const fcstEl = document.getElementById(`fcst-temp-${station}`);
+  if (fcstEl && sig.forecast_adjusted != null) {
+    const t   = Math.round(sig.forecast_adjusted);
+    const cls = t < 45 ? 'cold' : (t > 95 ? 'hot' : (t > 80 ? 'warm' : 'mild'));
+    fcstEl.textContent = `${t}°F`;
+    fcstEl.className   = `fw-bold fs-5 wb-temp-${cls}`;
+  }
+  const stdEl = document.getElementById(`fcst-std-${station}`);
+  if (stdEl && sig.bias_std != null) stdEl.textContent = `±${parseFloat(sig.bias_std).toFixed(1)}°F`;
+
+  // MOS divergence badge
+  const divEl = document.getElementById(`fcst-div-${station}`);
+  if (divEl && sig.model_divergence_f != null) {
+    const sign  = sig.model_divergence_f >= 0 ? '+' : '';
+    const bgCls = sig.model_divergence_f > 2 ? 'bg-warning text-dark' : (sig.model_divergence_f < -2 ? 'bg-info text-dark' : 'bg-secondary');
+    divEl.textContent = `NWS ${sign}${Math.round(sig.model_divergence_f)}°F vs MOS`;
+    divEl.className   = `badge ${bgCls} wb-mos-badge`;
+  }
+
+  // Cluster row
+  const clusterEl = document.getElementById(`fcst-cluster-${station}`);
+  if (clusterEl && sig.cluster_id != null) {
+    clusterEl.textContent = `Cluster ${sig.cluster_id} · ${sig.season} · n=${sig.n_obs}`;
+  }
+
+  // Top bucket
+  const bucketEl = document.getElementById(`top-bucket-${station}`);
+  if (bucketEl && sig.top_bucket != null) bucketEl.textContent = fmtBucket(sig.top_bucket, lowerTail, upperTail);
+
+  const modelProbEl = document.getElementById(`top-model-prob-${station}`);
+  if (modelProbEl && sig.top_model_prob != null) modelProbEl.textContent = `${Math.round(sig.top_model_prob * 100)}%`;
+
+  const kalshiProbEl = document.getElementById(`top-kalshi-prob-${station}`);
+  if (kalshiProbEl && sig.top_kalshi_prob != null) kalshiProbEl.textContent = `${Math.round(sig.top_kalshi_prob * 100)}%`;
+
+  const edgeEl = document.getElementById(`top-edge-${station}`);
+  if (edgeEl && sig.top_edge != null) {
+    edgeEl.textContent = `${sig.top_edge >= 0 ? '+' : ''}${parseFloat(sig.top_edge).toFixed(2)}`;
+    edgeEl.className   = sig.top_edge > 0 ? 'text-success fw-bold' : 'text-danger';
+  }
+
+  // Kelly row
+  const kellyEl = document.getElementById(`kelly-row-${station}`);
+  if (kellyEl) {
+    const stake     = sig.kelly_stake_usd != null ? `$${parseFloat(sig.kelly_stake_usd).toFixed(2)}` : '—';
+    const contracts = sig.kelly_contracts != null ? sig.kelly_contracts : '—';
+    const ask       = sig.top_yes_ask     != null ? `$${parseFloat(sig.top_yes_ask).toFixed(2)}`     : '—';
+    kellyEl.innerHTML = `Kelly stake <span class="text-body fw-semibold ms-1">${stake}</span>`
+      + ` <span class="ms-1">(${contracts} contracts @ ${ask})</span>`;
+  }
+
+  // Bucket table
+  if (sig.buckets && sig.buckets.length) {
+    const tbody = document.getElementById(`buckets-tbody-${station}`);
+    if (tbody) {
+      tbody.innerHTML = sig.buckets.map(b => {
+        const isTop   = b.bucket_lower === sig.top_bucket;
+        const edgeCls = b.edge > 0 ? 'text-success' : 'text-danger';
+        const barW    = Math.max(4, Math.min(100, Math.abs(b.edge) * 200));
+        const barCls  = b.edge > 0 ? 'wb-edge-pos' : 'wb-edge-neg';
+        const sign    = b.edge >= 0 ? '+' : '';
+        return `<tr class="${isTop ? 'wb-bucket-top-row' : ''}">
+          <td class="fw-semibold">${isTop ? '★ ' : ''}${escHtml(b.bucket_label)}</td>
+          <td class="text-center">${Math.round(b.model_prob * 100)}%</td>
+          <td class="text-center text-muted">${Math.round(b.kalshi_prob * 100)}%</td>
+          <td class="text-center ${edgeCls} fw-bold">${sign}${parseFloat(b.edge).toFixed(2)}</td>
+          <td class="d-none d-sm-table-cell" style="min-width:80px;">
+            <div class="wb-edge-bar-wrap">
+              <div class="wb-edge-bar ${barCls}" style="width:${barW}%"></div>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  // TAF condition (available in full state from sig.taf)
+  if (sig.taf) {
+    const skyEl  = document.getElementById(`wx-sky-${station}`);
+    if (skyEl && sig.taf.sky_cover) skyEl.textContent = sig.taf.sky_cover;
+    const iconEl = document.getElementById(`wx-icon-${station}`);
+    if (iconEl && sig.taf.condition) {
+      iconEl.className = `wb-wx-icon wb-wx-${sig.taf.condition.replace(/ /g, '_')} mb-1`;
+    }
+  }
 }
 
 // ── Summary strip ────────────────────────────────────────────
