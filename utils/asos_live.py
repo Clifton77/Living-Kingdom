@@ -49,8 +49,11 @@ def fetch_1min_temps(station: str, event_date: date) -> pd.DataFrame | None:
     tz = STATION_TIMEZONES[station]
     ds = event_date.strftime("%Y-%m-%d")
 
+    # IEM 1-min uses 3-letter codes (e.g. JFK, not KJFK)
+    iem_station = station[1:] if station.startswith("K") and len(station) == 4 else station
+
     params = {
-        "station":  station,
+        "station":  iem_station,
         "vars":     "tmpf",
         "year1":    event_date.year,
         "month1":   event_date.month,
