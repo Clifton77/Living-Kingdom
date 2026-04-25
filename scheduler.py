@@ -131,6 +131,8 @@ from config import (
     ENTRY_CUTOFF_PRE_PEAK_HOURS,
     MIN_EDGE,
     MIN_YES_ASK,
+    MAX_YES_ASK,
+    MAX_DAILY_ENTRIES_PER_STATION,
 )
 
 logger = setup_logging("scheduler")
@@ -172,6 +174,11 @@ _last_snapshot_time: dict[str, datetime] = {}
 
 # In-memory trade history for the dashboard (both opens and closes, current session only).
 _trade_history: list = []
+
+# Daily entry cap: (station, event_date) → count of new position opens.
+# Prevents re-entering the same station+market more than MAX_DAILY_ENTRIES_PER_STATION times.
+_daily_entry_counts: dict[tuple[str, date], int] = {}
+_daily_entry_counts_lock = threading.Lock()
 
 
 def get_trade_history() -> list:
@@ -633,7 +640,8 @@ def tier1_metar_entries_exits():
                     # Intraday guards (undershoot/overshoot) only apply when the
                     # position settles TODAY. For tomorrow's market, today's running
                     # max and local hour are irrelevant — pass None to skip them.
-                    pos_is_today = (pos_event_date == date.today())
+                    # Use now_utc.date() (not date.today()) to avoid machine-timezone drift.
+                    pos_is_today = (pos_event_date == now_utc.date())
                     exit_decision = rm.update_position(
                         market_id=market_id,
                         current_bid=snap.yes_bid,
@@ -804,11 +812,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     # Block new entries on same-day markets once the station's local peak hour
     # has passed. Tier 3 regenerates TRADE signals without knowing the peak has
     # passed, which causes an immediate undershoot → re-entry loop.
-    today_utc = datetime.now(timezone.utc).date()
-    if event_date == today_utc:
-        station_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
-        station_hour = station_now.hour
-        peak_hr      = get_peak_hour(station, event_date)
+    # Compare against the station's LOCAL date (not UTC) so western stations
+    # behave correctly when their local date lags UTC.
+    station_now   = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+    station_date  = station_now.date()
+    station_hour  = station_now.hour
+    if event_date == station_date:
+        peak_hr = get_peak_hour(station, event_date)
         if station_hour >= peak_hr:
             logger.info(
                 "[Tier1] %s same-day entry blocked — local hour %02dh ≥ peak %02dh",
@@ -948,6 +958,27 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         )
         return
 
+    # YES_ASK ceiling guard: high entry price → large dollar stop-loss risk
+    if snap.yes_ask > MAX_YES_ASK:
+        logger.info(
+            "[Tier1] %s yes_ask=%.3f above ceiling %.3f — skip",
+            station, snap.yes_ask, MAX_YES_ASK,
+        )
+        return
+
+    # Daily entry cap: limit re-entries per station per market date
+    with _daily_entry_counts_lock:
+        _entry_key = (station, event_date)
+        if _daily_entry_counts.get(_entry_key, 0) >= MAX_DAILY_ENTRIES_PER_STATION:
+            logger.info(
+                "[Tier1] %s daily entry cap reached (%d/%d for %s) — skip",
+                station,
+                _daily_entry_counts[_entry_key],
+                MAX_DAILY_ENTRIES_PER_STATION,
+                event_date,
+            )
+            return
+
     # Running-max guard: observed temp has already surpassed the bucket ceiling
     _rm_cached = _running_max_cache.get(station)
     if _rm_cached is not None and (now_utc - _rm_cached[1]).total_seconds() < 600:
@@ -1059,6 +1090,9 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         _trade_history.append(open_record)
         push_event("position_opened", open_record)
         push_event("state_update", rm.summary())
+        with _daily_entry_counts_lock:
+            _entry_key = (station, event_date)
+            _daily_entry_counts[_entry_key] = _daily_entry_counts.get(_entry_key, 0) + 1
         logger.info(
             "[Tier1] Entry: %s | bucket %d | %d contracts @ $%.2f | "
             "edge %+.3f | stake $%.2f",
@@ -1263,6 +1297,13 @@ def tier3_full_signal_pass(event_date: date | None = None):
     """
     logger.info("[Tier3] Full signal recompute starting")
     rm = get_risk_manager()
+
+    # Purge daily entry counts older than 2 days to avoid memory growth
+    with _daily_entry_counts_lock:
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=2)
+        stale  = [k for k in _daily_entry_counts if k[1] < cutoff]
+        for k in stale:
+            del _daily_entry_counts[k]
 
     # Sync bankroll from live Kalshi balance — picks up deposits/withdrawals
     # without requiring a bot restart.
