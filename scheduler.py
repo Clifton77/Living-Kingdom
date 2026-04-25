@@ -252,13 +252,13 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
                     live_sig.top_yes_ask     = top.yes_ask
 
             _push_signal_update(sig)
-            logger.debug(
-                "[PriceRefresh] %s: top=%d ask=%.3f edge=%+.3f",
-                station, top.bucket_lower, top.yes_ask, top.edge,
+            logger.info(
+                "[PriceRefresh] %s: pushed %d buckets | top=%d ask=%.2f edge=%+.3f",
+                station, len(updated), top.bucket_lower, top.yes_ask, top.edge,
             )
 
         except Exception as exc:
-            logger.warning("[PriceRefresh] %s: %s", station, exc)
+            logger.error("[PriceRefresh] %s: %s", station, exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

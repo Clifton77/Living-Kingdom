@@ -304,7 +304,7 @@
               <span class="fw-semibold" id="top-bucket-{{ station }}">{% if sig.top_bucket == sig.live_lower_tail %}≤{{ sig.live_lower_tail }}{% elif sig.top_bucket == sig.live_upper_tail %}≥{{ sig.live_upper_tail }}{% else %}{{ sig.top_bucket }}–{{ sig.top_bucket + 1 }}{% endif %}°F</span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body" id="top-model-prob-{{ station }}">{{ "%.0f"|format(sig.top_model_prob * 100) }}%</span></span>
-                <span class="text-muted small">Kalshi <span class="text-body" id="top-kalshi-prob-{{ station }}">{{ "%.0f"|format(sig.top_kalshi_prob * 100) }}%</span></span>
+                <span class="text-muted small">Ask <span class="text-body" id="top-kalshi-prob-{{ station }}">{{ "%.0f"|format(sig.top_yes_ask * 100) }}¢</span></span>
                 <span class="text-muted small">Edge
                   <span class="{% if sig.top_edge > 0 %}text-success fw-bold{% else %}text-danger{% endif %}" id="top-edge-{{ station }}">
                     {{ "%+.2f"|format(sig.top_edge) }}
@@ -386,7 +386,7 @@
                   <tr>
                     <th>Bucket</th>
                     <th class="text-center">Model</th>
-                    <th class="text-center">Kalshi</th>
+                    <th class="text-center">Ask</th>
                     <th class="text-center">Edge</th>
                     <th class="d-none d-sm-table-cell">Bar</th>
                   </tr>
@@ -399,7 +399,7 @@
                       {{ b.bucket_label }}
                     </td>
                     <td class="text-center">{{ "%.0f"|format(b.model_prob * 100) }}%</td>
-                    <td class="text-center text-muted">{{ "%.0f"|format(b.kalshi_prob * 100) }}%</td>
+                    <td class="text-center text-muted">{{ "%.0f"|format(b.yes_ask * 100) }}¢</td>
                     <td class="text-center {% if b.edge > 0 %}text-success{% else %}text-danger{% endif %} fw-bold">
                       {{ "%+.2f"|format(b.edge) }}
                     </td>

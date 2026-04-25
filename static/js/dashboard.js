@@ -350,7 +350,7 @@ function _applySignalToCard(station, sig) {
   if (modelProbEl && sig.top_model_prob != null) modelProbEl.textContent = `${Math.round(sig.top_model_prob * 100)}%`;
 
   const kalshiProbEl = document.getElementById(`top-kalshi-prob-${station}`);
-  if (kalshiProbEl && sig.top_kalshi_prob != null) kalshiProbEl.textContent = `${Math.round(sig.top_kalshi_prob * 100)}%`;
+  if (kalshiProbEl && sig.top_yes_ask != null) kalshiProbEl.textContent = `${Math.round(sig.top_yes_ask * 100)}¢`;
 
   const edgeEl = document.getElementById(`top-edge-${station}`);
   if (edgeEl && sig.top_edge != null) {
@@ -381,7 +381,7 @@ function _applySignalToCard(station, sig) {
         return `<tr class="${isTop ? 'wb-bucket-top-row' : ''}">
           <td class="fw-semibold">${isTop ? '★ ' : ''}${escHtml(b.bucket_label)}</td>
           <td class="text-center">${Math.round(b.model_prob * 100)}%</td>
-          <td class="text-center text-muted">${Math.round(b.kalshi_prob * 100)}%</td>
+          <td class="text-center text-muted">${Math.round(b.yes_ask * 100)}¢</td>
           <td class="text-center ${edgeCls} fw-bold">${sign}${parseFloat(b.edge).toFixed(2)}</td>
           <td class="d-none d-sm-table-cell" style="min-width:80px;">
             <div class="wb-edge-bar-wrap">
