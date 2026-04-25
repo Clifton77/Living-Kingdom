@@ -72,7 +72,7 @@ from utils.alerting import (
     alert_daily_loss_limit,
     alert_settlement_detected,
 )
-from scripts.signal_engine import run_signal_pass, TradeSignal, check_forecast_availability
+from scripts.signal_engine import run_signal_pass, TradeSignal, BucketAnalysis, check_forecast_availability
 from scripts.taf_interpreter import interpret_taf, get_metar
 from kalshi_client import KalshiClient, build_market_id
 from risk import RiskManager
@@ -168,6 +168,70 @@ def _make_local_ts(station: str) -> str:
     return f"{now_local.strftime('%b')} {now_local.day} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
 
 
+def _refresh_all_kalshi_prices(kalshi) -> None:
+    """
+    Refresh Kalshi bucket prices for every active signal without re-running the
+    forecast model.  Updates yes_ask/yes_bid/edge in-place, re-ranks the top
+    bucket, and pushes a signal_update event so the dashboard reflects fresh
+    market prices.  Called at the start of every Tier 1 and Tier 2 pass.
+    Tier 3 skips this — its full run_signal_pass already fetches live prices.
+    """
+    with _latest_signals_lock:
+        signals_snapshot = dict(_latest_signals)
+
+    for station, sig in signals_snapshot.items():
+        if not sig.buckets or sig.decision == "HARD_SKIP":
+            continue
+        try:
+            snapshots = kalshi.get_all_snapshots(station, sig.event_date)
+            if not snapshots:
+                continue
+
+            market_total = sum(s.implied_prob for s in snapshots.values() if s is not None)
+            if market_total <= 0:
+                continue
+
+            updated: list = []
+            for b in sig.buckets:
+                snap = snapshots.get(b.bucket_lower)
+                if snap is None:
+                    continue
+                kalshi_p = snap.implied_prob / market_total
+                updated.append(BucketAnalysis(
+                    bucket_lower=b.bucket_lower,
+                    bucket_label=b.bucket_label,
+                    model_prob=b.model_prob,
+                    kalshi_prob=round(kalshi_p, 4),
+                    edge=round(b.model_prob - kalshi_p, 4),
+                    yes_ask=snap.yes_ask,
+                    yes_bid=snap.yes_bid,
+                ))
+
+            if not updated:
+                continue
+
+            top = sorted(updated, key=lambda b: b.yes_ask, reverse=True)[0]
+
+            with _latest_signals_lock:
+                live_sig = _latest_signals.get(station)
+                if live_sig is sig:
+                    live_sig.buckets         = updated
+                    live_sig.top_bucket      = top.bucket_lower
+                    live_sig.top_edge        = top.edge
+                    live_sig.top_model_prob  = top.model_prob
+                    live_sig.top_kalshi_prob = top.kalshi_prob
+                    live_sig.top_yes_ask     = top.yes_ask
+
+            _push_signal_update(sig)
+            logger.debug(
+                "[PriceRefresh] %s: top=%d ask=%.3f edge=%+.3f",
+                station, top.bucket_lower, top.yes_ask, top.edge,
+            )
+
+        except Exception as exc:
+            logger.warning("[PriceRefresh] %s: %s", station, exc)
+
+
 # ---------------------------------------------------------------------------
 # Shared state accessors (for dashboard)
 # ---------------------------------------------------------------------------
@@ -210,6 +274,9 @@ def tier2_taf_monitor():
     if rm.is_halted:
         logger.info("[Tier2] Bot halted — skipping")
         return
+
+    # Refresh Kalshi bucket prices before evaluating TAF conditions
+    _refresh_all_kalshi_prices(kalshi)
 
     for station in STATIONS:
         try:
@@ -468,6 +535,9 @@ def tier1_metar_entries_exits():
             return
 
         now_utc = datetime.now(timezone.utc)
+
+        # ── Price refresh — update all bucket prices before exit/entry logic ─
+        _refresh_all_kalshi_prices(kalshi)
 
         # ── Pass 1: exits ────────────────────────────────────────────────────
         for station in STATIONS:
