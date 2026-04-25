@@ -46,6 +46,25 @@ from utils.logging_config import setup_logging
 from utils.asos_live import running_max_with_confluence
 from utils.sheets import get_sheets_logger
 from utils.events import push_event, push_alert
+
+def _push_signal_update(sig) -> None:
+    """Push a signal_update SSE event so the dashboard card refreshes immediately."""
+    push_event("signal_update", {
+        "station":            sig.station,
+        "decision":           sig.decision,
+        "top_edge":           sig.top_edge,
+        "top_bucket":         sig.top_bucket,
+        "top_model_prob":     sig.top_model_prob,
+        "top_kalshi_prob":    sig.top_kalshi_prob,
+        "forecast_adjusted":  sig.forecast_adjusted,
+        "bias_std":           sig.bias_std,
+        "model_divergence_f": sig.model_divergence_f,
+        "live_lower_tail":    sig.live_lower_tail,
+        "live_upper_tail":    sig.live_upper_tail,
+        "cluster_id":         sig.cluster_id,
+        "season":             sig.season,
+        "n_obs":              sig.n_obs,
+    })
 from utils.dryrun_journal import log_entry as journal_entry, log_snapshot as journal_snapshot, log_exit as journal_exit
 from utils.alerting import (
     alert_order_failure,
@@ -299,19 +318,23 @@ def tier2_taf_monitor():
                 with _latest_signals_lock:
                     current = _latest_signals.get(station)
                     if current is not None:
-                        _latest_signals[station] = dataclasses.replace(
+                        updated = dataclasses.replace(
                             current,
                             decision="HARD_SKIP",
                             weather_gate="hard_skip",
                         )
+                        _latest_signals[station] = updated
                         logger.info(
                             "[Tier2] %s signal overwritten to HARD_SKIP — "
                             "Tier 1 re-entry blocked until next Tier 3 run",
                             station,
                         )
+                        _push_signal_update(updated)
 
         except Exception as exc:
             logger.error("[Tier2] Error scanning %s: %s", station, exc)
+
+    push_event("state_update", get_risk_manager().summary())
 
 
 def _single_station_signal_pass(station: str):
@@ -332,6 +355,8 @@ def _single_station_signal_pass(station: str):
         with _latest_signals_lock:
             _latest_signals[station] = sig
 
+        _push_signal_update(sig)
+        push_event("state_update", get_risk_manager().summary())
         logger.info("[SignalRefresh] %s: %s | edge=%+.3f", station, sig.decision, sig.top_edge)
 
     except Exception as exc:
@@ -534,11 +559,13 @@ def tier1_metar_entries_exits():
                             with _latest_signals_lock:
                                 current_sig = _latest_signals.get(station)
                                 if current_sig is not None:
-                                    _latest_signals[station] = dataclasses.replace(
+                                    updated_sig = dataclasses.replace(
                                         current_sig,
                                         decision="HARD_SKIP",
                                         weather_gate="hard_skip",
                                     )
+                                    _latest_signals[station] = updated_sig
+                                    _push_signal_update(updated_sig)
                             logger.info(
                                 "[Tier1] %s → HARD_SKIP after undershoot exit — "
                                 "re-entry blocked until next Tier 3 run",
@@ -617,6 +644,7 @@ def tier1_metar_entries_exits():
                 with _entry_lock:
                     _entry_in_progress.discard(station)
 
+        push_event("state_update", rm.summary())
         logger.info("[Tier1] Cycle complete")
 
     finally:
@@ -704,6 +732,15 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             return
 
         market_id = snap_check.market_id  # use API ticker (avoids B68 vs T68 mismatch)
+        fresh_edge_check = sig.top_model_prob - snap_check.yes_ask
+        push_event("kalshi_top_update", {
+            "station":        station,
+            "top_bucket":     sig.top_bucket,
+            "yes_ask":        snap_check.yes_ask,
+            "yes_bid":        snap_check.yes_bid,
+            "fresh_edge":     round(fresh_edge_check, 4),
+            "top_model_prob": sig.top_model_prob,
+        })
 
         if dist == 1:
             expansion_decision = _evaluate_expansion(
@@ -745,6 +782,15 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     snap = kalshi.get_market_snapshot(station, sig.event_date, sig.top_bucket)
     if snap is None or not snap.is_open:
         return
+
+    push_event("kalshi_top_update", {
+        "station":        station,
+        "top_bucket":     sig.top_bucket,
+        "yes_ask":        snap.yes_ask,
+        "yes_bid":        snap.yes_bid,
+        "fresh_edge":     round(sig.top_model_prob - snap.yes_ask, 4),
+        "top_model_prob": sig.top_model_prob,
+    })
 
     # Liquidity guard
     spread    = snap.yes_ask - snap.yes_bid
@@ -1180,6 +1226,7 @@ def tier3_full_signal_pass(event_date: date | None = None):
             sheets.log_skipped_signal(sig, sig.decision)
 
     summary = rm.summary()
+    push_event("state_update", summary)
     sheets.update_dashboard(summary, mode="DEMO" if USE_DEMO else "LIVE")
     trade_count = sum(1 for s in signals.values() if s.decision == "TRADE")
     logger.info(
