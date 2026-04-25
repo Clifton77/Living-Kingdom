@@ -808,22 +808,23 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         "fresh_edge":     round(fresh_edge, 4),
         "top_model_prob": sig.top_model_prob,
     })
-    ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    # Size primary entry. When dual-entry will fire the 2% budget is split
+    # evenly (1% primary + 1% secondary = 2% total). Otherwise full 2%.
+    import math as _math
+    splits = 2 if _dual_entry_eligible(sig) else 1
+    primary_budget = round(rm.state.bankroll * MAX_STAKE_PCT / splits, 2)
+
+    ok, reason = rm.can_open_position(primary_budget, station=station)
     if not ok:
         logger.info("[Tier1] %s risk gate: %s", station, reason)
         return
 
     max_price = snap.yes_ask
-
-    # Recompute contracts at the live execution price — the signal's kelly_contracts
-    # was sized against the Tier3 ask, which may have risen by Tier1 execution.
-    # Using stale contracts at a higher price overspends Kelly's risk budget.
-    import math as _math
-    live_contracts = int(_math.floor(sig.kelly_stake_usd / max_price)) if max_price > 0 else 0
+    live_contracts = int(_math.floor(primary_budget / max_price)) if max_price > 0 else 0
     if live_contracts < 1:
         logger.info(
-            "[Tier1] %s kelly $%.2f yields 0 contracts at live ask $%.2f — skip",
-            station, sig.kelly_stake_usd, max_price,
+            "[Tier1] %s primary budget $%.2f yields 0 contracts at live ask $%.2f — skip",
+            station, primary_budget, max_price,
         )
         return
     live_stake = round(live_contracts * max_price, 4)
@@ -890,43 +891,39 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         alert_order_failure(station, market_id, result.error or "unknown")
 
 
+def _dual_entry_eligible(sig) -> bool:
+    """True when the signal's top two buckets meet all dual-entry conditions."""
+    if not sig.buckets or len(sig.buckets) < 2:
+        return False
+    ranked = sorted(sig.buckets, key=lambda b: b.yes_ask, reverse=True)
+    first, second = ranked[0], ranked[1]
+    if first.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
+        return False
+    if second.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
+        return False
+    gap = first.yes_ask - second.yes_ask
+    return (
+        first.yes_ask <= 0.35
+        and gap <= 0.10
+        and abs(first.bucket_lower - second.bucket_lower) == 2
+    )
+
+
 def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
     """
-    Enter the second-ranked Kalshi bucket when the market is spread across
-    adjacent buckets (no single bucket dominates).
-
-    Conditions (all must pass):
-      - Top bucket yes_ask ≤ 35%  (spread market, not concentrated)
-      - Top two buckets within 10pp of each other  (close together)
-      - Top two buckets are adjacent  (bucket_lower differs by exactly 2°F)
-      - Neither bucket is a tail market  (interior buckets only)
+    Enter the second-ranked Kalshi bucket when _dual_entry_eligible() is True.
+    Primary + secondary together equal 2% of bankroll (1% each).
     """
     import math as _math
 
-    if not sig.buckets:
+    if not _dual_entry_eligible(sig):
         return
     if len(rm.station_positions(station)) >= MAX_STATION_POSITIONS:
         return
 
     ranked = sorted(sig.buckets, key=lambda b: b.yes_ask, reverse=True)
-    if len(ranked) < 2:
-        return
-
     first, second = ranked[0], ranked[1]
     gap = first.yes_ask - second.yes_ask
-
-    # Tail exclusion
-    if first.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
-        return
-    if second.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
-        return
-
-    if not (
-        first.yes_ask <= 0.35
-        and gap <= 0.10
-        and abs(first.bucket_lower - second.bucket_lower) == 2
-    ):
-        return
 
     snap2 = kalshi.get_market_snapshot(station, sig.event_date, second.bucket_lower)
     if snap2 is None or not snap2.is_open or snap2.yes_ask < MIN_YES_ASK:
@@ -948,7 +945,7 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
                 )
                 return
 
-    stake_budget = round(rm.state.bankroll * MAX_STAKE_PCT, 2)
+    stake_budget = round(rm.state.bankroll * MAX_STAKE_PCT / 2, 2)
     ok, risk_reason = rm.can_open_position(stake_budget, station=station)
     if not ok:
         logger.info("[Tier1] %s dual-entry: risk gate: %s", station, risk_reason)
