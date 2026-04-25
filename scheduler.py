@@ -517,17 +517,22 @@ def tier1_metar_entries_exits():
                                 sig = _latest_signals.get(station)
 
                     current_edge      = sig.top_edge if sig and sig.top_bucket == pos.bucket_lower else 0.0
-                    peak_heating_hour = get_peak_hour(station, date.fromisoformat(pos.event_date))
+                    pos_event_date    = date.fromisoformat(pos.event_date)
+                    peak_heating_hour = get_peak_hour(station, pos_event_date)
 
+                    # Intraday guards (undershoot/overshoot) only apply when the
+                    # position settles TODAY. For tomorrow's market, today's running
+                    # max and local hour are irrelevant — pass None to skip them.
+                    pos_is_today = (pos_event_date == date.today())
                     exit_decision = rm.update_position(
                         market_id=market_id,
                         current_bid=snap.yes_bid,
                         current_ask=snap.yes_ask,
                         current_edge=current_edge,
-                        current_obs_temp=obs_temp,
-                        running_max=running_max,
-                        local_hour=local_hour,
-                        peak_heating_hour=peak_heating_hour,
+                        current_obs_temp=obs_temp        if pos_is_today else None,
+                        running_max=running_max          if pos_is_today else None,
+                        local_hour=local_hour            if pos_is_today else None,
+                        peak_heating_hour=peak_heating_hour if pos_is_today else None,
                     )
 
                     log_level = (
