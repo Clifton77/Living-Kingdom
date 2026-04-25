@@ -892,8 +892,14 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
 
 def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
     """
-    If top two Kalshi buckets by yes_ask are within 10pp and second ≥ 15%,
-    also enter the second bucket (up to MAX_STATION_POSITIONS).
+    Enter the second-ranked Kalshi bucket when the market is spread across
+    adjacent buckets (no single bucket dominates).
+
+    Conditions (all must pass):
+      - Top bucket yes_ask ≤ 35%  (spread market, not concentrated)
+      - Top two buckets within 10pp of each other  (close together)
+      - Top two buckets are adjacent  (bucket_lower differs by exactly 2°F)
+      - Neither bucket is a tail market  (interior buckets only)
     """
     import math as _math
 
@@ -909,7 +915,17 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
     first, second = ranked[0], ranked[1]
     gap = first.yes_ask - second.yes_ask
 
-    if not (gap <= 0.10 and second.yes_ask >= 0.15):
+    # Tail exclusion
+    if first.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
+        return
+    if second.bucket_lower in (KALSHI_BUCKET_LOWER_TAIL, KALSHI_BUCKET_UPPER_TAIL):
+        return
+
+    if not (
+        first.yes_ask <= 0.35
+        and gap <= 0.10
+        and abs(first.bucket_lower - second.bucket_lower) == 2
+    ):
         return
 
     snap2 = kalshi.get_market_snapshot(station, sig.event_date, second.bucket_lower)
@@ -932,14 +948,15 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
                 )
                 return
 
-    ok, risk_reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
+    stake_budget = round(rm.state.bankroll * MAX_STAKE_PCT, 2)
+    ok, risk_reason = rm.can_open_position(stake_budget, station=station)
     if not ok:
         logger.info("[Tier1] %s dual-entry: risk gate: %s", station, risk_reason)
         return
 
-    fresh_edge2 = second.model_prob - snap2.yes_ask
-    max_price2  = snap2.yes_ask
-    live_contracts2 = int(_math.floor(sig.kelly_stake_usd / max_price2)) if max_price2 > 0 else 0
+    fresh_edge2  = second.model_prob - snap2.yes_ask
+    max_price2   = snap2.yes_ask
+    live_contracts2 = int(_math.floor(stake_budget / max_price2)) if max_price2 > 0 else 0
     if live_contracts2 < 1:
         return
     live_stake2 = round(live_contracts2 * max_price2, 4)
