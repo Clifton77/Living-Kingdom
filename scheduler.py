@@ -80,6 +80,12 @@ def _push_signal_update(sig) -> None:
             }
             for b in sig.buckets
         ],
+        "metar": {
+            "temp_f":      sig.metar.temp_f,
+            "dewpoint_f":  sig.metar.dewpoint_f,
+            "wind_kt":     sig.metar.wind_kt,
+            "sky_cover":   sig.metar.sky_cover,
+        } if sig.metar else None,
     })
 from utils.dryrun_journal import log_entry as journal_entry, log_snapshot as journal_snapshot, log_exit as journal_exit
 from utils.alerting import (
@@ -573,6 +579,12 @@ def tier1_metar_entries_exits():
                     "dewpoint_f": metar.dewpoint_f,
                     "sky_cover":  metar.sky_cover or "—",
                 })
+                # Keep sig.metar current so applyFullState / signal_update always
+                # carry the latest obs — not just the Tier-3-age snapshot.
+                with _latest_signals_lock:
+                    live_sig = _latest_signals.get(station)
+                    if live_sig is not None:
+                        live_sig.metar = metar
 
                 station_positions = {
                     mid: pos for mid, pos in rm.state.positions.items()

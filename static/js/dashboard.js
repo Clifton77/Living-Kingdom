@@ -402,6 +402,35 @@ function _applySignalToCard(station, sig) {
       iconEl.className = `wb-wx-icon wb-wx-${sig.taf.condition.replace(/ /g, '_')} mb-1`;
     }
   }
+
+  // Live obs (METAR) — temp, wind, dewpoint, sky, obs-div
+  if (sig.metar) {
+    const tempEl = document.getElementById(`wx-temp-${station}`);
+    if (tempEl && sig.metar.temp_f != null) {
+      const t   = Math.round(sig.metar.temp_f);
+      const cls = t < 45 ? 'cold' : (t > 95 ? 'hot' : (t > 80 ? 'warm' : 'mild'));
+      tempEl.textContent = `${t}°F`;
+      tempEl.className   = `wb-wx-temp wb-temp-${cls}`;
+    }
+    const windEl = document.getElementById(`wx-wind-${station}`);
+    if (windEl && sig.metar.wind_kt != null) windEl.textContent = `${Math.round(sig.metar.wind_kt)}kt`;
+    const dewEl = document.getElementById(`wx-dew-${station}`);
+    if (dewEl && sig.metar.dewpoint_f != null) dewEl.textContent = `DP ${Math.round(sig.metar.dewpoint_f)}°F`;
+    const skyEl = document.getElementById(`wx-sky-${station}`);
+    if (skyEl && sig.metar.sky_cover) skyEl.textContent = sig.metar.sky_cover;
+    const obsTempEl = document.getElementById(`obs-temp-${station}`);
+    if (obsTempEl && sig.metar.temp_f != null) obsTempEl.textContent = `${Math.round(sig.metar.temp_f)}°F`;
+    if (sig.forecast_adjusted != null && sig.metar.temp_f != null) {
+      const divF   = sig.metar.temp_f - sig.forecast_adjusted;
+      const divCls = divF > 4 ? 'hot' : (divF < -4 ? 'cold' : 'ok');
+      const arrow  = divCls === 'hot' ? ' ▲' : (divCls === 'cold' ? ' ▼' : ' ≈');
+      const obsDivEl = document.getElementById(`obs-div-${station}`);
+      if (obsDivEl) {
+        obsDivEl.textContent = `${divF >= 0 ? '+' : ''}${Math.round(divF)}°F${arrow}`;
+        obsDivEl.className   = `wb-divergence-flag wb-divergence-${divCls}`;
+      }
+    }
+  }
 }
 
 // ── Summary strip ────────────────────────────────────────────
