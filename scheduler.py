@@ -600,10 +600,10 @@ def tier1_metar_entries_exits():
                 if not station_positions:
                     continue
 
-                local_now  = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+                local_now  = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
                 local_hour = local_now.hour
 
-                rm_data     = running_max_with_confluence(station, date.today())
+                rm_data     = running_max_with_confluence(station, now_utc.date())
                 running_max = rm_data["running_max_f"]
                 _running_max_cache[station] = (running_max, now_utc)
                 if not rm_data["in_confluence"]:
@@ -640,8 +640,15 @@ def tier1_metar_entries_exits():
                     # Intraday guards (undershoot/overshoot) only apply when the
                     # position settles TODAY. For tomorrow's market, today's running
                     # max and local hour are irrelevant — pass None to skip them.
-                    # Use now_utc.date() (not date.today()) to avoid machine-timezone drift.
-                    pos_is_today = (pos_event_date == now_utc.date())
+                    # Parse market date directly from the Kalshi ticker (e.g. "26APR26")
+                    # as the authoritative source — pos.event_date can be stale if a
+                    # signal refresh changed event_date mid-cycle.
+                    try:
+                        _ticker_date_str = market_id.split("-")[1]
+                        _market_date = datetime.strptime(_ticker_date_str, "%d%b%y").date()
+                    except (IndexError, ValueError):
+                        _market_date = pos_event_date
+                    pos_is_today = (_market_date == now_utc.date())
                     exit_decision = rm.update_position(
                         market_id=market_id,
                         current_bid=snap.yes_bid,
@@ -814,7 +821,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     # passed, which causes an immediate undershoot → re-entry loop.
     # Compare against the station's LOCAL date (not UTC) so western stations
     # behave correctly when their local date lags UTC.
-    station_now   = datetime.now(ZoneInfo(STATION_TIMEZONES[station]))
+    station_now   = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
     station_date  = station_now.date()
     station_hour  = station_now.hour
     if event_date == station_date:
@@ -1370,7 +1377,10 @@ def tier3_full_signal_pass(event_date: date | None = None):
     for idx, station in enumerate(STATIONS):
         if idx > 0:
             _time.sleep(3)   # pace Open-Meteo free-tier (20 req/min)
-        target_date = _get_entry_event_date(station, now_utc) if use_per_station_dates else event_date
+        # Use a fresh timestamp per station — the loop takes ~3 min and a station's
+        # same-day/next-day boundary can shift mid-loop if we reuse the stale now_utc.
+        _station_now_utc = datetime.now(timezone.utc) if use_per_station_dates else now_utc
+        target_date = _get_entry_event_date(station, _station_now_utc) if use_per_station_dates else event_date
         if target_date is None:
             logger.info("[Tier3] %s — in gap window, skipping signal", station)
             continue
