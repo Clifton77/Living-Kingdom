@@ -1201,24 +1201,29 @@ def generate_signal(
         else pattern["cluster_id"]
     )
     if p4_forecast_f is not None:
-        # Phase 4 already removed station-level warm/cold bias.  Use GFS_MOS rows
-        # for distribution width (bias_std) only — the closest proxy in the existing
-        # bias table until it is rebuilt from Open-Meteo GFS/ECMWF actuals.
+        # Phase 4 already removed station-level warm/cold bias; set bias_mean=0.
+        # Request the matching Open-Meteo source for distribution width (bias_std).
+        # lookup_bias() falls through to GFS_MOS / any-source if those rows don't
+        # exist yet (i.e. before the bias table is rebuilt).
+        _p4_bias_src = (
+            "ECMWF_OPENMETEO" if p4_model == "ECMWF"
+            else "GFS_OPENMETEO"   # GFS and BLEND both anchor on GFS sigma
+        )
         _width_info = lookup_bias(
             bias_df, station, event_date,
             effective_cluster, pattern["season"], forecast_raw,
-            model_source="GFS_MOS",
+            model_source=_p4_bias_src,
         )
         bias_info = {
             "bias_mean": 0.0,
             "bias_std":  _width_info["bias_std"],
             "n_obs":     _width_info["n_obs"],
             "model_bin": float(forecast_raw),
-            "source":    f"phase4_{p4_model.lower()}_gfsmossigma",
+            "source":    f"phase4_{p4_model.lower()}_{_width_info['source']}",
         }
         logger.info(
-            "%s Phase4 source [%s] — sigma=%.1f°F from GFS_MOS proxy, bias_mean=0",
-            station, p4_model, _width_info["bias_std"],
+            "%s Phase4 [%s] — sigma=%.1f°F from %s (%s), bias_mean=0",
+            station, p4_model, _width_info["bias_std"], _p4_bias_src, _width_info["source"],
         )
     elif model_source_used == "IEM_AFM":
         era5_info = lookup_bias(

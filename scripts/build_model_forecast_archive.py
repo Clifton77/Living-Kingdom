@@ -37,8 +37,9 @@ from utils.logging_config import setup_logging
 
 logger = setup_logging("build_model_forecast_archive")
 
-AFOS_URL      = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-OPENMETEO_URL = "https://archive-api.open-meteo.com/v1/archive"
+AFOS_URL          = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+OPENMETEO_URL     = "https://archive-api.open-meteo.com/v1/archive"
+HIST_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 # Station names as they appear in AFM text (partial match sufficient)
 STATION_AFM_NAMES = {
@@ -531,6 +532,100 @@ def fetch_era5_fallback(station: str, start_date: str, end_date: str) -> pd.Data
 
 
 # ---------------------------------------------------------------------------
+# Open-Meteo GFS + ECMWF historical forecast (batch, no throttle issue)
+# ---------------------------------------------------------------------------
+
+@retry_request(max_attempts=3, backoff_base=2.0)
+def _fetch_openmeteo_historical(lat: float, lon: float,
+                                start_str: str, end_str: str,
+                                model: str) -> dict:
+    """Single batch request for one model over a date range."""
+    params = {
+        "latitude":         lat,
+        "longitude":        lon,
+        "daily":            "temperature_2m_max",
+        "temperature_unit": "fahrenheit",
+        "start_date":       start_str,
+        "end_date":         end_str,
+        "models":           model,
+        "timezone":         "UTC",
+    }
+    resp = requests.get(HIST_FORECAST_URL, params=params, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_openmeteo_forecast_history(station: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch GFS + ECMWF historical forecast daily max for one station.
+
+    One request per model covers the full date range — no per-day looping,
+    no throttle issue.  Chunked by year so very long ranges stay under any
+    undocumented API limits.
+
+    Returns DataFrame: [station, date, forecast_tmax_f, model_source]
+    model_source values: GFS_OPENMETEO | ECMWF_OPENMETEO
+    """
+    settle = settlement_station(station)
+    coords = STATION_COORDS.get(settle) or STATION_COORDS.get(station)
+    if coords is None:
+        logger.warning("No coordinates for %s — skipping Open-Meteo history", station)
+        return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "model_source"])
+
+    lat, lon = coords
+    rows: list[dict] = []
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt   = datetime.strptime(end_date,   "%Y-%m-%d")
+
+    # Historical forecast API availability: GFS ~2021+, ECMWF ~2023+.
+    # Clamp to 2021-01-01 — data before that doesn't exist on this endpoint.
+    effective_start = max(start_dt, datetime(2021, 1, 1))
+    if effective_start > end_dt:
+        return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "model_source"])
+
+    for om_model, source_label in [
+        ("gfs_seamless",   "GFS_OPENMETEO"),
+        ("ecmwf_ifs025",   "ECMWF_OPENMETEO"),
+    ]:
+        # Chunk by year to stay within any undocumented API range limits
+        current = effective_start
+        while current <= end_dt:
+            chunk_end = min(datetime(current.year, 12, 31), end_dt)
+            try:
+                data  = _fetch_openmeteo_historical(
+                    lat, lon,
+                    current.strftime("%Y-%m-%d"),
+                    chunk_end.strftime("%Y-%m-%d"),
+                    om_model,
+                )
+                dates = data.get("daily", {}).get("time", [])
+                temps = data.get("daily", {}).get("temperature_2m_max", [])
+                for d, t in zip(dates, temps):
+                    if t is not None:
+                        rows.append({
+                            "station":         station,
+                            "date":            pd.Timestamp(d),
+                            "forecast_tmax_f": float(t),
+                            "model_source":    source_label,
+                        })
+            except Exception as exc:
+                logger.warning("Open-Meteo historical %s %s %d: %s",
+                               station, om_model, current.year, exc)
+            current = datetime(current.year + 1, 1, 1)
+            time.sleep(0.5)
+
+    if not rows:
+        return pd.DataFrame(columns=["station", "date", "forecast_tmax_f", "model_source"])
+
+    df = pd.DataFrame(rows)
+    for src in ["GFS_OPENMETEO", "ECMWF_OPENMETEO"]:
+        cnt = (df["model_source"] == src).sum()
+        logger.info("%s %s: %d records", station, src, cnt)
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def _fill_era5_gaps(
@@ -618,6 +713,15 @@ def build_model_forecast_archive() -> None:
                 missing_log.append({"station": station, "model_source": label, "date": d.date()})
             logger.info("%s %s: final %d/%d days",
                         station, label, len(final_dates), len(all_dates))
+
+    # ── Open-Meteo GFS + ECMWF historical (20 stations × 2 models = 40 requests) ──
+    logger.info("Fetching Open-Meteo GFS + ECMWF historical forecasts...")
+    for station in tqdm(STATIONS, desc="Open-Meteo GFS/ECMWF history"):
+        om_df = fetch_openmeteo_forecast_history(station, START_DATE, END_DATE)
+        if len(om_df) > 0:
+            om_df["date"] = pd.to_datetime(om_df["date"])
+            all_dfs.append(om_df)
+        time.sleep(0.25)
 
     result = pd.concat(all_dfs, ignore_index=True)
     result["date"] = pd.to_datetime(result["date"])
