@@ -138,6 +138,7 @@ from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_pha
 _p4_fetcher  = Phase4Forecaster()
 _p4_gen      = SignalGenerator()
 _p4_forecasts: dict = {}
+_p4_latest_signals: dict[str, list] = {}   # station → list[Phase4Signal], refreshed each price cycle
 
 logger = setup_logging("scheduler")
 
@@ -260,12 +261,13 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
                 _p4_sigs = build_phase4_signals(
                     station, snapshots, sig, _p4_gen, _p4_forecasts, _p4_season
                 )
+                _p4_latest_signals[station] = _p4_sigs
                 for _p4s in _p4_sigs:
                     logger.info("[Phase4] %s", _p4s)
                 if not _p4_sigs:
-                    logger.debug("[Phase4] %s: no actionable buckets this cycle", station)
+                    logger.info("[Phase4] %s: no actionable buckets this cycle", station)
             except Exception as _p4_exc:
-                logger.debug("[Phase4] %s annotation error: %s", station, _p4_exc)
+                logger.info("[Phase4] %s annotation error: %s", station, _p4_exc)
             _push_signal_update(sig)
             logger.info(
                 "[PriceRefresh] %s: pushed %d buckets | top=%d ask=%.2f edge=%+.3f",
@@ -941,13 +943,42 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if len(existing) >= MAX_STATION_POSITIONS:
         return
 
-    snap = kalshi.get_market_snapshot(station, sig.event_date, sig.top_bucket)
+    # ── Phase 4 gate: sole trade-validity check for new entries ──────────
+    # BUY_YES: price 40–70¢ (study: +0.034 edge; strong buy 60–70¢ = +0.081).
+    # BUY_NO:  price 5–30¢  — logged for visibility; not yet placed because
+    #          _execute_exit always sells "yes" and would misclose a NO position.
+    _p4_entry = next(
+        (s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_YES"),
+        None,
+    )
+    if _p4_entry is None:
+        _p4_no = next(
+            (s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"),
+            None,
+        )
+        if _p4_no:
+            logger.info(
+                "[Tier1] %s Phase4 BUY_NO B%d ask=%.2f — opportunity logged, "
+                "not placed (exit system needs NO-side support first)",
+                station, _p4_no.bucket_lower, _p4_no.yes_ask,
+            )
+        else:
+            logger.info("[Tier1] %s Phase4 PASS — no actionable bucket", station)
+        return
+
+    entry_bucket = _p4_entry.bucket_lower
+    logger.info(
+        "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f",
+        station, _p4_entry.action, entry_bucket, _p4_entry.yes_ask, _p4_entry.confidence,
+    )
+
+    snap = kalshi.get_market_snapshot(station, sig.event_date, entry_bucket)
     if snap is None or not snap.is_open:
         return
 
     push_event("kalshi_top_update", {
         "station":        station,
-        "top_bucket":     sig.top_bucket,
+        "top_bucket":     entry_bucket,
         "yes_ask":        snap.yes_ask,
         "yes_bid":        snap.yes_bid,
         "fresh_edge":     round(sig.top_model_prob - snap.yes_ask, 4),
@@ -968,25 +999,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         logger.info("[Tier1] %s illiquid (%s) — scheduling liquidity retry",
                     station, ", ".join(issues))
         _schedule_liquidity_retry(
-            station, sig.event_date.isoformat(), sig.top_bucket, LIQUIDITY_RETRY_INTERVAL_MIN
+            station, sig.event_date.isoformat(), entry_bucket, LIQUIDITY_RETRY_INTERVAL_MIN
         )
         return
 
-    # YES_ASK floor guard: market pricing near-impossible — never enter
-    if snap.yes_ask < MIN_YES_ASK:
-        logger.info(
-            "[Tier1] %s yes_ask=%.3f below floor %.3f — skip",
-            station, snap.yes_ask, MIN_YES_ASK,
-        )
-        return
-
-    # YES_ASK ceiling guard: high entry price → large dollar stop-loss risk
-    if snap.yes_ask > MAX_YES_ASK:
-        logger.info(
-            "[Tier1] %s yes_ask=%.3f above ceiling %.3f — skip",
-            station, snap.yes_ask, MAX_YES_ASK,
-        )
-        return
+    # Price bounds validated by Phase 4 (40–70¢ BUY_YES zone).
+    # MIN_YES_ASK / MAX_YES_ASK guards removed — they would block the
+    # 60–70¢ strong-buy zone that has the highest study edge (+0.081).
 
     # Daily entry cap: limit re-entries per station per market date
     with _daily_entry_counts_lock:
@@ -1014,24 +1033,24 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             entry_running_max = None
 
     if entry_running_max is not None:
-        if sig.top_bucket == KALSHI_BUCKET_LOWER_TAIL:
-            bucket_ceiling = KALSHI_BUCKET_LOWER_TAIL + 1   # "68 or below" busted once ≥ 69
-        elif sig.top_bucket == KALSHI_BUCKET_UPPER_TAIL:
-            bucket_ceiling = None                            # upper tail has no ceiling
+        if entry_bucket == KALSHI_BUCKET_LOWER_TAIL:
+            bucket_ceiling = KALSHI_BUCKET_LOWER_TAIL + 1
+        elif entry_bucket == KALSHI_BUCKET_UPPER_TAIL:
+            bucket_ceiling = None
         else:
-            bucket_ceiling = sig.top_bucket + 2             # interior buckets: [lower, lower+2)
+            bucket_ceiling = entry_bucket + 2
 
         if bucket_ceiling is not None and entry_running_max >= bucket_ceiling:
             logger.info(
                 "[Tier1] %s running_max %.1f°F ≥ bucket ceiling %.0f°F (bucket %d) — skip",
-                station, entry_running_max, bucket_ceiling, sig.top_bucket,
+                station, entry_running_max, bucket_ceiling, entry_bucket,
             )
             return
 
     fresh_edge = sig.top_model_prob - snap.yes_ask
     push_event("kalshi_top_update", {
         "station":        station,
-        "top_bucket":     sig.top_bucket,
+        "top_bucket":     entry_bucket,
         "yes_ask":        snap.yes_ask,
         "yes_bid":        snap.yes_bid,
         "fresh_edge":     round(fresh_edge, 4),
@@ -1070,7 +1089,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         rm.open_position(
             station=station,
             market_id=market_id,
-            bucket_lower=sig.top_bucket,
+            bucket_lower=entry_bucket,
             contracts=live_contracts,
             entry_price=max_price,
             event_date=sig.event_date,
@@ -1079,7 +1098,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             station=station,
             event_date=sig.event_date,
             market_id=market_id,
-            bucket_lower=sig.top_bucket,
+            bucket_lower=entry_bucket,
             entry_price=max_price,
             contracts=live_contracts,
             stake_usd=live_stake,
@@ -1088,7 +1107,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         journal_entry(
             station=station,
             market_id=market_id,
-            bucket_lower=sig.top_bucket,
+            bucket_lower=entry_bucket,
             entry_price=max_price,
             contracts=live_contracts,
             stake_usd=live_stake,
@@ -1102,7 +1121,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "type":         "OPEN",
             "market_id":    market_id,
             "station":      station,
-            "bucket_lower": sig.top_bucket,
+            "bucket_lower": entry_bucket,
             "entry_price":  max_price,
             "contracts":    live_contracts,
             "stake_usd":    live_stake,
@@ -1118,13 +1137,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         logger.info(
             "[Tier1] Entry: %s | bucket %d | %d contracts @ $%.2f | "
             "edge %+.3f | stake $%.2f",
-            station, sig.top_bucket, live_contracts, max_price,
+            station, entry_bucket, live_contracts, max_price,
             fresh_edge, live_stake,
         )
         _attempt_dual_entry(station, sig, now_utc, rm, kalshi)
     else:
         logger.error("[Tier1] Order failed for %s bucket %d: %s",
-                     station, sig.top_bucket, result.error)
+                     station, entry_bucket, result.error)
         alert_order_failure(station, market_id, result.error or "unknown")
 
 
