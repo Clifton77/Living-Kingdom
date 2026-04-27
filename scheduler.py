@@ -669,7 +669,7 @@ def tier1_metar_entries_exits():
                     # signal refresh changed event_date mid-cycle.
                     try:
                         _ticker_date_str = market_id.split("-")[1]
-                        _market_date = datetime.strptime(_ticker_date_str, "%d%b%y").date()
+                        _market_date = datetime.strptime(_ticker_date_str, "%y%b%d").date()
                     except (IndexError, ValueError):
                         _market_date = pos_event_date
                     pos_is_today = (_market_date == now_utc.date())
@@ -858,37 +858,6 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             return
 
     existing = rm.station_positions(station)
-
-    # WATCH promotion — fetch a live Kalshi price and check whether edge has
-    # crossed the threshold since the last Tier 3 run. Kalshi prices move
-    # continuously; waiting up to 6h for the next Tier 3 means we miss
-    # intraday opportunities. New positions only — no expansions from WATCH.
-    if sig.decision == "WATCH":
-        if existing:
-            return  # don't expand or reposition from a WATCH signal
-        snap_pre = kalshi.get_market_snapshot(station, sig.event_date, sig.top_bucket)
-        if snap_pre is None or not snap_pre.is_open:
-            return
-        if snap_pre.yes_ask < MIN_YES_ASK:
-            logger.info(
-                "[Tier1] %s WATCH: yes_ask=%.3f below floor %.3f — market near-impossible, skip",
-                station, snap_pre.yes_ask, MIN_YES_ASK,
-            )
-            return
-        fresh_edge = sig.top_model_prob - snap_pre.yes_ask
-        push_event("kalshi_top_update", {
-            "station":        station,
-            "top_bucket":     sig.top_bucket,
-            "yes_ask":        snap_pre.yes_ask,
-            "yes_bid":        snap_pre.yes_bid,
-            "fresh_edge":     round(fresh_edge, 4),
-            "top_model_prob": sig.top_model_prob,
-        })
-        logger.info(
-            "[Tier1] %s WATCH promoted: live edge=%+.3f — entering",
-            station, fresh_edge,
-        )
-        # Fall through to new-position entry logic below
 
     # ── Existing position routing (TRADE signals only) ────────────────────
     if existing:
@@ -1770,8 +1739,10 @@ def _execute_expansion(
             rm.total_exposure(),
         )
 
-        # Store full expansion reasoning in shared signal store for dashboard card
-        sig.expansion_note = expansion_decision["reason"]
+        # Store expansion note in reasoning for dashboard card
+        if sig.reasoning:
+            sig.reasoning.expansion_note      = expansion_decision["reason"]
+            sig.reasoning.expansion_guardrails = expansion_decision.get("guardrails", {})
         with _latest_signals_lock:
             _latest_signals[station] = sig
     else:

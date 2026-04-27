@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
@@ -557,7 +557,7 @@ def _fetch_nws_forecast(station: str, target_date: date) -> float | None:
         periods = fcst.json()["properties"]["periods"]
 
         date_str   = target_date.isoformat()
-        next_day   = (target_date + __import__("datetime").timedelta(days=1)).isoformat()
+        next_day   = (target_date + timedelta(days=1)).isoformat()
         daytime_periods = [p for p in periods if p.get("isDaytime", False)]
 
         # Prefer today's daytime period; fall back to tomorrow if today has expired
@@ -1557,7 +1557,7 @@ def _skip_signal(station, event_date, local_time, taf, metar,
         weather_gate="skip", taf=taf, metar=metar,
         mos_forecast_raw=mos_forecast_raw, model_divergence_f=model_divergence_f,
         nbm_forecast_raw=nbm_forecast_raw, nbm_divergence_f=nbm_divergence_f,
-        buckets=[], reasoning=f"Skipped: {reason}",
+        buckets=[], reasoning=None,
     )
 
 
@@ -1578,8 +1578,7 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
         top_kalshi_prob=0.0, top_yes_ask=0.0,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
         weather_gate="hard_skip", taf=taf, metar=metar,
-        buckets=[],
-        reasoning=note,
+        buckets=[], reasoning=None,
     )
 
 
@@ -1659,11 +1658,10 @@ def run_signal_pass(
             logger.error("Signal generation failed for %s: %s", station, exc, exc_info=True)
 
     trade_count = sum(1 for s in signals.values() if s.decision == "TRADE")
-    watch_count = sum(1 for s in signals.values() if s.decision == "WATCH")
     skip_count  = sum(1 for s in signals.values() if s.decision in ("SKIP", "HARD_SKIP"))
 
     logger.info(
-        "Signal pass complete: TRADE=%d WATCH=%d SKIP=%d",
-        trade_count, watch_count, skip_count,
+        "Signal pass complete: TRADE=%d SKIP=%d",
+        trade_count, skip_count,
     )
     return signals
