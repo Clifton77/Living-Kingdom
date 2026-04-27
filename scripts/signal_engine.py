@@ -1127,9 +1127,18 @@ def generate_signal(
     bias_df: pd.DataFrame,
     pattern: dict,
     bankroll: float = STARTING_BANKROLL,
+    p4_forecast_f: float | None = None,
+    p4_model: str = "PHASE4",
 ) -> TradeSignal:
     """
     Generate a complete trade signal for one station and event date.
+
+    p4_forecast_f: when provided (Phase 4 bias-corrected GFS/ECMWF), skip the
+                   NWS/MOS/NBM fetch entirely and use this value as forecast_raw.
+                   The bias table still runs for distribution-width (bias_std);
+                   bias_mean is zeroed because Phase 4 already corrected warm/cold
+                   bias at the station level.
+    p4_model:      label for logs/cards, e.g. "GFS", "ECMWF", "BLEND".
     """
     import pytz
 
@@ -1143,45 +1152,75 @@ def generate_signal(
     taf   = interpret_taf(station, event_date=event_date, peak_hour_local=peak_hour_local)
     metar = get_metar(station)
 
-    # ── 2. Live forecast (AFM+NBM blend primary, MOS cross-check) ──────
-    forecast_raw, mos_forecast_raw, model_source_used, nbm_forecast_raw = (
-        fetch_live_forecast(station, event_date)
-    )
-    if forecast_raw is None:
-        logger.error("%s — no forecast available, skipping", station)
-        return _skip_signal(station, event_date, local_time_str, taf, metar,
-                            pattern, "No forecast data available")
-
-    model_divergence_f = (
-        round(forecast_raw - mos_forecast_raw, 1)
-        if mos_forecast_raw is not None else None
-    )
-    if model_divergence_f is not None:
+    # ── 2. Forecast (Phase 4 GFS/ECMWF preferred; NWS+NBM fallback) ─────
+    if p4_forecast_f is not None:
+        # Phase 4 supplies a bias-corrected station-dependent model forecast.
+        # MOS/NBM divergence checks are not meaningful against this source.
+        forecast_raw       = p4_forecast_f
+        mos_forecast_raw   = None
+        nbm_forecast_raw   = None
+        model_divergence_f = None
+        nbm_divergence_f   = None
+        model_source_used  = p4_model
         logger.info(
-            "%s AFM=%.1f°F  GFS-MOS=%.1f°F  divergence=%+.1f°F",
-            station, forecast_raw, mos_forecast_raw, model_divergence_f,
+            "%s Phase4 forecast [%s]: %.1f°F",
+            station, p4_model, forecast_raw,
         )
+    else:
+        forecast_raw, mos_forecast_raw, model_source_used, nbm_forecast_raw = (
+            fetch_live_forecast(station, event_date)
+        )
+        if forecast_raw is None:
+            logger.error("%s — no forecast available, skipping", station)
+            return _skip_signal(station, event_date, local_time_str, taf, metar,
+                                pattern, "No forecast data available")
 
-    nbm_divergence_f = (
-        round(forecast_raw - nbm_forecast_raw, 1)
-        if nbm_forecast_raw is not None else None
-    )
-    if nbm_divergence_f is not None:
-        logger.info(
-            "%s NWS=%.1f°F  NBM=%.1f°F  nbm_divergence=%+.1f°F",
-            station, forecast_raw, nbm_forecast_raw, nbm_divergence_f,
+        model_divergence_f = (
+            round(forecast_raw - mos_forecast_raw, 1)
+            if mos_forecast_raw is not None else None
         )
+        if model_divergence_f is not None:
+            logger.info(
+                "%s AFM=%.1f°F  GFS-MOS=%.1f°F  divergence=%+.1f°F",
+                station, forecast_raw, mos_forecast_raw, model_divergence_f,
+            )
+
+        nbm_divergence_f = (
+            round(forecast_raw - nbm_forecast_raw, 1)
+            if nbm_forecast_raw is not None else None
+        )
+        if nbm_divergence_f is not None:
+            logger.info(
+                "%s NWS=%.1f°F  NBM=%.1f°F  nbm_divergence=%+.1f°F",
+                station, forecast_raw, nbm_forecast_raw, nbm_divergence_f,
+            )
 
     # ── 3. Bias correction ───────────────────────────────────────────────
-    # NWS forecasts are already human-calibrated — no systematic bias to correct.
-    # Use station-specific ERA5 sigma from bias table as the uncertainty estimate.
-    # NWS day-ahead error is typically ≤ ERA5 error, so this is slightly
-    # conservative and far better than a flat 3.5°F applied to every station.
     effective_cluster = (
         -1 if pattern.get("data_source") == "reanalysis_fallback"
         else pattern["cluster_id"]
     )
-    if model_source_used == "IEM_AFM":
+    if p4_forecast_f is not None:
+        # Phase 4 already removed station-level warm/cold bias.  Use GFS_MOS rows
+        # for distribution width (bias_std) only — the closest proxy in the existing
+        # bias table until it is rebuilt from Open-Meteo GFS/ECMWF actuals.
+        _width_info = lookup_bias(
+            bias_df, station, event_date,
+            effective_cluster, pattern["season"], forecast_raw,
+            model_source="GFS_MOS",
+        )
+        bias_info = {
+            "bias_mean": 0.0,
+            "bias_std":  _width_info["bias_std"],
+            "n_obs":     _width_info["n_obs"],
+            "model_bin": float(forecast_raw),
+            "source":    f"phase4_{p4_model.lower()}_gfsmossigma",
+        }
+        logger.info(
+            "%s Phase4 source [%s] — sigma=%.1f°F from GFS_MOS proxy, bias_mean=0",
+            station, p4_model, _width_info["bias_std"],
+        )
+    elif model_source_used == "IEM_AFM":
         era5_info = lookup_bias(
             bias_df, station, event_date,
             effective_cluster, pattern["season"], forecast_raw,

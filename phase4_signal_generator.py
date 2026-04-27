@@ -200,6 +200,7 @@ class Phase4ForecastData:
     gfs_corrected:   Optional[float]   # GFS minus station bias
     ecmwf_corrected: Optional[float]   # ECMWF minus station bias
     blended_f:       Optional[float]   # model-selected / blended output
+    preferred_model: str = "ECMWF"    # "GFS", "ECMWF", or "BLEND"
 
 
 @dataclass
@@ -297,6 +298,7 @@ class Phase4Forecaster:
                 gfs_corrected=gfs_c,
                 ecmwf_corrected=ecmwf_c,
                 blended_f=blended,
+                preferred_model=pref,
             )
             logger.debug(
                 "[Phase4] %s  GFS %.1f→%.1f  ECMWF %.1f→%.1f  blend=%.1f [%s]",

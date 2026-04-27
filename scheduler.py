@@ -475,7 +475,12 @@ def _single_station_signal_pass(station: str):
         kalshi     = get_kalshi()
         rm         = get_risk_manager()
 
-        sig = generate_signal(station, event_date, kalshi, bias_df, pattern, rm.state.bankroll)
+        _p4_fc = _p4_forecasts.get(station)
+        sig = generate_signal(
+            station, event_date, kalshi, bias_df, pattern, rm.state.bankroll,
+            p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
+            p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
+        )
 
         with _latest_signals_lock:
             _latest_signals[station] = sig
@@ -1424,7 +1429,12 @@ def tier3_full_signal_pass(event_date: date | None = None):
             logger.info("[Tier3] %s — in gap window, skipping signal", station)
             continue
         try:
-            sig = generate_signal(station, target_date, kalshi, bias_df, pattern, rm.state.bankroll)
+            _p4_fc = _p4_forecasts.get(station)
+            sig = generate_signal(
+                station, target_date, kalshi, bias_df, pattern, rm.state.bankroll,
+                p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
+                p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
+            )
             signals[station] = sig
         except Exception as exc:
             logger.error("[Tier3] Signal failed for %s: %s", station, exc, exc_info=True)
