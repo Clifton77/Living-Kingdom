@@ -4,7 +4,11 @@ All credentials are loaded from .env — never hardcoded here.
 """
 import os
 from datetime import date as _date, timedelta as _timedelta
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 load_dotenv()
 

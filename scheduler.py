@@ -134,6 +134,10 @@ from config import (
     MAX_YES_ASK,
     MAX_DAILY_ENTRIES_PER_STATION,
 )
+from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_phase4_signals
+_p4_fetcher  = Phase4Forecaster()
+_p4_gen      = SignalGenerator()
+_p4_forecasts: dict = {}
 
 logger = setup_logging("scheduler")
 
@@ -251,6 +255,17 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
                     live_sig.top_kalshi_prob = top.kalshi_prob
                     live_sig.top_yes_ask     = top.yes_ask
 
+            try:
+                _p4_season = getattr(sig, "season", "Summer") or "Summer"
+                _p4_sigs = build_phase4_signals(
+                    station, snapshots, sig, _p4_gen, _p4_forecasts, _p4_season
+                )
+                for _p4s in _p4_sigs:
+                    logger.info("[Phase4] %s", _p4s)
+                if not _p4_sigs:
+                    logger.debug("[Phase4] %s: no actionable buckets this cycle", station)
+            except Exception as _p4_exc:
+                logger.debug("[Phase4] %s annotation error: %s", station, _p4_exc)
             _push_signal_update(sig)
             logger.info(
                 "[PriceRefresh] %s: pushed %d buckets | top=%d ask=%.2f edge=%+.3f",
@@ -1369,6 +1384,11 @@ def tier3_full_signal_pass(event_date: date | None = None):
     _tier_last_run["tier3"] = now_utc.strftime("%H:%M UTC")
     push_event("tier_heartbeat", _tier_last_run)
 
+    try:
+        _p4_forecasts.update(_p4_fetcher.fetch_all(probe_date))
+        logger.info("[Phase4] Fetched %d station forecasts for %s", len(_p4_forecasts), probe_date)
+    except Exception as _p4_exc:
+        logger.warning("[Phase4] fetch_all failed: %s", _p4_exc)
     bias_df = _load_bias_table()
     pattern = classify_pattern(probe_date)
     kalshi  = get_kalshi()

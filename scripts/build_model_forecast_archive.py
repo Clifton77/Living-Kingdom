@@ -105,15 +105,44 @@ def _fetch_afm_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     pil = f"AFM{wfo}"
     params = {
         "pil":   pil,
-        "fmt":   "json",
+        "fmt":   "text",
         "sdate": f"{start_str}T00:00Z",
         "edate": f"{end_str}T23:59Z",
-        "limit": 500,
+        "limit": 9999,
+        "order": "asc",
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("data", [])
+    text = resp.text or ""
+
+    # Text format returns raw products concatenated together. Split on the WMO
+    # separator line so downstream parsing can keep using {utc_valid, data}.
+    parts = re.split(r"\n(?=[A-Z]{4}\d{2}\s+K[A-Z]{3}\s+\d{6})", text.strip())
+    products = []
+    for part in parts:
+        block = part.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        issue_ts = ""
+        for line in lines[:6]:
+            m = re.search(r"\b(\d{6})\b", line)
+            if m:
+                ddhhmm = m.group(1)
+                try:
+                    base = datetime.strptime(start_str, "%Y-%m-%d")
+                    day = int(ddhhmm[:2])
+                    hour = int(ddhhmm[2:4])
+                    minute = int(ddhhmm[4:6])
+                    issue_dt = base.replace(day=day, hour=hour, minute=minute)
+                    if issue_dt.date() < base.date() and day > 20:
+                        issue_dt = issue_dt.replace(month=issue_dt.month - 1)
+                    issue_ts = issue_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    break
+                except Exception:
+                    continue
+        products.append({"utc_valid": issue_ts, "data": block})
+    return products
 
 
 def _parse_afm_max_temp(text: str, station: str) -> float | None:
@@ -175,15 +204,41 @@ def _fetch_mos_products(wfo: str, start_str: str, end_str: str) -> list[dict]:
     pil = f"MAV{wfo}"
     params = {
         "pil":   pil,
-        "fmt":   "json",
+        "fmt":   "text",
         "sdate": f"{start_str}T00:00Z",
         "edate": f"{end_str}T23:59Z",
-        "limit": 500,
+        "limit": 9999,
+        "order": "asc",
     }
     resp = requests.get(AFOS_URL, params=params, timeout=60)
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("data", [])
+    text = resp.text or ""
+    parts = re.split(r"\n(?=[A-Z]{4}\d{2}\s+K[A-Z]{3}\s+\d{6})", text.strip())
+    products = []
+    for part in parts:
+        block = part.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        issue_ts = ""
+        for line in lines[:6]:
+            m = re.search(r"\b(\d{6})\b", line)
+            if m:
+                ddhhmm = m.group(1)
+                try:
+                    base = datetime.strptime(start_str, "%Y-%m-%d")
+                    day = int(ddhhmm[:2])
+                    hour = int(ddhhmm[2:4])
+                    minute = int(ddhhmm[4:6])
+                    issue_dt = base.replace(day=day, hour=hour, minute=minute)
+                    if issue_dt.date() < base.date() and day > 20:
+                        issue_dt = issue_dt.replace(month=issue_dt.month - 1)
+                    issue_ts = issue_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    break
+                except Exception:
+                    continue
+        products.append({"utc_valid": issue_ts, "data": block})
+    return products
 
 
 def _parse_mos_max_temp(text: str, station: str) -> float | None:
