@@ -453,6 +453,11 @@ MARKET_OPEN_UTC_HOUR   = 14   # Kalshi opens Day-1 markets at 14:00 UTC (10 AM E
 MARKET_OPEN_UTC_MINUTE = 5    # fire 5 min after open to let liquidity settle
 SETTLEMENT_SWEEP_UTC_HOUR = 9 # check for overnight settlements at 09:00 UTC
 
+# Same-day entry gate: no entries before the 12Z Tier 3 model run (12:30 UTC = 7:30 AM CT).
+# Entries are only allowed for the settlement date's own calendar day — no next-day pre-entry.
+SAME_DAY_ENTRY_OPEN_UTC_HOUR   = 12
+SAME_DAY_ENTRY_OPEN_UTC_MINUTE = 30
+
 # Tier 3 model data retry — handles delayed NWS/Open-Meteo updates
 TIER3_RETRY_INTERVAL_MIN = 15   # wait this long between retries
 TIER3_MAX_RETRIES        = 3    # give up after 3 attempts (45 min total window)

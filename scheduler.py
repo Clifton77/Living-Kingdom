@@ -129,6 +129,8 @@ from config import (
     STARTING_BANKROLL,
     SNAPSHOT_INTERVAL_MIN,
     ENTRY_CUTOFF_PRE_PEAK_HOURS,
+    SAME_DAY_ENTRY_OPEN_UTC_HOUR,
+    SAME_DAY_ENTRY_OPEN_UTC_MINUTE,
     MIN_EDGE,
     MIN_YES_ASK,
     MAX_YES_ASK,
@@ -469,7 +471,7 @@ def _single_station_signal_pass(station: str):
         from scripts.signal_engine import generate_signal, _load_bias_table
 
         now_utc    = datetime.now(timezone.utc)
-        event_date = _get_entry_event_date(station, now_utc) or date.today() + timedelta(days=1)
+        event_date = _get_entry_event_date(station, now_utc) or date.today()
         bias_df    = _load_bias_table()
         pattern    = classify_pattern(event_date)
         kalshi     = get_kalshi()
@@ -502,38 +504,37 @@ def _get_entry_event_date(station: str, now_utc: datetime) -> date | None:
     """
     Determine the target event date for new entries at this station.
 
-    Same-day window:  from Kalshi Day-1 market open (14:05 UTC) until
-                      ENTRY_CUTOFF_PRE_PEAK_HOURS before the station peak hour.
-    Next-day window:  from 14:05 UTC onward (Day-1 open for tomorrow's market).
-    Gap (cutoff → 14:05 UTC): return None — no entries.
+    Policy: entries are only allowed for the SAME DAY as settlement,
+    and only after the 12Z Tier 3 model run (SAME_DAY_ENTRY_OPEN_UTC_HOUR:MM UTC).
+    Next-day pre-entry is intentionally disabled — overnight holds on
+    temperature markets carry model uncertainty that the 12Z run resolves.
 
-    Uses the station's local calendar date so western stations (KSEA, KSFO)
-    correctly target the right market even when their local date lags UTC.
+    Entry window: SAME_DAY_ENTRY_OPEN_UTC → ENTRY_CUTOFF_PRE_PEAK_HOURS before peak.
+    Outside that window: return None (no entries).
     """
     tz          = ZoneInfo(STATION_TIMEZONES[station])
     now_local   = now_utc.astimezone(tz)
     today_local = now_local.date()
 
+    # Gate 1: 12Z model run must have fired (12:30 UTC = 7:30 AM CT)
+    open_utc = now_utc.replace(
+        hour=SAME_DAY_ENTRY_OPEN_UTC_HOUR,
+        minute=SAME_DAY_ENTRY_OPEN_UTC_MINUTE,
+        second=0, microsecond=0,
+    )
+    if now_utc < open_utc:
+        return None   # too early — wait for 12Z Tier 3 run
+
+    # Gate 2: must be before peak cutoff
     peak_hour    = get_peak_hour(station, today_local)
     cutoff_local = now_local.replace(
         hour=peak_hour, minute=0, second=0, microsecond=0
     ) - timedelta(hours=ENTRY_CUTOFF_PRE_PEAK_HOURS)
 
     if now_local < cutoff_local:
-        return today_local   # same-day window still open
+        return today_local   # same-day entry window open
 
-    # Same-day window closed.  Check whether tomorrow's market has opened.
-    # The next-day market (event = today_local + 1) opens at 14:05 UTC on
-    # today_local's date — compare UTC datetimes to handle cross-midnight correctly.
-    next_day_market_open = datetime(
-        today_local.year, today_local.month, today_local.day,
-        MARKET_OPEN_UTC_HOUR, MARKET_OPEN_UTC_MINUTE,
-        tzinfo=timezone.utc,
-    )
-    if now_utc >= next_day_market_open:
-        return today_local + timedelta(days=1)
-
-    return None   # in gap — same-day expired, next-day not yet open
+    return None   # past cutoff — done for today
 
 
 # ---------------------------------------------------------------------------
