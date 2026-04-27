@@ -1129,16 +1129,16 @@ def generate_signal(
     bankroll: float = STARTING_BANKROLL,
     p4_forecast_f: float | None = None,
     p4_model: str = "PHASE4",
+    p4_station_kelly_mult: float = 1.0,
 ) -> TradeSignal:
     """
     Generate a complete trade signal for one station and event date.
 
-    p4_forecast_f: when provided (Phase 4 bias-corrected GFS/ECMWF), skip the
-                   NWS/MOS/NBM fetch entirely and use this value as forecast_raw.
-                   The bias table still runs for distribution-width (bias_std);
-                   bias_mean is zeroed because Phase 4 already corrected warm/cold
-                   bias at the station level.
-    p4_model:      label for logs/cards, e.g. "GFS", "ECMWF", "BLEND".
+    p4_forecast_f:          when provided (Phase 4 bias-corrected GFS/ECMWF), skip the
+                            NWS/MOS/NBM fetch entirely and use this value as forecast_raw.
+    p4_model:               label for logs/cards, e.g. "GFS", "ECMWF", "BLEND".
+    p4_station_kelly_mult:  Phase 5 per-station Kelly multiplier from _STATION_KELLY_MULT.
+                            Applied after pattern-confidence scaling. Default 1.0 (neutral).
     """
     import pytz
 
@@ -1439,10 +1439,20 @@ def generate_signal(
         top.model_prob, top.yes_ask, bankroll
     )
 
-    # Scale Kelly fraction by pattern confidence — unusual regimes get reduced sizing
+    # Scale Kelly by pattern confidence — unusual regimes get reduced sizing
     confidence_scale = CONFIDENCE_KELLY_SCALE.get(pattern.get("confidence", "low"), 0.5)
-    if confidence_scale < 1.0:
-        kelly_frac      = round(kelly_frac * confidence_scale, 6)
+    if confidence_scale != 1.0:
+        kelly_frac = round(kelly_frac * confidence_scale, 6)
+
+    # Scale Kelly by Phase 5 per-station multiplier (KORD 2.0×, KMIA 0.75×, others 1.0×)
+    if p4_station_kelly_mult != 1.0:
+        kelly_frac = round(kelly_frac * p4_station_kelly_mult, 6)
+        logger.info(
+            "%s Phase5 station Kelly mult %.2f× applied — new kelly_frac=%.4f",
+            station, p4_station_kelly_mult, kelly_frac,
+        )
+
+    if confidence_scale != 1.0 or p4_station_kelly_mult != 1.0:
         kelly_usd       = round(bankroll * kelly_frac, 2)
         kelly_contracts = int(math.floor(kelly_usd / top.yes_ask)) if top.yes_ask > 0 else 0
         kelly_usd       = round(kelly_contracts * top.yes_ask, 2)

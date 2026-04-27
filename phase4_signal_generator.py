@@ -166,6 +166,16 @@ _MONTH_MULT: dict[int, float] = {
     11: 0.95,   # November
 }
 
+# ── Per-station Kelly multiplier — Phase 5 analysis (40–70¢ zone) ────────────
+# Only stations with n ≥ 20 AND CI lower bound on edge > 0 get a non-1.0 value.
+# KORD: n=173, edge=+0.090, ci_lo=+0.016 → 2.0× (capped from raw 2.66×)
+# KMIA: n=239, edge=-0.025, negative across Winter/Summer → 0.75× (reduce exposure)
+# All others: insufficient data or CI includes zero → 1.0× (neutral)
+_STATION_KELLY_MULT: dict[str, float] = {
+    "KORD": 2.00,
+    "KMIA": 0.75,
+}
+
 # ── Thin-liquidity stations (cap at 2 contracts) ──────────────────────────────
 THIN_LIQUIDITY_STATIONS: frozenset[str] = frozenset({"KSAT", "KOKC"})
 

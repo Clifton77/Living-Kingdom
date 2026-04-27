@@ -134,7 +134,7 @@ from config import (
     MAX_YES_ASK,
     MAX_DAILY_ENTRIES_PER_STATION,
 )
-from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_phase4_signals
+from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_phase4_signals, _STATION_KELLY_MULT
 _p4_fetcher  = Phase4Forecaster()
 _p4_gen      = SignalGenerator()
 _p4_forecasts: dict = {}
@@ -480,6 +480,7 @@ def _single_station_signal_pass(station: str):
             station, event_date, kalshi, bias_df, pattern, rm.state.bankroll,
             p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
             p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
+            p4_station_kelly_mult=_STATION_KELLY_MULT.get(station, 1.0),
         )
 
         with _latest_signals_lock:
@@ -1434,6 +1435,7 @@ def tier3_full_signal_pass(event_date: date | None = None):
                 station, target_date, kalshi, bias_df, pattern, rm.state.bankroll,
                 p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
                 p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
+                p4_station_kelly_mult=_STATION_KELLY_MULT.get(station, 1.0),
             )
             signals[station] = sig
         except Exception as exc:
