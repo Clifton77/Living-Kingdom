@@ -483,6 +483,8 @@ def _single_station_signal_pass(station: str):
             p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
             p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
             p4_station_kelly_mult=_STATION_KELLY_MULT.get(station, 1.0),
+            p4_gfs_raw=_p4_fc.gfs_f if _p4_fc is not None else None,
+            p4_ecmwf_raw=_p4_fc.ecmwf_f if _p4_fc is not None else None,
         )
 
         with _latest_signals_lock:
@@ -1406,6 +1408,8 @@ def tier3_full_signal_pass(event_date: date | None = None):
                 p4_forecast_f=_p4_fc.blended_f if _p4_fc is not None else None,
                 p4_model=_p4_fc.preferred_model if _p4_fc is not None else "PHASE4",
                 p4_station_kelly_mult=_STATION_KELLY_MULT.get(station, 1.0),
+                p4_gfs_raw=_p4_fc.gfs_f if _p4_fc is not None else None,
+                p4_ecmwf_raw=_p4_fc.ecmwf_f if _p4_fc is not None else None,
             )
             signals[station] = sig
         except Exception as exc:

@@ -146,6 +146,9 @@ class TradeSignal:
     nbm_forecast_raw:   Optional[float] = None   # NBM daily max temp forecast
     nbm_divergence_f:   Optional[float] = None   # NWS_AFM - NBM (+ means NWS warmer)
 
+    # Active forecast model — "IEM_AFM" | "GFS" | "ECMWF" | "BLEND" | "OPEN_METEO"
+    model_source:       str             = "IEM_AFM"
+
     # Full distribution
     buckets:            list[BucketAnalysis] = field(default_factory=list)
 
@@ -741,6 +744,8 @@ def _build_reasoning(
     model_source_used: str = "IEM_AFM",
     nbm_forecast_raw: float | None = None,
     nbm_divergence_f: float | None = None,
+    p4_gfs_raw: float | None = None,
+    p4_ecmwf_raw: float | None = None,
 ) -> SignalReasoning:
     """Build fully structured plain-English reasoning for the dashboard card."""
 
@@ -834,114 +839,164 @@ def _build_reasoning(
     )
 
     # ── Model runs & day outlook ──────────────────────────────────────────
-    src_label = "NWS AFM" if model_source_used == "IEM_AFM" else "Open-Meteo"
+    _is_p4 = model_source_used in ("GFS", "ECMWF", "BLEND")
 
-    # Model snapshot line
-    model_parts = [f"NWS AFM {forecast_raw:.0f}°F"]
-    if nbm_forecast_raw is not None:
-        model_parts.append(f"NBM {nbm_forecast_raw:.0f}°F")
-    if mos_forecast_raw is not None:
-        model_parts.append(f"GFS-MOS {mos_forecast_raw:.0f}°F")
-    model_snapshot = "  |  ".join(model_parts)
-
-    # Convergence / divergence narrative
-    active_temps = [t for t in [forecast_raw, nbm_forecast_raw, mos_forecast_raw] if t is not None]
-    spread = round(max(active_temps) - min(active_temps), 1) if len(active_temps) > 1 else 0.0
-
-    afm_nbm_diff = abs(nbm_divergence_f)  if nbm_divergence_f  is not None else None
-    afm_mos_diff = abs(model_divergence_f) if model_divergence_f is not None else None
-    nbm_mos_diff = (
-        abs(nbm_forecast_raw - mos_forecast_raw)
-        if nbm_forecast_raw is not None and mos_forecast_raw is not None else None
-    )
-
-    if len(active_temps) == 1:
-        convergence_note = (
-            "NBM and GFS-MOS are not available — signal based on NWS AFM alone."
-        )
-    elif len(active_temps) == 2:
-        if nbm_forecast_raw is None:
-            # AFM + MOS only
-            if spread < 1.5:
-                convergence_note = f"NWS AFM and GFS-MOS are aligned (spread {spread:.1f}°F)."
-            elif model_divergence_f > 0:
+    if _is_p4:
+        # ── Phase 4 path ─────────────────────────────────────────────────
+        if model_source_used == "BLEND" and p4_gfs_raw is not None and p4_ecmwf_raw is not None:
+            model_snapshot = (
+                f"Phase 4 [BLEND] {forecast_raw:.0f}°F"
+                f"  (GFS {p4_gfs_raw:.0f}°F | ECMWF {p4_ecmwf_raw:.0f}°F)"
+            )
+            raw_spread = abs(p4_gfs_raw - p4_ecmwf_raw)
+            if raw_spread < 1.5:
                 convergence_note = (
-                    f"NWS is running {afm_mos_diff:.0f}°F warmer than GFS-MOS. "
-                    "The human forecaster may be capturing warm advection or a clearing "
-                    "that the model blend hasn't resolved yet."
+                    f"GFS and ECMWF are well-aligned (raw spread {raw_spread:.1f}°F). "
+                    "Both models were averaged to form the Phase 4 blend for this station."
+                )
+            else:
+                higher = "GFS" if p4_gfs_raw > p4_ecmwf_raw else "ECMWF"
+                convergence_note = (
+                    f"GFS and ECMWF differ by {raw_spread:.1f}°F (raw). "
+                    f"{higher} is running warmer; blend smooths the spread. "
+                    "Phase 4 study found both models informative here — averaging reduces variance."
+                )
+        elif model_source_used == "BLEND":
+            model_snapshot = f"Phase 4 [BLEND] {forecast_raw:.0f}°F"
+            convergence_note = (
+                "Phase 4 blend of GFS and ECMWF (raw inputs unavailable). "
+                "Both models were averaged after per-station bias removal."
+            )
+        else:
+            other = "ECMWF" if model_source_used == "GFS" else "GFS"
+            if model_source_used == "GFS" and p4_gfs_raw is not None:
+                model_snapshot = f"Phase 4 [GFS] {forecast_raw:.0f}°F  (raw {p4_gfs_raw:.0f}°F before correction)"
+            elif model_source_used == "ECMWF" and p4_ecmwf_raw is not None:
+                model_snapshot = f"Phase 4 [ECMWF] {forecast_raw:.0f}°F  (raw {p4_ecmwf_raw:.0f}°F before correction)"
+            else:
+                model_snapshot = f"Phase 4 [{model_source_used}] {forecast_raw:.0f}°F"
+            convergence_note = (
+                f"Station-optimized {model_source_used} selected (Phase 4 study: 38,174 settled contracts). "
+                f"{other} was excluded at {station} due to higher bias or larger historical error. "
+                "No NWS/NBM divergence checks — Phase 4 uses a standalone model pipeline."
+            )
+
+        # Phase 4 bias note
+        if bias_std > 0:
+            bias_note = (
+                f"Phase 4 station-level bias correction pre-applied (bias_mean forced to 0). "
+                f"Distributional uncertainty ±{bias_std:.1f}°F from historical {model_source_used} sigma at this cluster "
+                f"(~68% of similar days land {lo1:.0f}–{hi1:.0f}°F)."
+            )
+        else:
+            bias_note = (
+                "Phase 4 station-level bias correction pre-applied (bias_mean forced to 0). "
+                "No distributional width available from bias table."
+            )
+
+    else:
+        # ── NWS AFM / Open-Meteo path (original logic) ───────────────────
+        # Model snapshot line
+        model_parts = [f"NWS AFM {forecast_raw:.0f}°F"]
+        if nbm_forecast_raw is not None:
+            model_parts.append(f"NBM {nbm_forecast_raw:.0f}°F")
+        if mos_forecast_raw is not None:
+            model_parts.append(f"GFS-MOS {mos_forecast_raw:.0f}°F")
+        model_snapshot = "  |  ".join(model_parts)
+
+        # Convergence / divergence narrative
+        active_temps = [t for t in [forecast_raw, nbm_forecast_raw, mos_forecast_raw] if t is not None]
+        spread = round(max(active_temps) - min(active_temps), 1) if len(active_temps) > 1 else 0.0
+
+        afm_nbm_diff = abs(nbm_divergence_f)  if nbm_divergence_f  is not None else None
+        afm_mos_diff = abs(model_divergence_f) if model_divergence_f is not None else None
+        nbm_mos_diff = (
+            abs(nbm_forecast_raw - mos_forecast_raw)
+            if nbm_forecast_raw is not None and mos_forecast_raw is not None else None
+        )
+
+        if len(active_temps) == 1:
+            convergence_note = (
+                "NBM and GFS-MOS are not available — signal based on NWS AFM alone."
+            )
+        elif len(active_temps) == 2:
+            if nbm_forecast_raw is None:
+                if spread < 1.5:
+                    convergence_note = f"NWS AFM and GFS-MOS are aligned (spread {spread:.1f}°F)."
+                elif model_divergence_f > 0:
+                    convergence_note = (
+                        f"NWS is running {afm_mos_diff:.0f}°F warmer than GFS-MOS. "
+                        "The human forecaster may be capturing warm advection or a clearing "
+                        "that the model blend hasn't resolved yet."
+                    )
+                else:
+                    convergence_note = (
+                        f"NWS is running {afm_mos_diff:.0f}°F cooler than GFS-MOS. "
+                        "The forecaster may be factoring in marine influence, "
+                        "a cloud deck, or a cold pool the model blend doesn't resolve."
+                    )
+            else:
+                if spread < 1.5:
+                    convergence_note = f"NWS AFM and NBM are well-aligned (spread {spread:.1f}°F)."
+                elif nbm_divergence_f > 0:
+                    convergence_note = (
+                        f"NWS AFM is {afm_nbm_diff:.0f}°F warmer than NBM. "
+                        "The human forecaster is bullish relative to the automated blend."
+                    )
+                else:
+                    convergence_note = (
+                        f"NWS AFM is {afm_nbm_diff:.0f}°F cooler than NBM — "
+                        "human forecast is on the cool side; NBM may be overestimating daytime heating."
+                    )
+        else:
+            if spread < 1.5:
+                convergence_note = (
+                    f"All three model runs are well-aligned (spread {spread:.1f}°F) — "
+                    "clean temperature signal, high confidence in the forecast."
+                )
+            elif afm_mos_diff is not None and afm_mos_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
+                nbm_dir = "warmer" if nbm_divergence_f < 0 else "cooler"
+                convergence_note = (
+                    f"NWS AFM and GFS-MOS agree; NBM is the outlier, running "
+                    f"{afm_nbm_diff:.0f}°F {nbm_dir}. "
+                    "The automated blend may be overweighting a model that's out of phase today."
+                )
+            elif afm_nbm_diff is not None and afm_nbm_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
+                mos_dir = "warmer" if model_divergence_f < 0 else "cooler"
+                convergence_note = (
+                    f"NWS AFM and NBM are aligned; GFS-MOS is the outlier at {mos_forecast_raw:.0f}°F "
+                    f"({afm_mos_diff:.0f}°F {mos_dir}). "
+                    "GFS-MOS may be lagging on the latest pattern evolution."
+                )
+            elif spread >= 3.0:
+                convergence_note = (
+                    f"Models are spread {spread:.0f}°F apart — genuine forecast uncertainty today. "
+                    "NWS AFM is our primary input; use the bias spread as your uncertainty guide."
                 )
             else:
                 convergence_note = (
-                    f"NWS is running {afm_mos_diff:.0f}°F cooler than GFS-MOS. "
-                    "The forecaster may be factoring in marine influence, "
-                    "a cloud deck, or a cold pool the model blend doesn't resolve."
+                    f"Models show modest spread ({spread:.1f}°F). "
+                    "NWS AFM leads; NBM and GFS-MOS are cross-checks."
                 )
-        else:
-            # AFM + NBM, no MOS
-            if spread < 1.5:
-                convergence_note = f"NWS AFM and NBM are well-aligned (spread {spread:.1f}°F)."
-            elif nbm_divergence_f > 0:
-                convergence_note = (
-                    f"NWS AFM is {afm_nbm_diff:.0f}°F warmer than NBM. "
-                    "The human forecaster is bullish relative to the automated blend."
-                )
-            else:
-                convergence_note = (
-                    f"NWS AFM is {afm_nbm_diff:.0f}°F cooler than NBM — "
-                    "human forecast is on the cool side; NBM may be overestimating daytime heating."
-                )
-    else:
-        # All three available
-        if spread < 1.5:
-            convergence_note = (
-                f"All three model runs are well-aligned (spread {spread:.1f}°F) — "
-                "clean temperature signal, high confidence in the forecast."
-            )
-        elif afm_mos_diff is not None and afm_mos_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
-            # AFM and MOS agree; NBM is outlier
-            nbm_dir = "warmer" if nbm_divergence_f < 0 else "cooler"
-            convergence_note = (
-                f"NWS AFM and GFS-MOS agree; NBM is the outlier, running "
-                f"{afm_nbm_diff:.0f}°F {nbm_dir}. "
-                "The automated blend may be overweighting a model that's out of phase today."
-            )
-        elif afm_nbm_diff is not None and afm_nbm_diff < 1.0 and nbm_mos_diff is not None and nbm_mos_diff >= 2.0:
-            # AFM and NBM agree; MOS is outlier
-            mos_dir = "warmer" if model_divergence_f < 0 else "cooler"
-            convergence_note = (
-                f"NWS AFM and NBM are aligned; GFS-MOS is the outlier at {mos_forecast_raw:.0f}°F "
-                f"({afm_mos_diff:.0f}°F {mos_dir}). "
-                "GFS-MOS may be lagging on the latest pattern evolution."
-            )
-        elif spread >= 3.0:
-            convergence_note = (
-                f"Models are spread {spread:.0f}°F apart — genuine forecast uncertainty today. "
-                "NWS AFM is our primary input; use the bias spread as your uncertainty guide."
-            )
-        else:
-            convergence_note = (
-                f"Models show modest spread ({spread:.1f}°F). "
-                "NWS AFM leads; NBM and GFS-MOS are cross-checks."
-            )
 
-    # Bias correction note
-    if bias_src in ("nws_fixed", "nws_era5_sigma"):
-        bias_note = (
-            f"NWS AFM is already human-calibrated — no additional bias correction applied. "
-            f"Uncertainty ±{bias_std:.1f}°F from station-level ERA5 historical error."
-        )
-    elif abs_bias < 0.3:
-        bias_note = (
-            f"Cluster/month bias is negligible ({bias_mean:+.1f}°F over {n_obs} days). "
-            f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F."
-        )
-    else:
-        bias_note = (
-            f"Applying a {bias_mean:+.1f}°F cluster/month correction "
-            f"({abs_bias:.1f}°F {direction} over {n_obs} similar days). "
-            f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F "
-            f"(~68% of similar days land {lo1:.0f}–{hi1:.0f}°F)."
-        )
+        # Bias correction note (original logic, only for non-Phase4)
+        if bias_src in ("nws_fixed", "nws_era5_sigma"):
+            bias_note = (
+                f"NWS AFM is already human-calibrated — no additional bias correction applied. "
+                f"Uncertainty ±{bias_std:.1f}°F from station-level ERA5 historical error."
+            )
+        elif abs_bias < 0.3:
+            bias_note = (
+                f"Cluster/month bias is negligible ({bias_mean:+.1f}°F over {n_obs} days). "
+                f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F."
+            )
+        else:
+            bias_note = (
+                f"Applying a {bias_mean:+.1f}°F cluster/month correction "
+                f"({abs_bias:.1f}°F {direction} over {n_obs} similar days). "
+                f"Adjusted forecast: {forecast_adjusted:.1f}°F ± {bias_std:.1f}°F "
+                f"(~68% of similar days land {lo1:.0f}–{hi1:.0f}°F)."
+            )
 
     # TAF integrated into day outlook
     cond_desc = _CONDITION_PLAIN.get(taf.condition, taf.condition)
@@ -1130,6 +1185,8 @@ def generate_signal(
     p4_forecast_f: float | None = None,
     p4_model: str = "PHASE4",
     p4_station_kelly_mult: float = 1.0,
+    p4_gfs_raw: float | None = None,
+    p4_ecmwf_raw: float | None = None,
 ) -> TradeSignal:
     """
     Generate a complete trade signal for one station and event date.
@@ -1491,6 +1548,8 @@ def generate_signal(
         model_source_used=model_source_used,
         nbm_forecast_raw=nbm_forecast_raw,
         nbm_divergence_f=nbm_divergence_f,
+        p4_gfs_raw=p4_gfs_raw,
+        p4_ecmwf_raw=p4_ecmwf_raw,
     )
 
     logger.info(
@@ -1519,6 +1578,7 @@ def generate_signal(
         model_divergence_f=model_divergence_f,
         nbm_forecast_raw=nbm_forecast_raw,
         nbm_divergence_f=nbm_divergence_f,
+        model_source=model_source_used,
         top_bucket=top.bucket_lower,
         top_edge=top.edge,
         top_model_prob=top.model_prob,

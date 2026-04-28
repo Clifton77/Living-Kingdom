@@ -275,6 +275,12 @@
                   title="NWS AFM vs GFS-MOS forecast divergence">
               NWS {{ "%+.0f"|format(sig.model_divergence_f) }}°F vs MOS
             </span>
+            {% elif sig.model_source is defined and sig.model_source in ('GFS', 'ECMWF', 'BLEND') %}
+            <span class="badge bg-primary wb-mos-badge"
+                  id="fcst-div-{{ station }}"
+                  title="Phase 4: station-optimized {{ sig.model_source }} forecast (bias pre-corrected)">
+              P4 · {{ sig.model_source }}
+            </span>
             {% endif %}
             <span class="text-muted small ms-auto" id="fcst-cluster-{{ station }}">
               Cluster {{ sig.cluster_id }} · {{ sig.season }} · n={{ sig.n_obs }}
