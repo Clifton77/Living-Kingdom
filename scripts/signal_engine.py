@@ -1207,7 +1207,7 @@ def generate_signal(
     from utils.peak_hours import get_peak_hour
     peak_hour_local = get_peak_hour(station, event_date)
     taf   = interpret_taf(station, event_date=event_date, peak_hour_local=peak_hour_local)
-    metar = get_metar(station)
+    metar = get_metar(settlement_station(station))  # KJFK→KNYC, KORD→KMDW
 
     # ── 2. Forecast (Phase 4 GFS/ECMWF preferred; NWS+NBM fallback) ─────
     if p4_forecast_f is not None:

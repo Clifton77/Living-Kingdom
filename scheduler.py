@@ -135,6 +135,7 @@ from config import (
     MIN_YES_ASK,
     MAX_YES_ASK,
     MAX_DAILY_ENTRIES_PER_STATION,
+    settlement_station,
 )
 from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_phase4_signals, _STATION_KELLY_MULT
 _p4_fetcher  = Phase4Forecaster()
@@ -597,11 +598,12 @@ def tier1_metar_entries_exits():
         # ── Pass 1: exits ────────────────────────────────────────────────────
         for station in STATIONS:
             try:
-                metar    = get_metar(station)
+                settle   = settlement_station(station)
+                metar    = get_metar(settle)
                 obs_temp = metar.temp_f
 
                 if obs_temp is None or obs_temp <= -50.0:
-                    logger.warning("[Tier1] %s METAR failed (temp=%s) — skipping exit pass", station, obs_temp)
+                    logger.warning("[Tier1] %s METAR failed (temp=%s, settle=%s) — skipping exit pass", station, obs_temp, settle)
                     continue
 
                 # Push METAR to dashboard for every station every cycle
@@ -629,11 +631,11 @@ def tier1_metar_entries_exits():
                 local_now  = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
                 local_hour = local_now.hour
 
-                rm_data     = running_max_with_confluence(station, now_utc.date())
+                rm_data     = running_max_with_confluence(settle, now_utc.date())
                 running_max = rm_data["running_max_f"]
                 _running_max_cache[station] = (running_max, now_utc)
                 if not rm_data["in_confluence"]:
-                    logger.warning("[Tier1] %s temp confluence issue: %s", station, rm_data["note"])
+                    logger.warning("[Tier1] %s temp confluence issue (settle=%s): %s", station, settle, rm_data["note"])
 
                 for market_id, pos in station_positions.items():
                     snap = kalshi.get_market_snapshot(
