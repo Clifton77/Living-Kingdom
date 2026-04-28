@@ -126,8 +126,11 @@ function initSSE() {
     const safeMid = d.market_id.replace(/-/g, '_');
     const sign    = d.unrealized_pnl >= 0 ? '+' : '';
 
+    const askEl = document.getElementById(`pos-ask-${safeMid}`);
+    if (askEl && d.current_ask != null) askEl.textContent = `$${d.current_ask.toFixed(2)}`;
+
     const bidEl = document.getElementById(`pos-bid-${safeMid}`);
-    if (bidEl) bidEl.textContent = `$${d.current_bid.toFixed(2)}`;
+    if (bidEl && d.current_bid != null) bidEl.textContent = `$${d.current_bid.toFixed(2)}`;
 
     const badgeEl = document.getElementById(`pos-badge-${safeMid}`);
     if (badgeEl) {
@@ -529,8 +532,10 @@ function buildPositionCardInner(mid, pos) {
           <span class="text-muted small">Entry</span>
           <span class="ms-1 fw-semibold">$${pos.entry_price.toFixed(2)}</span>
           <span class="mx-2 text-muted">→</span>
-          <span class="text-muted small">Current</span>
-          <span class="ms-1 fw-semibold" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
+          <span class="text-muted small">Ask</span>
+          <span class="ms-1 fw-semibold" id="pos-ask-${safeMid}">$${(pos.current_ask ?? pos.current_bid).toFixed(2)}</span>
+          <span class="text-muted small ms-2">Bid</span>
+          <span class="ms-1 text-muted" id="pos-bid-${safeMid}">$${pos.current_bid.toFixed(2)}</span>
         </div>
         <span class="${pctClass} fw-bold" id="pos-pct-${safeMid}">${pos.pnl_pct >= 0 ? '+' : ''}${pos.pnl_pct.toFixed(1)}%</span>
       </div>

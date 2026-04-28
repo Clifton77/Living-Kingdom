@@ -161,8 +161,12 @@
                     <span class="text-muted small">Entry</span>
                     <span class="ms-1 fw-semibold">${{ "%.2f"|format(pos.entry_price) }}</span>
                     <span class="mx-2 text-muted">→</span>
-                    <span class="text-muted small">Current</span>
-                    <span class="ms-1 fw-semibold" id="pos-bid-{{ market_id|replace('-','_') }}">
+                    <span class="text-muted small">Ask</span>
+                    <span class="ms-1 fw-semibold" id="pos-ask-{{ market_id|replace('-','_') }}">
+                      ${{ "%.2f"|format(pos.current_ask) }}
+                    </span>
+                    <span class="text-muted small ms-2">Bid</span>
+                    <span class="ms-1 text-muted" id="pos-bid-{{ market_id|replace('-','_') }}">
                       ${{ "%.2f"|format(pos.current_bid) }}
                     </span>
                   </div>
