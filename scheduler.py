@@ -49,10 +49,15 @@ from utils.events import push_event, push_alert
 
 def _push_signal_update(sig) -> None:
     """Push a signal_update SSE event so the dashboard card refreshes immediately."""
+    from zoneinfo import ZoneInfo
+    _tz  = ZoneInfo(STATION_TIMEZONES[sig.station])
+    _now = datetime.now(timezone.utc).astimezone(_tz)
+    _local_time_now = _now.strftime("%I:%M %p %Z")
     push_event("signal_update", {
         "station":            sig.station,
         "event_date":         str(sig.event_date),
         "decision":           sig.decision,
+        "local_time":         _local_time_now,
         "top_edge":           sig.top_edge,
         "top_bucket":         sig.top_bucket,
         "top_model_prob":     sig.top_model_prob,

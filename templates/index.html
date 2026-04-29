@@ -237,7 +237,7 @@
                 </span>
               </div>
               {% if sig %}
-              <div class="text-muted small">{{ sig.local_time if sig.local_time else '—' }}</div>
+              <div class="text-muted small" id="sig-time-{{ station }}">{{ sig.local_time if sig.local_time else '—' }}</div>
               {% endif %}
             </div>
             <div class="d-flex align-items-start gap-2">

@@ -312,6 +312,10 @@ function _applySignalToCard(station, sig) {
   const lowerTail = sig.live_lower_tail !== undefined ? sig.live_lower_tail : 68;
   const upperTail = sig.live_upper_tail !== undefined ? sig.live_upper_tail : 77;
 
+  // Signal timestamp (local time at station when signal was last pushed)
+  const timeEl = document.getElementById(`sig-time-${station}`);
+  if (timeEl && sig.local_time) timeEl.textContent = sig.local_time;
+
   // Decision badge
   const badgeEl = document.querySelector(`[data-station="${station}"] .wb-decision-badge`);
   if (badgeEl && sig.decision) {
