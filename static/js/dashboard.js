@@ -334,13 +334,27 @@ function _applySignalToCard(station, sig) {
   const stdEl = document.getElementById(`fcst-std-${station}`);
   if (stdEl && sig.bias_std != null) stdEl.textContent = `±${parseFloat(sig.bias_std).toFixed(1)}°F`;
 
-  // MOS divergence badge
+  // Model/MOS badge — Phase 4 stations show P4·SOURCE, others show NWS divergence
   const divEl = document.getElementById(`fcst-div-${station}`);
-  if (divEl && sig.model_divergence_f != null) {
-    const sign  = sig.model_divergence_f >= 0 ? '+' : '';
-    const bgCls = sig.model_divergence_f > 2 ? 'bg-warning text-dark' : (sig.model_divergence_f < -2 ? 'bg-info text-dark' : 'bg-secondary');
-    divEl.textContent = `NWS ${sign}${Math.round(sig.model_divergence_f)}°F vs MOS`;
-    divEl.className   = `badge ${bgCls} wb-mos-badge`;
+  if (divEl) {
+    if (sig.model_source && ['GFS', 'ECMWF', 'BLEND'].includes(sig.model_source)) {
+      divEl.textContent = `P4 · ${sig.model_source}`;
+      divEl.className   = 'badge bg-primary wb-mos-badge';
+      divEl.title       = `Phase 4: station-optimized ${sig.model_source} forecast (bias pre-corrected)`;
+    } else if (sig.model_divergence_f != null) {
+      const sign  = sig.model_divergence_f >= 0 ? '+' : '';
+      const bgCls = sig.model_divergence_f > 2 ? 'bg-warning text-dark'
+                  : sig.model_divergence_f < -2 ? 'bg-info text-dark' : 'bg-secondary';
+      divEl.textContent = `NWS ${sign}${Math.round(sig.model_divergence_f)}°F vs MOS`;
+      divEl.className   = `badge ${bgCls} wb-mos-badge`;
+      divEl.title       = 'NWS AFM vs GFS-MOS forecast divergence';
+    }
+  }
+
+  // Skip reason (SKIP / HARD_SKIP cards)
+  if (['SKIP', 'HARD_SKIP'].includes(sig.decision)) {
+    const skipEl = document.getElementById(`skip-reason-${station}`);
+    if (skipEl && sig.skip_reason) skipEl.textContent = sig.skip_reason;
   }
 
   // Cluster row

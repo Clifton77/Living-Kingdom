@@ -159,6 +159,9 @@ class TradeSignal:
     # Structured reasoning for dashboard card
     reasoning:          Optional[SignalReasoning] = None
 
+    # Plain-English explanation shown on skip/hard-skip station cards
+    skip_reason:        str = ""
+
     # Timestamp — used by stale signal guard in Tier 2
     signal_generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -1617,7 +1620,7 @@ def _skip_signal(station, event_date, local_time, taf, metar,
         weather_gate="skip", taf=taf, metar=metar,
         mos_forecast_raw=mos_forecast_raw, model_divergence_f=model_divergence_f,
         nbm_forecast_raw=nbm_forecast_raw, nbm_divergence_f=nbm_divergence_f,
-        buckets=[], reasoning=None,
+        buckets=[], reasoning=None, skip_reason=reason,
     )
 
 
@@ -1638,7 +1641,7 @@ def _hard_skip_signal(station, event_date, local_time, taf, metar,
         top_kalshi_prob=0.0, top_yes_ask=0.0,
         kelly_fraction=0.0, kelly_stake_usd=0.0, kelly_contracts=0,
         weather_gate="hard_skip", taf=taf, metar=metar,
-        buckets=[], reasoning=None,
+        buckets=[], reasoning=None, skip_reason=note,
     )
 
 

@@ -39,6 +39,7 @@ def log_entry(
     edge: float,
     forecast_adjusted: float,
     sig,
+    entry_side: str = "yes",
 ) -> None:
     """Record a simulated trade entry."""
     _write({
@@ -56,6 +57,7 @@ def log_entry(
         "season":             getattr(sig, "season", None),
         "bias_mean":          round(getattr(sig, "bias_mean", 0.0), 3),
         "bias_std":           round(getattr(sig, "bias_std", 0.0), 3),
+        "entry_side":         entry_side,
     })
 
 

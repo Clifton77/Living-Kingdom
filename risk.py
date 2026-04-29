@@ -75,6 +75,9 @@ class OpenPosition:
     early_exit_triggered:   bool = False
     manually_closed:        bool = False
 
+    # Trade side — "yes" (bought YES contract) or "no" (bought NO contract)
+    entry_side:             str  = "yes"
+
 
 @dataclass
 class RiskState:
@@ -297,6 +300,7 @@ class RiskManager:
                         reversal_triggered   = bool(v.get("reversal_triggered", False)),
                         early_exit_triggered = bool(v.get("early_exit_triggered", False)),
                         manually_closed      = bool(v.get("manually_closed", False)),
+                        entry_side           = v.get("entry_side", "yes"),
                     )
                     for k, v in data.pop("positions", {}).items()
                 }
@@ -451,6 +455,7 @@ class RiskManager:
         contracts: int,
         entry_price: float,
         event_date: date,
+        entry_side: str = "yes",
     ) -> OpenPosition | None:
         """
         Record a new open position. Returns None if risk checks fail.
@@ -472,6 +477,7 @@ class RiskManager:
             event_date=event_date.isoformat(),
             current_bid=entry_price,
             current_ask=entry_price,
+            entry_side=entry_side,
         )
 
         self.state.positions[market_id] = pos

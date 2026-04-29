@@ -631,47 +631,52 @@ class KalshiClient:
                 error=str(exc),
             )
 
-    def close_position(self, market_id: str, contracts: int, bid_price: float) -> OrderResult:
+    def close_position(
+        self, market_id: str, contracts: int, bid_price: float, entry_side: str = "yes"
+    ) -> OrderResult:
         """
         Exit an open position by placing a sell limit order at the current bid.
+        entry_side: "yes" (sell YES contracts) or "no" (sell NO contracts).
         """
+        price_key = "yes_price" if entry_side == "yes" else "no_price"
+
         if DRY_RUN:
             import uuid
             fake_id = f"dryrun-{uuid.uuid4().hex[:8]}"
             logger.info(
-                "[DRY RUN] Close skipped | %s | %d contracts @ %.2f | fake_id=%s",
-                market_id, contracts, bid_price, fake_id,
+                "[DRY RUN] Close skipped | %s | %d contracts @ %.2f | side=%s | fake_id=%s",
+                market_id, contracts, bid_price, entry_side, fake_id,
             )
             return OrderResult(
                 success=True,
                 order_id=fake_id,
                 market_id=market_id,
-                side="yes",
+                side=entry_side,
                 contracts=contracts,
                 price=bid_price,
                 error=None,
             )
 
         body = {
-            "ticker":    market_id,
-            "action":    "sell",
-            "side":      "yes",
-            "type":      "limit",
-            "count":     contracts,
-            "yes_price": round(bid_price * 100),
+            "ticker":   market_id,
+            "action":   "sell",
+            "side":     entry_side,
+            "type":     "limit",
+            "count":    contracts,
+            price_key:  round(bid_price * 100),
         }
         try:
             resp = self._post("/portfolio/orders", body)
             order = resp.get("order", resp)
             logger.info(
-                "Exit order placed | %s | %d contracts @ %.2f",
-                market_id, contracts, bid_price,
+                "Exit order placed | %s | %d contracts @ %.2f | side=%s",
+                market_id, contracts, bid_price, entry_side,
             )
             return OrderResult(
                 success=True,
                 order_id=order.get("order_id"),
                 market_id=market_id,
-                side="yes",
+                side=entry_side,
                 contracts=contracts,
                 price=bid_price,
                 error=None,
@@ -680,7 +685,7 @@ class KalshiClient:
             logger.error("close_position failed %s: %s", market_id, exc)
             return OrderResult(
                 success=False, order_id=None,
-                market_id=market_id, side="yes",
+                market_id=market_id, side=entry_side,
                 contracts=contracts, price=bid_price,
                 error=str(exc),
             )

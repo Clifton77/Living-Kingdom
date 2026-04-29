@@ -14,11 +14,14 @@ import json
 import math
 import os
 import threading
+import time
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 from zoneinfo import ZoneInfo
+
+_BUILD_VERSION = str(int(time.time()))
 
 import config as cfg
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -223,7 +226,7 @@ def _get_full_state() -> dict:
 @_require_auth
 def index():
     state = _get_full_state()
-    return render_template("index.html", initial_state=state)
+    return render_template("index.html", initial_state=state, config_version=_BUILD_VERSION)
 
 
 @app.route("/stream")

@@ -67,6 +67,8 @@ def _push_signal_update(sig) -> None:
         "kelly_contracts":    sig.kelly_contracts,
         "forecast_adjusted":  sig.forecast_adjusted,
         "bias_std":           sig.bias_std,
+        "model_source":       sig.model_source,
+        "skip_reason":        sig.skip_reason,
         "model_divergence_f": sig.model_divergence_f,
         "live_lower_tail":    sig.live_lower_tail,
         "live_upper_tail":    sig.live_upper_tail,
@@ -444,7 +446,8 @@ def tier2_taf_monitor():
                         f"(edge={sig.top_edge:+.3f})"
                     )
                 logger.warning("[Tier2] Auto-closing %s — %s", market_id, reason)
-                _execute_exit(market_id, pos, snap.yes_bid, reason, kalshi, rm)
+                _t2_bid = snap.no_bid if getattr(pos, "entry_side", "yes") == "no" else snap.yes_bid
+                _execute_exit(market_id, pos, _t2_bid, reason, kalshi, rm)
 
                 # Block Tier 1 re-entry until the next Tier 3 run recomputes the signal.
                 # Write a HARD_SKIP into _latest_signals so Tier 1 sees it immediately.
@@ -455,6 +458,7 @@ def tier2_taf_monitor():
                             current,
                             decision="HARD_SKIP",
                             weather_gate="hard_skip",
+                            skip_reason="TAF amendment — weather gate forces skip; re-entry blocked until next Tier 3 run.",
                         )
                         _latest_signals[station] = updated
                         logger.info(
@@ -682,10 +686,14 @@ def tier1_metar_entries_exits():
                     except (IndexError, ValueError):
                         _market_date = pos_event_date
                     pos_is_today = (_market_date == now_utc.date())
+                    _is_no = getattr(pos, "entry_side", "yes") == "no"
+                    _cur_bid = snap.no_bid if _is_no else snap.yes_bid
+                    _cur_ask = snap.no_ask if _is_no else snap.yes_ask
+
                     exit_decision = rm.update_position(
                         market_id=market_id,
-                        current_bid=snap.yes_bid,
-                        current_ask=snap.yes_ask,
+                        current_bid=_cur_bid,
+                        current_ask=_cur_ask,
                         current_edge=current_edge,
                         current_obs_temp=obs_temp        if pos_is_today else None,
                         running_max=running_max          if pos_is_today else None,
@@ -698,8 +706,8 @@ def tier1_metar_entries_exits():
                         else logger.info
                     )
                     log_level(
-                        "[Tier1] %s bid=%.2f P/L=$%+.4f (%.1f%%) | [%s] %s",
-                        market_id, snap.yes_bid,
+                        "[Tier1] %s %s bid=%.2f P/L=$%+.4f (%.1f%%) | [%s] %s",
+                        market_id, pos.entry_side.upper(), _cur_bid,
                         pos.unrealized_pnl, pos.pnl_pct,
                         exit_decision.urgency.upper(),
                         exit_decision.reason,
@@ -708,14 +716,14 @@ def tier1_metar_entries_exits():
                     # Push live price update to dashboard on every cycle
                     push_event("position_price_update", {
                         "market_id":     market_id,
-                        "current_bid":   snap.yes_bid,
-                        "current_ask":   snap.yes_ask,
+                        "current_bid":   _cur_bid,
+                        "current_ask":   _cur_ask,
                         "unrealized_pnl": round(pos.unrealized_pnl, 4),
                         "pnl_pct":       round(pos.pnl_pct, 2),
                     })
 
                     if exit_decision.should_exit:
-                        _execute_exit(market_id, pos, snap.yes_bid, exit_decision.reason, kalshi, rm)
+                        _execute_exit(market_id, pos, _cur_bid, exit_decision.reason, kalshi, rm)
                         _last_snapshot_time.pop(market_id, None)
                         # After undershoot (peak passed), the day is over — block re-entry.
                         if exit_decision.exit_type == "undershoot":
@@ -726,6 +734,7 @@ def tier1_metar_entries_exits():
                                         current_sig,
                                         decision="HARD_SKIP",
                                         weather_gate="hard_skip",
+                                        skip_reason="Peak hour passed — undershoot exit fired, re-entry blocked for today.",
                                     )
                                     _latest_signals[station] = updated_sig
                                     _push_signal_update(updated_sig)
@@ -740,6 +749,25 @@ def tier1_metar_entries_exits():
                                 "[Tier1] UNDERSHOOT WARNING on %s — manual close available on dashboard",
                                 market_id,
                             )
+                        # Type 3 NO obs-trajectory signal (log-only until Type 1+2 validated)
+                        if (getattr(pos, "entry_side", "yes") == "yes"
+                                and local_hour is not None and local_hour >= 11
+                                and running_max is not None and peak_heating_hour is not None):
+                            _expected_remaining = (peak_heating_hour - local_hour) * 1.5
+                            _rm_gap = pos.bucket_lower - running_max
+                            _t3_snap = kalshi.get_market_snapshot(
+                                station, sig.event_date, pos.bucket_lower
+                            ) if sig else None
+                            if (_rm_gap > _expected_remaining
+                                    and _t3_snap and _t3_snap.yes_ask >= 0.20):
+                                logger.info(
+                                    "[Tier1] %s TYPE3_NO signal: rm=%.1f bucket=%d "
+                                    "gap=%.1f>expected=%.1f yes_ask=%.2f — "
+                                    "log only, pending Type 1+2 validation",
+                                    station, running_max, pos.bucket_lower,
+                                    _rm_gap, _expected_remaining, _t3_snap.yes_ask,
+                                )
+
                         # Log intraday snapshot if SNAPSHOT_INTERVAL_MIN has elapsed
                         last_snap = _last_snapshot_time.get(market_id)
                         if last_snap is None or (now_utc - last_snap).total_seconds() >= SNAPSHOT_INTERVAL_MIN * 60:
@@ -930,36 +958,62 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
 
     # ── Phase 4 gate: sole trade-validity check for new entries ──────────
     # BUY_YES: price 40–70¢ (study: +0.034 edge; strong buy 60–70¢ = +0.081).
-    # BUY_NO:  price 5–30¢  — logged for visibility; not yet placed because
-    #          _execute_exit always sells "yes" and would misclose a NO position.
+    # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
     _p4_entry = next(
         (s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_YES"),
         None,
     )
     if _p4_entry is None:
-        _p4_no = next(
-            (s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"),
-            None,
-        )
-        if _p4_no:
-            logger.info(
-                "[Tier1] %s Phase4 BUY_NO B%d ask=%.2f — opportunity logged, "
-                "not placed (exit system needs NO-side support first)",
-                station, _p4_no.bucket_lower, _p4_no.yes_ask,
-            )
-        else:
+        # Type 1 NO — structural tail: pick bucket closest to 30¢ (best liquidity)
+        _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
+        _p4_no = max(_no_signals, key=lambda s: s.yes_ask, default=None)
+        if _p4_no is None:
             logger.info("[Tier1] %s Phase4 PASS — no actionable bucket", station)
-        return
+            return
+        entry_bucket = _p4_no.bucket_lower
+        entry_side   = "no"
+        logger.info(
+            "[Tier1] %s Phase4 BUY_NO B%d yes_ask=%.2f (no_cost=%.2f)",
+            station, entry_bucket, _p4_no.yes_ask, 1 - _p4_no.yes_ask,
+        )
+    else:
+        entry_bucket = _p4_entry.bucket_lower
+        entry_side   = "yes"
 
-    entry_bucket = _p4_entry.bucket_lower
-    logger.info(
-        "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f",
-        station, _p4_entry.action, entry_bucket, _p4_entry.yes_ask, _p4_entry.confidence,
-    )
+    if entry_side == "yes":
+        # Gate 1: model Gaussian must assign ≥30% probability to this specific bucket
+        _entry_bucket_sig = next(
+            (b for b in sig.buckets if b.bucket_lower == entry_bucket), None
+        )
+        _entry_model_prob = _entry_bucket_sig.model_prob if _entry_bucket_sig else 0.0
+        if _entry_model_prob < cfg.MIN_MODEL_PROB_FOR_ENTRY:
+            logger.info(
+                "[Tier1] %s Phase4 BUY_YES B%d skipped — model_prob %.3f < %.2f floor",
+                station, entry_bucket, _entry_model_prob, cfg.MIN_MODEL_PROB_FOR_ENTRY,
+            )
+            return
+
+        # Gate 2: yes_ask < 25¢ means market is deeply skeptical — that's the BUY_NO zone
+        if _p4_entry.yes_ask < cfg.MIN_YES_ASK_FOR_ENTRY:
+            logger.info(
+                "[Tier1] %s Phase4 BUY_YES B%d skipped — yes_ask %.2f < %.2f floor (BUY_NO zone)",
+                station, entry_bucket, _p4_entry.yes_ask, cfg.MIN_YES_ASK_FOR_ENTRY,
+            )
+            return
+
+        logger.info(
+            "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f model_prob=%.3f",
+            station, _p4_entry.action, entry_bucket, _p4_entry.yes_ask,
+            _p4_entry.confidence, _entry_model_prob,
+        )
 
     snap = kalshi.get_market_snapshot(station, sig.event_date, entry_bucket)
     if snap is None or not snap.is_open:
         return
+
+    # Use the correct bid/ask side for this entry type
+    _e_ask = snap.no_ask if entry_side == "no" else snap.yes_ask
+    _e_bid = snap.no_bid if entry_side == "no" else snap.yes_bid
 
     push_event("kalshi_top_update", {
         "station":        station,
@@ -971,7 +1025,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     })
 
     # Liquidity guard
-    spread    = snap.yes_ask - snap.yes_bid
+    spread    = _e_ask - _e_bid
     spread_ok = spread <= MAX_BID_ASK_SPREAD
     volume_ok = snap.volume >= MIN_MARKET_VOLUME
 
@@ -1041,10 +1095,10 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         "fresh_edge":     round(fresh_edge, 4),
         "top_model_prob": sig.top_model_prob,
     })
-    # Size primary entry. When dual-entry will fire the 2% budget is split
-    # evenly (1% primary + 1% secondary = 2% total). Otherwise full 2%.
+    # Size primary entry. NO positions only get half-Kelly (higher win rate but
+    # per-contract cost is 70–95¢, so 2% bankroll = 2 contracts max).
     import math as _math
-    splits = 2 if _dual_entry_eligible(sig) else 1
+    splits = 2 if (entry_side == "yes" and _dual_entry_eligible(sig)) else 1
     primary_budget = round(rm.state.bankroll * MAX_STAKE_PCT / splits, 2)
 
     ok, reason = rm.can_open_position(primary_budget, station=station)
@@ -1052,7 +1106,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         logger.info("[Tier1] %s risk gate: %s", station, reason)
         return
 
-    max_price = snap.yes_ask
+    max_price = _e_ask  # no_ask for NO positions, yes_ask for YES positions
     live_contracts = int(_math.floor(primary_budget / max_price)) if max_price > 0 else 0
     if live_contracts < 1:
         logger.info(
@@ -1067,7 +1121,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         market_id=market_id,
         contracts=live_contracts,
         limit_price=max_price,
-        side="yes",
+        side=entry_side,
     )
 
     if result.success:
@@ -1078,6 +1132,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             contracts=live_contracts,
             entry_price=max_price,
             event_date=sig.event_date,
+            entry_side=entry_side,
         )
         get_sheets_logger().log_trade_opened(
             station=station,
@@ -1100,6 +1155,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             edge=fresh_edge,
             forecast_adjusted=sig.forecast_adjusted,
             sig=sig,
+            entry_side=entry_side,
         )
         open_record = {
             "ts":           _make_local_ts(station),
@@ -1252,9 +1308,9 @@ def _attempt_dual_entry(station: str, sig, now_utc: datetime, rm, kalshi):
 
 def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
     """Place sell order and record close."""
-    logger.info("[Exit] Executing: %s | reason: %s", market_id, reason)
+    logger.info("[Exit] Executing: %s | side=%s | reason: %s", market_id, pos.entry_side, reason)
 
-    result = kalshi.close_position(market_id, pos.contracts, bid_price)
+    result = kalshi.close_position(market_id, pos.contracts, bid_price, entry_side=pos.entry_side)
     if result.success:
         realized = rm.close_position(market_id, bid_price, reason)
         get_sheets_logger().log_trade_closed(pos.station, market_id, bid_price, realized, reason)
@@ -1425,23 +1481,8 @@ def tier3_full_signal_pass(event_date: date | None = None):
     # Store updated distributions — Tier 1 reads these on every 5-min cycle
     with _latest_signals_lock:
         _latest_signals.update(signals)
-    for station, sig in signals.items():
-        push_event("signal_update", {
-            "station":           station,
-            "decision":          sig.decision,
-            "top_edge":          sig.top_edge,
-            "top_bucket":        sig.top_bucket,
-            "top_model_prob":    sig.top_model_prob,
-            "top_kalshi_prob":   sig.top_kalshi_prob,
-            "forecast_adjusted": sig.forecast_adjusted,
-            "bias_std":          sig.bias_std,
-            "model_divergence_f": sig.model_divergence_f,
-            "live_lower_tail":   sig.live_lower_tail,
-            "live_upper_tail":   sig.live_upper_tail,
-            "cluster_id":        sig.cluster_id,
-            "season":            sig.season,
-            "n_obs":             sig.n_obs,
-        })
+    for sig in signals.values():
+        _push_signal_update(sig)
 
     # Log WATCH/SKIP/HARD_SKIP decisions to Sheets for review
     sheets = get_sheets_logger()

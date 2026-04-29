@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WeatherBot Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ config_version }}">
 </head>
 <body>
 
@@ -325,8 +325,15 @@
             </div>
           </div>
           {% else %}
-          <div class="wb-bucket-highlight rounded p-2 mb-2 text-muted small">
-            {{ sig.reasoning if sig.reasoning is string else sig.reasoning.decision_rationale if sig.reasoning else 'Skipped' }}
+          <div class="wb-bucket-highlight rounded p-2 mb-2">
+            {% if sig.decision == 'HARD_SKIP' %}
+              <span class="badge bg-danger me-2">HARD SKIP</span>
+            {% else %}
+              <span class="badge bg-warning text-dark me-2">SKIP</span>
+            {% endif %}
+            <span class="text-muted small" id="skip-reason-{{ station }}">
+              {{ sig.skip_reason if sig.skip_reason else 'Signal skipped — reason unavailable' }}
+            </span>
           </div>
           {% endif %}
 
@@ -684,7 +691,7 @@
   // Inject server state for JS use
   const INITIAL_STATE = {{ initial_state | tojson }};
 </script>
-<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ config_version }}"></script>
 
 </body>
 </html>
