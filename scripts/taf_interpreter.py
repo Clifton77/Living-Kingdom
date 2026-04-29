@@ -70,6 +70,7 @@ class MetarResult:
     wx_codes:         list[str]
     raw:              str
     fetched_utc:      str
+    obs_time:         str = ""   # DDHHMMz token from METAR (e.g. "291853Z")
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +494,10 @@ def parse_metar(raw: str, station: str) -> MetarResult:
             raw="", fetched_utc=now_utc,
         )
 
+    # Observation time: DDHHMMz token (e.g. "291853Z")
+    _obs_m   = re.search(r'\b(\d{6}Z)\b', raw)
+    obs_time = _obs_m.group(1) if _obs_m else ""
+
     upper = raw.upper()
 
     # Temperature / dewpoint: M02/M08 or 22/14
@@ -552,6 +557,7 @@ def parse_metar(raw: str, station: str) -> MetarResult:
         wx_codes=wx_codes,
         raw=raw,
         fetched_utc=now_utc,
+        obs_time=obs_time,
     )
 
 

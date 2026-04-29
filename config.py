@@ -522,8 +522,11 @@ ENTRY_CUTOFF_PRE_PEAK_HOURS = 2
 # ---------------------------------------------------------------------------
 # Scheduler tier intervals
 # ---------------------------------------------------------------------------
-TIER1_INTERVAL_SECONDS = 300    # 5 min — METAR + exits + entries (sleep-based, post-ASOS-aligned)
-TIER2_INTERVAL_SECONDS = 600    # 10 min — TAF amendments + auto-close on signal flip
+TIER1_INTERVAL_SECONDS        = 300   # 5 min — METAR + exits + entries (sleep-based, post-ASOS-aligned)
+TIER1_NEARHR_INTERVAL_SECONDS = 60    # fast-poll interval near top of hour to catch fresh hourly obs
+TIER1_NEARHR_START_MINUTE     = 47    # begin fast polling at :47 past the hour
+TIER1_NEARHR_END_MINUTE       = 5     # end fast polling at :05 of the next hour
+TIER2_INTERVAL_SECONDS        = 600   # 10 min — TAF amendments + auto-close on signal flip
 # Tier 3 runs on GFS cycle alignment (every 6hrs + 30min offset); no order execution
 
 SNAPSHOT_INTERVAL_MIN = 15      # how often to log an intraday position snapshot while a trade is open

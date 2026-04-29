@@ -122,6 +122,9 @@ from config import (
     LIQUIDITY_RETRY_INTERVAL_MIN,
     LIQUIDITY_MAX_RETRIES,
     TIER1_INTERVAL_SECONDS,
+    TIER1_NEARHR_INTERVAL_SECONDS,
+    TIER1_NEARHR_START_MINUTE,
+    TIER1_NEARHR_END_MINUTE,
     TIER2_INTERVAL_SECONDS,
     STALE_SIGNAL_HOURS,
     PRICE_SCAN_INTERVAL_MIN,
@@ -159,6 +162,12 @@ _latest_signals_lock = threading.Lock()
 # Running-max cache: populated by exit pass, consumed by entry pass.
 # Prevents entering a bucket the temperature has already surpassed.
 _running_max_cache: dict[str, tuple[float, datetime]] = {}  # station → (max_f, fetched_at)
+
+# Near-hour obs watcher: tracks fresh hourly METAR arrivals (~:50 past each hour).
+# Tier 1 accelerates to 60-second polling from :47 to :05 to catch new obs ASAP.
+_last_metar_obs_time:     dict[str, str] = {}    # settle_stn → last DDHHMMz string ("291853Z")
+_current_hour_obs_seen:   set[str]       = set() # Kalshi station labels that got fresh obs this window
+_near_hour_window_active: bool           = False  # True while inside a near-hour window
 
 _risk_manager: Optional[RiskManager] = None
 _kalshi:       Optional[KalshiClient] = None
@@ -553,18 +562,34 @@ def _get_entry_event_date(station: str, now_utc: datetime) -> date | None:
 # Tier 1 — METAR + exits + entries (sleep-based, ~5 min after completion)
 # ---------------------------------------------------------------------------
 
+def _is_near_top_of_hour(now_utc: datetime) -> bool:
+    """True from :47 to :05 — the window when hourly ASOS obs are expected."""
+    m = now_utc.minute
+    return m >= TIER1_NEARHR_START_MINUTE or m < TIER1_NEARHR_END_MINUTE
+
+
 def _reschedule_tier1() -> None:
     """
-    Schedule the next Tier 1 run for TIER1_INTERVAL_SECONDS from now.
+    Schedule the next Tier 1 run.
 
-    Called in a finally block so the next fire time is measured from
-    completion, not from a fixed clock.  This drifts naturally toward
-    ASOS post times (~:53-:58) so obs are always close to fresh.
+    Near the top of each hour (:47–:05), switches to a 60-second interval
+    until all stations have received a fresh hourly METAR obs, then reverts
+    to the normal 5-minute interval.  Called in a finally block so the
+    interval is measured from completion, not a fixed clock.
     """
     global _scheduler
     if _scheduler is None or not _scheduler.running:
         return
-    run_at = datetime.now(timezone.utc) + timedelta(seconds=TIER1_INTERVAL_SECONDS)
+    now   = datetime.now(timezone.utc)
+    near  = _is_near_top_of_hour(now)
+    fresh = len(_current_hour_obs_seen)
+    total = len(STATIONS)
+    if near and fresh < total:
+        interval = TIER1_NEARHR_INTERVAL_SECONDS
+        logger.info("[ObsWatcher] Near-hour fast poll (%d/%d fresh) — next in %ds", fresh, total, interval)
+    else:
+        interval = TIER1_INTERVAL_SECONDS
+    run_at = now + timedelta(seconds=interval)
     _scheduler.add_job(
         tier1_metar_entries_exits,
         trigger=DateTrigger(run_date=run_at, timezone="UTC"),
@@ -574,7 +599,7 @@ def _reschedule_tier1() -> None:
         max_instances=1,
         coalesce=True,
     )
-    logger.debug("[Tier1] Next run scheduled for %s UTC", run_at.strftime("%H:%M"))
+    logger.debug("[Tier1] Next run scheduled for %s UTC (%ds)", run_at.strftime("%H:%M"), interval)
 
 
 def tier1_metar_entries_exits():
@@ -601,6 +626,19 @@ def tier1_metar_entries_exits():
 
         now_utc = datetime.now(timezone.utc)
 
+        # ── Near-hour obs window tracking ────────────────────────────────────
+        global _near_hour_window_active, _current_hour_obs_seen
+        near = _is_near_top_of_hour(now_utc)
+        if near and not _near_hour_window_active:
+            _near_hour_window_active = True
+            _current_hour_obs_seen.clear()
+            logger.info("[ObsWatcher] Entering near-hour window at %s UTC — fast obs polling begins",
+                        now_utc.strftime("%H:%M"))
+        elif not near and _near_hour_window_active:
+            _near_hour_window_active = False
+            _current_hour_obs_seen.clear()
+            logger.info("[ObsWatcher] Exiting near-hour window — reverting to %ds poll", TIER1_INTERVAL_SECONDS)
+
         # ── Price refresh — update all bucket prices before exit/entry logic ─
         _refresh_all_kalshi_prices(kalshi)
 
@@ -622,6 +660,7 @@ def tier1_metar_entries_exits():
                     "wind_kt":    metar.wind_kt,
                     "dewpoint_f": metar.dewpoint_f,
                     "sky_cover":  metar.sky_cover or "—",
+                    "obs_time":   metar.obs_time,
                 })
                 # Keep sig.metar current so applyFullState / signal_update always
                 # carry the latest obs — not just the Tier-3-age snapshot.
@@ -629,6 +668,20 @@ def tier1_metar_entries_exits():
                     live_sig = _latest_signals.get(station)
                     if live_sig is not None:
                         live_sig.metar = metar
+
+                # ── Near-hour new-obs detection ──────────────────────────────
+                if near and metar.obs_time:
+                    _prev_obs = _last_metar_obs_time.get(settle)
+                    try:
+                        _obs_hour        = int(metar.obs_time[2:4])
+                        _is_current_hour = (_obs_hour == now_utc.hour)
+                    except (IndexError, ValueError):
+                        _is_current_hour = False
+                    if _is_current_hour and metar.obs_time != _prev_obs:
+                        _last_metar_obs_time[settle] = metar.obs_time
+                        _current_hour_obs_seen.add(station)
+                        logger.info("[ObsWatcher] NEW hourly obs %s: %s (was %s) — temp %.1f°F",
+                                    station, metar.obs_time, _prev_obs or "—", obs_temp)
 
                 station_positions = {
                     mid: pos for mid, pos in rm.state.positions.items()
@@ -808,6 +861,10 @@ def tier1_metar_entries_exits():
 
             except Exception as exc:
                 logger.error("[Tier1] Exit pass error at %s: %s", station, exc, exc_info=True)
+
+        if near and len(_current_hour_obs_seen) == len(STATIONS):
+            logger.info("[ObsWatcher] All %d stations have fresh hourly obs — next cycle reverts to %ds",
+                        len(STATIONS), TIER1_INTERVAL_SECONDS)
 
         # ── Pass 2: entries ──────────────────────────────────────────────────
         entered = 0
