@@ -144,12 +144,20 @@ function initSSE() {
       pctEl.className   = `${d.pnl_pct >= 0 ? 'text-success' : 'text-danger'} fw-bold`;
     }
 
-    // Keep station card "Ask" in sync with the held position's live price.
-    // The signal engine's top_yes_ask is the market-consensus leader (often a different
-    // bucket than the Phase 4 entry), so we override it with the position's price here.
-    if (d.station && d.current_ask != null) {
+    // Keep station card "Top bucket" row in sync with the held position.
+    // The signal engine's top_bucket/top_yes_ask reflect the market-consensus leader
+    // (highest yes_ask), which can be a different bucket from the Phase 4 entry.
+    // Override both the label and the Ask to match the actual held position.
+    if (d.station && d.bucket_lower != null) {
+      const sig       = _signals[d.station] || {};
+      const lowerTail = sig.live_lower_tail ?? 68;
+      const upperTail = sig.live_upper_tail ?? 77;
+
+      const cardBucketEl = document.getElementById(`top-bucket-${d.station}`);
+      if (cardBucketEl) cardBucketEl.textContent = fmtBucket(d.bucket_lower, lowerTail, upperTail);
+
       const cardAskEl = document.getElementById(`top-kalshi-prob-${d.station}`);
-      if (cardAskEl) cardAskEl.textContent = `${Math.round(d.current_ask * 100)}¢`;
+      if (cardAskEl && d.current_ask != null) cardAskEl.textContent = `${Math.round(d.current_ask * 100)}¢`;
     }
   });
 
