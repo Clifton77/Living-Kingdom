@@ -716,6 +716,9 @@ def tier1_metar_entries_exits():
                     # Push live price update to dashboard on every cycle
                     push_event("position_price_update", {
                         "market_id":     market_id,
+                        "station":       station,
+                        "bucket_lower":  pos.bucket_lower,
+                        "entry_side":    getattr(pos, "entry_side", "yes"),
                         "current_bid":   _cur_bid,
                         "current_ask":   _cur_ask,
                         "unrealized_pnl": round(pos.unrealized_pnl, 4),

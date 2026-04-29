@@ -143,6 +143,14 @@ function initSSE() {
       pctEl.textContent = `${d.pnl_pct >= 0 ? '+' : ''}${d.pnl_pct.toFixed(1)}%`;
       pctEl.className   = `${d.pnl_pct >= 0 ? 'text-success' : 'text-danger'} fw-bold`;
     }
+
+    // Keep station card "Ask" in sync with the held position's live price.
+    // The signal engine's top_yes_ask is the market-consensus leader (often a different
+    // bucket than the Phase 4 entry), so we override it with the position's price here.
+    if (d.station && d.current_ask != null) {
+      const cardAskEl = document.getElementById(`top-kalshi-prob-${d.station}`);
+      if (cardAskEl) cardAskEl.textContent = `${Math.round(d.current_ask * 100)}¢`;
+    }
   });
 
   src.addEventListener('position_closed', e => {
