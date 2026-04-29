@@ -1152,7 +1152,7 @@ def _build_reasoning(
     nbm_src_str = f"NBM {nbm_forecast_raw:.0f}°F"     if nbm_forecast_raw is not None else "unavailable"
     data_sources = {
         "pattern":  f"{'Live Open-Meteo 500hPa' if data_source == 'openmeteo' else 'Reanalysis fallback'}",
-        "forecast": f"{src_label} (primary) | NBM: {nbm_src_str} | GFS-MOS: {mos_src_str}",
+        "forecast": f"{model_source_used} (primary) | NBM: {nbm_src_str} | GFS-MOS: {mos_src_str}",
         "bias":     f"{bias_src} — {n_obs} obs (model_source={model_source_used})",
         "taf":      f"aviationweather.gov ({taf.fetched_utc})",
         "metar":    f"aviationweather.gov ({metar.fetched_utc})",
