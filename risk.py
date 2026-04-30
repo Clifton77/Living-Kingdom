@@ -611,17 +611,44 @@ class RiskManager:
         kalshi_positions = kalshi.get_positions()
         kalshi_tickers   = {p.get("market_ticker", p.get("ticker", "")) for p in kalshi_positions}
 
-        for market_id in list(self.state.positions.keys()):
+        # Safety guard: an empty response with local open positions is almost certainly
+        # an API/auth failure, not genuine absence.  Skip reconciliation rather than
+        # nuke all positions at $0.
+        local_open = [mid for mid, pos in self.state.positions.items()
+                      if not getattr(pos, "pending_settlement", False)]
+        if not kalshi_tickers and local_open:
+            note = (
+                f"Reconciliation skipped: Kalshi returned 0 positions but local state has "
+                f"{len(local_open)} open — possible API error.  Will retry next cycle."
+            )
+            notes.append(note)
+            logger.warning(note)
+            return notes
+
+        for market_id, pos in list(self.state.positions.items()):
+            # Pending-settlement positions have closed markets — they won't appear
+            # in the open positions feed.  Leave them for the settlement sweep.
+            if getattr(pos, "pending_settlement", False):
+                logger.info(
+                    "Reconciliation: %s is pending settlement — skipping (not on open feed)",
+                    market_id,
+                )
+                continue
+
             if market_id not in kalshi_tickers:
-                pos     = self.state.positions[market_id]
-                # Best guess at settlement: if market is expired, treat as $0 (loss)
-                # The settlement sweep will correct this with actual values later
-                realized = self.close_position(market_id, exit_price=0.0,
-                                               reason="reconciliation — not found on Kalshi")
+                # Try to look up actual settlement value before defaulting to $0.
+                try:
+                    from datetime import date as _date
+                    pos_date   = _date.fromisoformat(pos.event_date)
+                    settlements = kalshi.get_settled_markets(pos_date)
+                    exit_price  = settlements.get(market_id, 0.0)
+                except Exception:
+                    exit_price = 0.0
+                realized = self.close_position(market_id, exit_price=exit_price,
+                                               reason=f"reconciliation — not found on Kalshi (settlement={exit_price:.2f})")
                 note = (
                     f"Reconciliation: {market_id} missing from Kalshi — "
-                    f"removed from state (P/L ${realized:+.4f}). "
-                    f"Settlement sweep will correct if this was a win."
+                    f"closed at ${exit_price:.2f} (P/L ${realized:+.4f})."
                 )
                 notes.append(note)
                 logger.warning(note)
