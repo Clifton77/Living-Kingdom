@@ -151,6 +151,8 @@ from config import (
     MIN_EDGE,
     MIN_YES_ASK,
     MAX_YES_ASK,
+    MIN_MODEL_PROB_FOR_ENTRY,
+    MIN_YES_ASK_FOR_ENTRY,
     MAX_DAILY_ENTRIES_PER_STATION,
     settlement_station,
 )
@@ -1070,18 +1072,18 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             (b for b in sig.buckets if b.bucket_lower == entry_bucket), None
         )
         _entry_model_prob = _entry_bucket_sig.model_prob if _entry_bucket_sig else 0.0
-        if _entry_model_prob < cfg.MIN_MODEL_PROB_FOR_ENTRY:
+        if _entry_model_prob < MIN_MODEL_PROB_FOR_ENTRY:
             logger.info(
                 "[Tier1] %s Phase4 BUY_YES B%d skipped — model_prob %.3f < %.2f floor",
-                station, entry_bucket, _entry_model_prob, cfg.MIN_MODEL_PROB_FOR_ENTRY,
+                station, entry_bucket, _entry_model_prob, MIN_MODEL_PROB_FOR_ENTRY,
             )
             return
 
         # Gate 2: yes_ask < 25¢ means market is deeply skeptical — that's the BUY_NO zone
-        if _p4_entry.yes_ask < cfg.MIN_YES_ASK_FOR_ENTRY:
+        if _p4_entry.yes_ask < MIN_YES_ASK_FOR_ENTRY:
             logger.info(
                 "[Tier1] %s Phase4 BUY_YES B%d skipped — yes_ask %.2f < %.2f floor (BUY_NO zone)",
-                station, entry_bucket, _p4_entry.yes_ask, cfg.MIN_YES_ASK_FOR_ENTRY,
+                station, entry_bucket, _p4_entry.yes_ask, MIN_YES_ASK_FOR_ENTRY,
             )
             return
 
