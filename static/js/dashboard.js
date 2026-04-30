@@ -379,9 +379,24 @@ function _applySignalToCard(station, sig) {
     clusterEl.textContent = `Cluster ${sig.cluster_id} · ${sig.season} · n=${sig.n_obs}`;
   }
 
-  // Top bucket
+  // Top bucket + Phase 4 direction badge
   const bucketEl = document.getElementById(`top-bucket-${station}`);
   if (bucketEl && sig.top_bucket != null) bucketEl.textContent = fmtBucket(sig.top_bucket, lowerTail, upperTail);
+
+  const dirBadgeEl = document.getElementById(`p4-dir-${station}`);
+  if (dirBadgeEl) {
+    if (sig.p4_action === 'BUY_YES') {
+      dirBadgeEl.textContent = 'YES';
+      dirBadgeEl.className   = 'badge bg-success ms-1';
+      dirBadgeEl.style.display = '';
+    } else if (sig.p4_action === 'BUY_NO') {
+      dirBadgeEl.textContent = 'NO';
+      dirBadgeEl.className   = 'badge bg-danger ms-1';
+      dirBadgeEl.style.display = '';
+    } else {
+      dirBadgeEl.style.display = 'none';
+    }
+  }
 
   const modelProbEl = document.getElementById(`top-model-prob-${station}`);
   if (modelProbEl && sig.top_model_prob != null) modelProbEl.textContent = `${Math.round(sig.top_model_prob * 100)}%`;
@@ -555,6 +570,7 @@ function buildPositionCardInner(mid, pos) {
         <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
         <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower, lowerTail, upperTail)}</span>
+        ${pos.entry_side === 'no' ? '<span class="badge bg-danger ms-1">NO</span>' : pos.entry_side === 'yes' ? '<span class="badge bg-success ms-1">YES</span>' : ''}
       </div>
       <span class="badge ${pnlClass} fs-6" id="pos-badge-${safeMid}">
         $${sign}${pos.unrealized_pnl.toFixed(2)}
@@ -626,6 +642,9 @@ function _tradeRow(d) {
     ? '<span class="badge bg-primary">OPEN</span>'
     : '<span class="badge bg-secondary">CLOSE</span>';
   const bucket  = d.bucket_lower != null ? `${d.bucket_lower}°F` : '—';
+  const dirHtml = d.entry_side === 'no'  ? '<span class="badge bg-danger">NO</span>'
+                : d.entry_side === 'yes' ? '<span class="badge bg-success">YES</span>'
+                : '—';
   const entry   = d.entry_price  != null ? `${(d.entry_price * 100).toFixed(0)}¢` : '—';
   const exitStr = (!isOpen && d.exit_price != null) ? `${(d.exit_price * 100).toFixed(0)}¢` : '—';
   let pnlHtml;
@@ -643,6 +662,7 @@ function _tradeRow(d) {
     <td>${typeBadge}</td>
     <td>${escHtml(d.station || '—')}</td>
     <td>${bucket}</td>
+    <td>${dirHtml}</td>
     <td>${entry}</td>
     <td>${exitStr}</td>
     <td>${pnlHtml}</td>

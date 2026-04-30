@@ -1423,74 +1423,21 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Bucket selection: market-led. Rank all buckets by Kalshi yes_ask (implied probability)
-    # and enter the one the market consensus favors most. Model acts as a confirmation gate —
-    # if the model's forecast doesn't physically land in the top-3 by yes_ask, HARD_SKIP.
+    # Rank buckets by Kalshi yes_ask; top bucket used for TradeSignal metadata.
+    # Phase 4 price-zone logic (in scheduler) determines the actual entry bucket.
     ranked = sorted(bucket_analyses, key=lambda b: b.yes_ask, reverse=True)
-    top3 = ranked[:3]
+    top3   = ranked[:3]
 
     logger.info(
-        "%s market-led top3: %s | forecast=%.1f°F (lower_tail=%s upper_tail=%s)",
+        "%s market top3: %s | forecast=%.1f°F",
         station,
         [(b.bucket_lower, round(b.yes_ask, 3)) for b in top3],
-        forecast_adjusted, live_lower_tail, live_upper_tail,
+        forecast_adjusted,
     )
 
-    def _in_bucket_range(b: BucketAnalysis, fc: float) -> bool:
-        if b.bucket_lower == live_lower_tail:
-            return fc < live_lower_tail + 1.0
-        if b.bucket_lower == live_upper_tail:
-            return fc >= live_upper_tail - 0.5
-        return b.bucket_lower - 0.5 <= fc < b.bucket_lower + 1.5
+    top = top3[0]  # Highest-ask bucket — used for signal metadata, not entry selection
 
-    if not any(_in_bucket_range(b, forecast_adjusted) for b in top3):
-        logger.info(
-            "%s HARD SKIP: forecast %.1f°F outside market top-3 %s",
-            station, forecast_adjusted, [b.bucket_lower for b in top3],
-        )
-        return _hard_skip_signal(
-            station, event_date, local_time_str, taf, metar,
-            pattern, forecast_raw, bias_info, forecast_adjusted,
-            reason=(
-                f"Model forecast {forecast_adjusted:.1f}°F outside market top-3 "
-                f"{[b.bucket_lower for b in top3]} — model/market divergence"
-            ),
-        )
-
-    top = top3[0]  # Market consensus leader (highest yes_ask)
-
-    # MOS divergence gate — only trade when NWS and GFS-MOS roughly agree
-    if mos_forecast_raw is not None and model_divergence_f is not None:
-        if abs(model_divergence_f) > MOS_DIVERGENCE_THRESHOLD:
-            logger.info(
-                "%s MOS divergence %.1f°F exceeds %.1f°F threshold — skipping "
-                "(NWS=%.1f°F, MOS=%.1f°F)",
-                station, abs(model_divergence_f), MOS_DIVERGENCE_THRESHOLD,
-                forecast_raw, mos_forecast_raw,
-            )
-            return _skip_signal(
-                station, event_date, local_time_str, taf, metar, pattern,
-                f"NWS/MOS divergence {abs(model_divergence_f):.1f}°F > "
-                f"{MOS_DIVERGENCE_THRESHOLD}°F — sources disagree",
-                **_fcst_kwargs,
-            )
-
-    # NBM divergence gate — tighter than MOS since NBM is higher-quality guidance
-    if nbm_divergence_f is not None and abs(nbm_divergence_f) > NBM_DIVERGENCE_GATE:
-        logger.info(
-            "%s NBM divergence %.1f°F exceeds %.1f°F threshold — skipping "
-            "(NWS=%.1f°F, NBM=%.1f°F)",
-            station, abs(nbm_divergence_f), NBM_DIVERGENCE_GATE,
-            forecast_raw, nbm_forecast_raw,
-        )
-        return _skip_signal(
-            station, event_date, local_time_str, taf, metar, pattern,
-            f"NWS/NBM divergence {abs(nbm_divergence_f):.1f}°F > "
-            f"{NBM_DIVERGENCE_GATE}°F — sources disagree",
-            **_fcst_kwargs,
-        )
-
-    # Entry decision — TRADE whenever model confirms the market's top-3 consensus.
+    # Entry decision — Phase 4 price-zone logic handles bucket selection and validation.
     # Kelly self-regulates stake size based on edge magnitude; no edge floor required.
     decision = "TRADE"
 

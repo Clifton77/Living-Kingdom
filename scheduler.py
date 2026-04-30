@@ -53,6 +53,12 @@ def _push_signal_update(sig) -> None:
     _tz  = ZoneInfo(STATION_TIMEZONES[sig.station])
     _now = datetime.now(timezone.utc).astimezone(_tz)
     _local_time_now = _now.strftime("%I:%M %p %Z")
+    _p4_action = ""
+    _p4s_for_push = _p4_latest_signals.get(sig.station, [])
+    _best_p4_for_push = next((s for s in _p4s_for_push if s.action != "PASS"), None)
+    if _best_p4_for_push:
+        _p4_action = _best_p4_for_push.action
+
     push_event("signal_update", {
         "station":            sig.station,
         "event_date":         str(sig.event_date),
@@ -75,6 +81,7 @@ def _push_signal_update(sig) -> None:
         "cluster_id":         sig.cluster_id,
         "season":             sig.season,
         "n_obs":              sig.n_obs,
+        "p4_action":          _p4_action,
         "buckets": [
             {
                 "bucket_lower": b.bucket_lower,
@@ -233,7 +240,10 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
         signals_snapshot = dict(_latest_signals)
 
     for station, sig in signals_snapshot.items():
-        if not sig.buckets or sig.decision == "HARD_SKIP":
+        _is_hard_skip = sig.decision == "HARD_SKIP"
+        # For non-HARD_SKIP stations we need buckets to update; HARD_SKIP stations
+        # still need a snapshot fetch so Phase 4 can evaluate BUY_NO opportunities.
+        if not sig.buckets and not _is_hard_skip:
             continue
         try:
             snapshots = kalshi.get_all_snapshots(station, sig.event_date)
@@ -242,6 +252,28 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
 
             market_total = sum(s.implied_prob for s in snapshots.values() if s is not None)
             if market_total <= 0:
+                continue
+
+            # Phase 4 evaluation always runs — HARD_SKIP weather can validate BUY_NO.
+            try:
+                _p4_season = getattr(sig, "season", "Summer") or "Summer"
+                _p4_sigs = build_phase4_signals(
+                    station, snapshots, sig, _p4_gen, _p4_forecasts, _p4_season
+                )
+                _p4_latest_signals[station] = _p4_sigs
+                for _p4s in _p4_sigs:
+                    logger.info("[Phase4] %s", _p4s)
+                if not _p4_sigs:
+                    logger.info("[Phase4] %s: no actionable buckets this cycle", station)
+            except Exception as _p4_exc:
+                logger.info("[Phase4] %s annotation error: %s", station, _p4_exc)
+
+            # HARD_SKIP: push signal refresh but skip bucket distribution update.
+            if _is_hard_skip:
+                _push_signal_update(sig)
+                continue
+
+            if not sig.buckets:
                 continue
 
             updated: list = []
@@ -275,18 +307,6 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
                     live_sig.top_kalshi_prob = top.kalshi_prob
                     live_sig.top_yes_ask     = top.yes_ask
 
-            try:
-                _p4_season = getattr(sig, "season", "Summer") or "Summer"
-                _p4_sigs = build_phase4_signals(
-                    station, snapshots, sig, _p4_gen, _p4_forecasts, _p4_season
-                )
-                _p4_latest_signals[station] = _p4_sigs
-                for _p4s in _p4_sigs:
-                    logger.info("[Phase4] %s", _p4s)
-                if not _p4_sigs:
-                    logger.info("[Phase4] %s: no actionable buckets this cycle", station)
-            except Exception as _p4_exc:
-                logger.info("[Phase4] %s annotation error: %s", station, _p4_exc)
             _push_signal_update(sig)
             logger.info(
                 "[PriceRefresh] %s: pushed %d buckets | top=%d ask=%.2f edge=%+.3f",
@@ -925,9 +945,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         )
         return
 
-    # No trades on weather prohibits or stale model data
+    # No trades on weather prohibits or stale model data.
+    # Exception: HARD_SKIP stations can still trade BUY_NO — bad weather validates NO.
     if sig.decision == "HARD_SKIP":
-        return
+        _no_sigs_hs = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
+        if not _no_sigs_hs:
+            return
+        # Fall through — Phase 4 BUY_NO is valid despite weather HARD_SKIP
     age_hours = (now_utc - sig.signal_generated_at).total_seconds() / 3600
     if age_hours > STALE_SIGNAL_HOURS:
         logger.debug("[Tier1] %s signal %.1fh old — skipping entry", station, age_hours)
@@ -1060,6 +1084,21 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                 station, entry_bucket, _p4_entry.yes_ask, cfg.MIN_YES_ASK_FOR_ENTRY,
             )
             return
+
+        # Gate 3: entry bucket must also be the model's highest-probability bucket.
+        # The ≥30% floor (Gate 1) is insufficient when bias_std is wide — a tail
+        # bucket can exceed 30% via Gaussian leakage while a closer bucket has
+        # higher probability. Require the entry to be the model's actual top pick.
+        if sig.buckets:
+            _model_top = max(sig.buckets, key=lambda b: b.model_prob)
+            if entry_bucket != _model_top.bucket_lower:
+                logger.info(
+                    "[Tier1] %s Phase4 BUY_YES B%d skipped — not model's top bucket "
+                    "(model top=B%d prob=%.3f vs entry prob=%.3f)",
+                    station, entry_bucket, _model_top.bucket_lower,
+                    _model_top.model_prob, _entry_model_prob,
+                )
+                return
 
         logger.info(
             "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f model_prob=%.3f",
@@ -1228,6 +1267,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "stake_usd":    live_stake,
             "event_date":   str(sig.event_date),
             "entry_reason": "tier1",
+            "entry_side":   entry_side,
         }
         _trade_history.append(open_record)
         push_event("position_opened", open_record)

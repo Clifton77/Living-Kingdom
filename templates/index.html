@@ -148,6 +148,7 @@
                   {% set p_lower = pos_sig.live_lower_tail if pos_sig else 68 %}
                   {% set p_upper = pos_sig.live_upper_tail if pos_sig else 77 %}
                   <span class="badge bg-secondary ms-1">{% if pos.bucket_lower == p_lower %}≤{{ p_lower }}{% elif pos.bucket_lower == p_upper %}≥{{ p_upper }}{% else %}{{ pos.bucket_lower }}–{{ pos.bucket_lower + 1 }}{% endif %}°F</span>
+                  {% if pos.entry_side == 'no' %}<span class="badge bg-danger ms-1">NO</span>{% elif pos.entry_side == 'yes' %}<span class="badge bg-success ms-1">YES</span>{% endif %}
                 </div>
                 <span class="badge {% if pos.unrealized_pnl >= 0 %}bg-success{% else %}bg-danger{% endif %} fs-6"
                       id="pos-badge-{{ market_id|replace('-','_') }}">
@@ -312,6 +313,7 @@
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="text-muted small">Top bucket</span>
               <span class="fw-semibold" id="top-bucket-{{ station }}">{% if sig.top_bucket == sig.live_lower_tail %}≤{{ sig.live_lower_tail }}{% elif sig.top_bucket == sig.live_upper_tail %}≥{{ sig.live_upper_tail }}{% else %}{{ sig.top_bucket }}–{{ sig.top_bucket + 1 }}{% endif %}°F</span>
+              <span id="p4-dir-{{ station }}" class="badge ms-1" style="display:none"></span>
               <span class="ms-auto d-flex gap-3">
                 <span class="text-muted small">Model <span class="text-body" id="top-model-prob-{{ station }}">{{ "%.0f"|format(sig.top_model_prob * 100) }}%</span></span>
                 <span class="text-muted small">Ask <span class="text-body" id="top-kalshi-prob-{{ station }}">{{ "%.0f"|format(sig.top_yes_ask * 100) }}¢</span></span>
@@ -512,6 +514,7 @@
             <th>Type</th>
             <th>Station</th>
             <th>Bucket</th>
+            <th>Dir</th>
             <th>Entry</th>
             <th>Exit</th>
             <th>P/L</th>
@@ -534,6 +537,11 @@
               </td>
               <td>{{ t.station or '—' }}</td>
               <td>{{ t.bucket_lower }}°F</td>
+              <td>
+                {% if t.entry_side == 'no' %}<span class="badge bg-danger">NO</span>
+                {% elif t.entry_side == 'yes' %}<span class="badge bg-success">YES</span>
+                {% else %}—{% endif %}
+              </td>
               <td>{{ (t.entry_price * 100)|int }}¢</td>
               <td>{% if not is_open and t.exit_price %}{{ (t.exit_price * 100)|int }}¢{% else %}—{% endif %}</td>
               <td class="fw-bold {% if not is_open %}{% if pnl >= 0 %}text-success{% else %}text-danger{% endif %}{% else %}text-muted{% endif %}">
@@ -543,7 +551,7 @@
             </tr>
             {% endfor %}
           {% else %}
-            <tr><td colspan="8" class="text-muted text-center py-3">No trades today.</td></tr>
+            <tr><td colspan="9" class="text-muted text-center py-3">No trades today.</td></tr>
           {% endif %}
         </tbody>
       </table>
