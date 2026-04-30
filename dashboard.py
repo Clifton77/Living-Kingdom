@@ -216,6 +216,7 @@ def _get_full_state() -> dict:
             for k, v in _ADJUSTABLE_SETTINGS.items()
         },
         "city_names":      dict(cfg.STATION_CITY_NAMES),
+        "display_station_ids": {"KJFK": "KNYC", "KORD": "KMDW"},
         "bias_updated":    bias_updated,
         "trade_history":   list(reversed(get_trade_history())),
     }

@@ -232,7 +232,7 @@
           <div class="d-flex justify-content-between align-items-start mb-1">
             <div>
               <div class="d-flex align-items-baseline gap-2">
-                <span class="fw-bold fs-5">{{ station }}</span>
+                <span class="fw-bold fs-5">{{ initial_state.display_station_ids.get(station, station) }}</span>
                 <span class="text-muted fw-semibold">
                   {{ initial_state.city_names.get(station, station) }}
                 </span>

@@ -17,6 +17,9 @@ const STATION_CITIES = {
   KLAS: 'Las Vegas',     KMSP: 'Minneapolis',    KMSY: 'New Orleans',   KOKC: 'Oklahoma City',
   KPHX: 'Phoenix',       KSAT: 'San Antonio',    KSEA: 'Seattle',       KSFO: 'San Francisco',
 };
+// Stations where the Kalshi label differs from the NWS settlement station shown on the card.
+const DISPLAY_STATION_ID = { KJFK: 'KNYC', KORD: 'KMDW' };
+function displayStation(s) { return DISPLAY_STATION_ID[s] || s; }
 const STATION_TZ = {
   KJFK: 'America/New_York',    KMIA: 'America/New_York',    KATL: 'America/New_York',
   KPHL: 'America/New_York',    KBOS: 'America/New_York',    KDCA: 'America/New_York',
@@ -170,7 +173,8 @@ function initSSE() {
       if (cardBucketEl) cardBucketEl.textContent = fmtBucket(d.bucket_lower, lowerTail, upperTail);
 
       const cardAskEl = document.getElementById(`top-kalshi-prob-${d.station}`);
-      if (cardAskEl && d.current_ask != null) cardAskEl.textContent = `${Math.round(d.current_ask * 100)}¢`;
+      const _yesAsk = d.yes_ask != null ? d.yes_ask : d.current_ask;
+      if (cardAskEl && _yesAsk != null) cardAskEl.textContent = `${Math.round(_yesAsk * 100)}¢`;
     }
   });
 
@@ -601,7 +605,7 @@ function buildPositionCardInner(mid, pos) {
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-start mb-2">
       <div>
-        <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="fw-bold fs-5">${escHtml(displayStation(pos.station))}</span>
         <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
         <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower, lowerTail, upperTail)}</span>
@@ -632,7 +636,7 @@ function buildPositionCardInner(mid, pos) {
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-start mb-2">
       <div>
-        <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="fw-bold fs-5">${escHtml(displayStation(pos.station))}</span>
         <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
         <span class="badge bg-primary ms-2">HIGH</span>
         <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower, lowerTail, upperTail)}</span>
@@ -726,7 +730,7 @@ function _tradeRow(d) {
   row.innerHTML = `
     <td class="text-nowrap small">${ts}</td>
     <td>${typeBadge}</td>
-    <td>${escHtml(d.station || '—')}</td>
+    <td>${escHtml(displayStation(d.station || '—'))}</td>
     <td>${bucket}</td>
     <td>${dirHtml}</td>
     <td>${entry}</td>
@@ -871,7 +875,7 @@ function confirmClose(marketId, station, pnl) {
   pendingCloseMarketId = marketId;
   const stationEl = document.getElementById('close-pos-station');
   const pnlEl     = document.getElementById('close-pos-pnl');
-  if (stationEl) stationEl.textContent = `${station} — ${marketId}`;
+  if (stationEl) stationEl.textContent = `${displayStation(station)} — ${marketId}`;
   if (pnlEl) {
     pnlEl.textContent = `$${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`;
     pnlEl.className = pnl >= 0 ? 'text-success' : 'text-danger';

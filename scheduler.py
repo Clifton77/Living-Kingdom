@@ -711,39 +711,41 @@ def tier1_metar_entries_exits():
                 metar    = get_metar(settle)
                 obs_temp = metar.temp_f
 
-                if obs_temp is None or obs_temp <= -50.0:
-                    logger.warning("[Tier1] %s METAR failed (temp=%s, settle=%s) — skipping exit pass", station, obs_temp, settle)
-                    continue
+                metar_ok = obs_temp is not None and obs_temp > -50.0
+                if not metar_ok:
+                    logger.warning("[Tier1] %s METAR failed (temp=%s, settle=%s) — intraday guards disabled, price updates continue",
+                                   station, obs_temp, settle)
+                    obs_temp = None
 
-                # Push METAR to dashboard for every station every cycle
-                push_event("metar_update", {
-                    "station":    station,
-                    "temp_f":     obs_temp,
-                    "wind_kt":    metar.wind_kt,
-                    "dewpoint_f": metar.dewpoint_f,
-                    "sky_cover":  metar.sky_cover or "—",
-                    "obs_time":   metar.obs_time,
-                })
-                # Keep sig.metar current so applyFullState / signal_update always
-                # carry the latest obs — not just the Tier-3-age snapshot.
-                with _latest_signals_lock:
-                    live_sig = _latest_signals.get(station)
-                    if live_sig is not None:
-                        live_sig.metar = metar
+                # Push METAR to dashboard only when valid
+                if metar_ok:
+                    push_event("metar_update", {
+                        "station":    station,
+                        "temp_f":     obs_temp,
+                        "wind_kt":    metar.wind_kt,
+                        "dewpoint_f": metar.dewpoint_f,
+                        "sky_cover":  metar.sky_cover or "—",
+                        "obs_time":   metar.obs_time,
+                    })
+                    # Keep sig.metar current
+                    with _latest_signals_lock:
+                        live_sig = _latest_signals.get(station)
+                        if live_sig is not None:
+                            live_sig.metar = metar
 
-                # ── Near-hour new-obs detection ──────────────────────────────
-                if near and metar.obs_time:
-                    _prev_obs = _last_metar_obs_time.get(settle)
-                    try:
-                        _obs_hour        = int(metar.obs_time[2:4])
-                        _is_current_hour = (_obs_hour == now_utc.hour)
-                    except (IndexError, ValueError):
-                        _is_current_hour = False
-                    if _is_current_hour and metar.obs_time != _prev_obs:
-                        _last_metar_obs_time[settle] = metar.obs_time
-                        _current_hour_obs_seen.add(station)
-                        logger.info("[ObsWatcher] NEW hourly obs %s: %s (was %s) — temp %.1f°F",
-                                    station, metar.obs_time, _prev_obs or "—", obs_temp)
+                    # ── Near-hour new-obs detection ──────────────────────────
+                    if near and metar.obs_time:
+                        _prev_obs = _last_metar_obs_time.get(settle)
+                        try:
+                            _obs_hour        = int(metar.obs_time[2:4])
+                            _is_current_hour = (_obs_hour == now_utc.hour)
+                        except (IndexError, ValueError):
+                            _is_current_hour = False
+                        if _is_current_hour and metar.obs_time != _prev_obs:
+                            _last_metar_obs_time[settle] = metar.obs_time
+                            _current_hour_obs_seen.add(station)
+                            logger.info("[ObsWatcher] NEW hourly obs %s: %s (was %s) — temp %.1f°F",
+                                        station, metar.obs_time, _prev_obs or "—", obs_temp)
 
                 station_positions = {
                     mid: pos for mid, pos in rm.state.positions.items()
@@ -755,11 +757,14 @@ def tier1_metar_entries_exits():
                 local_now  = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
                 local_hour = local_now.hour
 
-                rm_data     = running_max_with_confluence(settle, now_utc.date())
-                running_max = rm_data["running_max_f"]
-                _running_max_cache[station] = (running_max, now_utc)
-                if not rm_data["in_confluence"]:
-                    logger.warning("[Tier1] %s temp confluence issue (settle=%s): %s", station, settle, rm_data["note"])
+                if metar_ok:
+                    rm_data     = running_max_with_confluence(settle, now_utc.date())
+                    running_max = rm_data["running_max_f"]
+                    _running_max_cache[station] = (running_max, now_utc)
+                    if not rm_data["in_confluence"]:
+                        logger.warning("[Tier1] %s temp confluence issue (settle=%s): %s", station, settle, rm_data["note"])
+                else:
+                    running_max = None
 
                 for market_id, pos in station_positions.items():
                     snap = kalshi.get_market_snapshot(
@@ -834,6 +839,7 @@ def tier1_metar_entries_exits():
                         "entry_side":    getattr(pos, "entry_side", "yes"),
                         "current_bid":   _cur_bid,
                         "current_ask":   _cur_ask,
+                        "yes_ask":       snap.yes_ask,   # always YES side for station card display
                         "unrealized_pnl": round(pos.unrealized_pnl, 4),
                         "pnl_pct":       round(pos.pnl_pct, 2),
                     })
