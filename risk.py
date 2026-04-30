@@ -74,6 +74,7 @@ class OpenPosition:
     reversal_triggered:     bool = False
     early_exit_triggered:   bool = False
     manually_closed:        bool = False
+    pending_settlement:     bool = False  # market closed intraday, awaiting Kalshi LCD settlement
 
     # Trade side — "yes" (bought YES contract) or "no" (bought NO contract)
     entry_side:             str  = "yes"
@@ -300,6 +301,7 @@ class RiskManager:
                         reversal_triggered   = bool(v.get("reversal_triggered", False)),
                         early_exit_triggered = bool(v.get("early_exit_triggered", False)),
                         manually_closed      = bool(v.get("manually_closed", False)),
+                        pending_settlement   = bool(v.get("pending_settlement", False)),
                         entry_side           = v.get("entry_side", "yes"),
                     )
                     for k, v in data.pop("positions", {}).items()

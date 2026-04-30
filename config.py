@@ -449,8 +449,6 @@ STALE_SIGNAL_HOURS = 4
 PRICE_SCAN_INTERVAL_MIN = 5    # retained for reference; Tier 1 handles this inline
 
 # Market schedule (UTC)
-MARKET_OPEN_UTC_HOUR   = 14   # Kalshi opens Day-1 markets at 14:00 UTC (10 AM EDT)
-MARKET_OPEN_UTC_MINUTE = 5    # fire 5 min after open to let liquidity settle
 SETTLEMENT_SWEEP_UTC_HOUR = 9 # check for overnight settlements at 09:00 UTC
 
 # Same-day entry gate: no entries before the 12Z Tier 3 model run (12:30 UTC = 7:30 AM CT).

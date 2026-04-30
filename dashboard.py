@@ -146,24 +146,27 @@ def _enrich_position_display(pos: dict, now_utc: datetime) -> dict:
     else:
         pos["entry_time_display"] = "—"
 
-    # ── Event date: Today / Tomorrow / date string ────────────────────────
+    # ── Event date display ────────────────────────────────────────────────
     event_date_str = pos.get("event_date", "")
     if event_date_str:
         try:
             event_d   = date.fromisoformat(event_date_str)
-            today     = now_utc.date()
-            tomorrow  = today + timedelta(days=1)
             month_day = event_d.strftime("%b ") + str(event_d.day)
-            if event_d == today:
+            if event_d == now_utc.date():
                 pos["event_date_display"] = f"Today ({month_day})"
-            elif event_d == tomorrow:
-                pos["event_date_display"] = f"Tomorrow ({month_day})"
             else:
                 pos["event_date_display"] = month_day
         except Exception:
             pos["event_date_display"] = event_date_str
     else:
         pos["event_date_display"] = "—"
+
+    # ── Pending settlement display ────────────────────────────────────────
+    if pos.get("pending_settlement"):
+        entry_price = pos.get("entry_price", 0.0) or 0.0
+        contracts   = pos.get("contracts", 0) or 0
+        # Estimated max payout if this side wins at $1.00/contract
+        pos["pending_payout_usd"] = round((1.0 - entry_price) * contracts, 2)
 
     return pos
 

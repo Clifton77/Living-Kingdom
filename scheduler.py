@@ -135,8 +135,6 @@ from config import (
     TIER2_INTERVAL_SECONDS,
     STALE_SIGNAL_HOURS,
     PRICE_SCAN_INTERVAL_MIN,
-    MARKET_OPEN_UTC_HOUR,
-    MARKET_OPEN_UTC_MINUTE,
     SETTLEMENT_SWEEP_UTC_HOUR,
     TIER3_RETRY_INTERVAL_MIN,
     TIER3_MAX_RETRIES,
@@ -539,20 +537,15 @@ def _single_station_signal_pass(station: str):
 
 
 # ---------------------------------------------------------------------------
-# Entry date routing — same-day vs next-day market selection
+# Entry date routing — same-day markets only
 # ---------------------------------------------------------------------------
 
 def _get_entry_event_date(station: str, now_utc: datetime) -> date | None:
     """
-    Determine the target event date for new entries at this station.
+    Return today's date if the station is in its entry window, else None.
 
-    Policy: entries are only allowed for the SAME DAY as settlement,
-    and only after the 12Z Tier 3 model run (SAME_DAY_ENTRY_OPEN_UTC_HOUR:MM UTC).
-    Next-day pre-entry is intentionally disabled — overnight holds on
-    temperature markets carry model uncertainty that the 12Z run resolves.
-
-    Entry window: SAME_DAY_ENTRY_OPEN_UTC → ENTRY_CUTOFF_PRE_PEAK_HOURS before peak.
-    Outside that window: return None (no entries).
+    Entry window: after 12:30 UTC (12Z Tier 3 model run) up to ENTRY_CUTOFF_PRE_PEAK_HOURS
+    before the station's local peak hour.  Only same-day markets are traded.
     """
     tz          = ZoneInfo(STATION_TIMEZONES[station])
     now_local   = now_utc.astimezone(tz)
@@ -621,6 +614,54 @@ def _reschedule_tier1() -> None:
         coalesce=True,
     )
     logger.debug("[Tier1] Next run scheduled for %s UTC (%ds)", run_at.strftime("%H:%M"), interval)
+
+
+def _handle_closed_market(market_id: str, pos, kalshi, rm, now_utc: datetime) -> None:
+    """
+    Called when get_market_snapshot() returns None or is_open=False for an open position.
+
+    Tries Kalshi's settlements API immediately.  If Kalshi has confirmed the result,
+    closes the position with the official settlement value.  If not yet available,
+    marks the position pending_settlement=True so the dashboard can show
+    "Settled (pending reconciliation)" until the morning LCD sweep finalises it.
+    """
+    pos_date = date.fromisoformat(pos.event_date)
+    try:
+        settlements = kalshi.get_settled_markets(pos_date)
+    except Exception as exc:
+        logger.warning("[Tier1] Settlement lookup failed for %s: %s", market_id, exc)
+        settlements = {}
+
+    if market_id in settlements:
+        settlement_value = settlements[market_id]
+        close_reason = f"Intraday settlement — Kalshi confirmed at ${settlement_value:.2f}"
+        sheets = get_sheets_logger()
+        realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
+        sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
+        push_event("position_closed", {"market_id": market_id, "realized_pnl": round(realized, 4)})
+        push_event("state_update", rm.summary())
+        logger.info("[Tier1] %s settled intraday | value=%.2f | P/L $%+.4f",
+                    market_id, settlement_value, realized)
+        return
+
+    # Kalshi hasn't settled yet — market closed intraday (e.g. temp moved past bucket).
+    # Mark pending so the dashboard can show the estimated payout.
+    if not pos.pending_settlement:
+        pos.pending_settlement = True
+        rm._save_state()
+        logger.info("[Tier1] %s market closed, not yet settled — marked pending", market_id)
+
+    push_event("position_price_update", {
+        "market_id":          market_id,
+        "station":            pos.station,
+        "bucket_lower":       pos.bucket_lower,
+        "entry_side":         getattr(pos, "entry_side", "yes"),
+        "current_bid":        pos.current_bid,
+        "current_ask":        pos.current_ask,
+        "unrealized_pnl":     round(pos.unrealized_pnl, 4),
+        "pnl_pct":            round(pos.pnl_pct, 2),
+        "pending_settlement": True,
+    })
 
 
 def tier1_metar_entries_exits():
@@ -724,8 +765,8 @@ def tier1_metar_entries_exits():
                     snap = kalshi.get_market_snapshot(
                         station, date.fromisoformat(pos.event_date), pos.bucket_lower
                     )
-                    if snap is None:
-                        logger.warning("[Tier1] No snapshot for %s", market_id)
+                    if snap is None or not snap.is_open:
+                        _handle_closed_market(market_id, pos, kalshi, rm, now_utc)
                         continue
 
                     with _latest_signals_lock:
@@ -748,12 +789,10 @@ def tier1_metar_entries_exits():
                     pos_event_date    = date.fromisoformat(pos.event_date)
                     peak_heating_hour = get_peak_hour(station, pos_event_date)
 
-                    # Intraday guards (undershoot/overshoot) only apply when the
-                    # position settles TODAY. For tomorrow's market, today's running
-                    # max and local hour are irrelevant — pass None to skip them.
-                    # Parse market date directly from the Kalshi ticker (e.g. "26APR26")
-                    # as the authoritative source — pos.event_date can be stale if a
-                    # signal refresh changed event_date mid-cycle.
+                    # Intraday guards (undershoot/overshoot) require today's running max
+                    # and local hour.  Parse market date from the Kalshi ticker
+                    # (e.g. "26APR26") as the authoritative source — pos.event_date
+                    # can be stale if a signal refresh changed event_date mid-cycle.
                     try:
                         _ticker_date_str = market_id.split("-")[1]
                         _market_date = datetime.strptime(_ticker_date_str, "%y%b%d").date()
@@ -935,10 +974,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if sig is None:
         return
 
-    # Guard: signal must be for the intended event date.
-    # Mismatches happen when _latest_signals holds a stale signal from a
-    # different day (e.g. Day-1 trigger wrote tomorrow's signal but
-    # same-day window is still open for this station).
+    # Guard: signal must be for today's event date.
+    # Mismatches happen when _latest_signals holds a stale signal from a prior day.
     if sig.event_date != event_date:
         logger.debug(
             "[Tier1] %s signal date %s ≠ target %s — skipping entry",
@@ -1437,25 +1474,14 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
 # Tier 3 — Full signal recompute only (every 6 hours, no order execution)
 # ---------------------------------------------------------------------------
 
-def _tier3_day1_market_open():
-    """
-    14:05 UTC Day-1 market-open trigger.
-    Kalshi opens tomorrow's markets at ~10:00 AM EDT (14:00 UTC), but most
-    stations are still in their same-day window at that hour (eastern cutoff
-    ~17:00 UTC, western ~21:00 UTC).  Using per-station dates avoids
-    overwriting active same-day signals with tomorrow's data.  Each station
-    naturally transitions to tomorrow's signal once its same-day cutoff passes.
-    """
-    tier3_full_signal_pass(event_date=None)  # per-station dates via _get_entry_event_date
-
-
 def tier3_full_signal_pass(event_date: date | None = None):
     """
     Full signal recompute for all stations.  Updates _latest_signals so
     Tier 1 can act on fresh distributions at the next 5-min cycle.
     No orders are placed here — all trade execution is Tier 1's job.
 
-    event_date defaults to today. The Day-1 market-open trigger passes tomorrow.
+    Only same-day markets are targeted.  event_date is always None from cron
+    calls; each station's target date is determined by _get_entry_event_date().
 
     Before running:
       1. Probe forecast availability (NWS/Open-Meteo). If unavailable,
@@ -1498,13 +1524,8 @@ def tier3_full_signal_pass(event_date: date | None = None):
     from scripts.signal_engine import generate_signal, _load_bias_table
     import time as _time
 
-    now_utc = datetime.now(timezone.utc)
-
-    # When called with an explicit event_date (Day-1 trigger or dashboard),
-    # use that date for all stations. For cron runs (event_date=None), compute
-    # the right target date per station using _get_entry_event_date.
-    use_per_station_dates = (event_date is None)
-    probe_date = event_date or date.today()
+    now_utc    = datetime.now(timezone.utc)
+    probe_date = date.today()
 
     # ── Forecast availability probe ───────────────────────────────────────
     avail = check_forecast_availability(probe_date)
@@ -1542,10 +1563,9 @@ def tier3_full_signal_pass(event_date: date | None = None):
     for idx, station in enumerate(STATIONS):
         if idx > 0:
             _time.sleep(3)   # pace Open-Meteo free-tier (20 req/min)
-        # Use a fresh timestamp per station — the loop takes ~3 min and a station's
-        # same-day/next-day boundary can shift mid-loop if we reuse the stale now_utc.
-        _station_now_utc = datetime.now(timezone.utc) if use_per_station_dates else now_utc
-        target_date = _get_entry_event_date(station, _station_now_utc) if use_per_station_dates else event_date
+        # Refresh timestamp per station — the loop takes ~3 min and station entry
+        # windows can open/close mid-loop.
+        target_date = _get_entry_event_date(station, datetime.now(timezone.utc))
         if target_date is None:
             logger.info("[Tier3] %s — in gap window, skipping signal", station)
             continue
@@ -2070,82 +2090,90 @@ def _attempt_liquidity_entry(station: str, event_date_iso: str, bucket_lower: in
 
 def tier_settlement_sweep():
     """
-    Check for overnight settlements on all open positions.
-    Kalshi settles markets once LCD (Local Climatological Data) is released,
-    typically before 09:00 UTC the morning after the event day.
+    Check for settlements on all open positions.
 
-    For each locally-open position whose event_date is yesterday:
-      - Call get_settled_markets() to fetch settlement values
-      - If found: record close at settlement price and fire alert
-      - Positions not yet on Kalshi settlement feed: leave open (may still be pending)
+    Runs at 09:00 UTC (morning LCD sweep for yesterday's markets) and also
+    intraday every 30 min to catch same-day positions marked pending_settlement.
+
+    For each locally-open position:
+      - Calls get_settled_markets() for its event_date
+      - If Kalshi has confirmed settlement: records close and fires alert
+      - If not yet on the feed: leaves open (pending_settlement stays True)
     """
     _tier_last_run["settlement"] = datetime.now(timezone.utc).strftime("%H:%M UTC")
     push_event("tier_heartbeat", _tier_last_run)
-    logger.info("[Settlement] Running morning settlement sweep")
-    rm     = get_risk_manager()
-    kalshi = get_kalshi()
+    now_utc   = datetime.now(timezone.utc)
+    yesterday = (now_utc - timedelta(days=1)).date()
+    today     = now_utc.date()
+    rm        = get_risk_manager()
+    kalshi    = get_kalshi()
 
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    # Group open positions by their event_date
+    by_date: dict[date, dict] = {}
+    for mid, pos in rm.state.positions.items():
+        pos_date = date.fromisoformat(pos.event_date)
+        if pos_date in (yesterday, today):
+            by_date.setdefault(pos_date, {})[mid] = pos
 
-    positions_to_check = {
-        mid: pos for mid, pos in rm.state.positions.items()
-        if date.fromisoformat(pos.event_date) == yesterday
-    }
-
-    if not positions_to_check:
-        logger.info("[Settlement] No yesterday positions to sweep")
-        return
-
-    settlements = kalshi.get_settled_markets(yesterday)
-    if not settlements:
-        logger.info("[Settlement] No settlements returned from Kalshi yet — will retry next cycle")
+    if not by_date:
+        logger.info("[Settlement] No positions to sweep")
         return
 
     sheets = get_sheets_logger()
-    for market_id, pos in positions_to_check.items():
-        if market_id in settlements:
-            settlement_value = settlements[market_id]
-            close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
-            realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
-            sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
-            alert_settlement_detected(pos.station, market_id, realized)
+    any_closed = False
 
-            # Log model accuracy row — observed high comes from settlement bucket inference
-            # 1.0 = won (bucket correct), 0.0 = lost. Full observed temp requires IEM fetch.
-            bucket_hit = settlement_value >= 0.95   # settlement ≈ 1.0 means we won
-            with _latest_signals_lock:
-                prior_sig = _latest_signals.get(pos.station)
-            if prior_sig:
-                sheets.log_model_accuracy(
-                    station=pos.station,
-                    event_date=yesterday,
-                    cluster_id=prior_sig.cluster_id,
-                    season=prior_sig.season,
-                    forecast_raw=prior_sig.forecast_raw,
-                    forecast_adjusted=prior_sig.forecast_adjusted,
-                    bias_mean=prior_sig.bias_mean,
-                    bias_std=prior_sig.bias_std,
-                    n_obs=prior_sig.n_obs,
-                    observed_high=None,   # IEM fetch not yet implemented — shows blank
-                    bucket_hit=bucket_hit,
-                )
+    for sweep_date, positions_to_check in by_date.items():
+        label = "yesterday" if sweep_date == yesterday else "today"
+        logger.info("[Settlement] Checking %d %s position(s) for %s",
+                    len(positions_to_check), label, sweep_date)
 
-            logger.info(
-                "[Settlement] %s settled | value=%.2f | P/L $%+.4f",
-                market_id, settlement_value, realized,
-            )
-        else:
-            logger.info("[Settlement] %s not yet in settlements feed — leaving open", market_id)
+        settlements = kalshi.get_settled_markets(sweep_date)
+        if not settlements:
+            logger.info("[Settlement] No settlements from Kalshi for %s yet", sweep_date)
+            continue
 
-    summary = rm.summary()
-    mode = "DEMO" if USE_DEMO else "LIVE"
-    sheets.update_dashboard(summary, mode=mode)
-    sheets.log_eod_summary(summary, session_date=yesterday.isoformat(), mode=mode)
-    push_event("state_update", summary)
-    logger.info(
-        "[Settlement] Sweep complete | bankroll=$%.2f | daily P/L=$%+.2f | open=%d",
-        summary["bankroll"], summary["daily_pnl"], summary["open_positions"],
-    )
+        for market_id, pos in positions_to_check.items():
+            if market_id in settlements:
+                settlement_value = settlements[market_id]
+                close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
+                realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
+                sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
+                alert_settlement_detected(pos.station, market_id, realized)
+                any_closed = True
+
+                bucket_hit = settlement_value >= 0.95
+                with _latest_signals_lock:
+                    prior_sig = _latest_signals.get(pos.station)
+                if prior_sig:
+                    sheets.log_model_accuracy(
+                        station=pos.station,
+                        event_date=sweep_date,
+                        cluster_id=prior_sig.cluster_id,
+                        season=prior_sig.season,
+                        forecast_raw=prior_sig.forecast_raw,
+                        forecast_adjusted=prior_sig.forecast_adjusted,
+                        bias_mean=prior_sig.bias_mean,
+                        bias_std=prior_sig.bias_std,
+                        n_obs=prior_sig.n_obs,
+                        observed_high=None,
+                        bucket_hit=bucket_hit,
+                    )
+
+                logger.info("[Settlement] %s settled | value=%.2f | P/L $%+.4f",
+                            market_id, settlement_value, realized)
+            else:
+                logger.info("[Settlement] %s not yet in Kalshi feed — leaving open", market_id)
+
+    if any_closed:
+        summary = rm.summary()
+        mode = "DEMO" if USE_DEMO else "LIVE"
+        sheets.update_dashboard(summary, mode=mode)
+        sheets.log_eod_summary(summary, session_date=yesterday.isoformat(), mode=mode)
+        push_event("state_update", summary)
+        logger.info("[Settlement] Sweep complete | bankroll=$%.2f | daily P/L=$%+.2f | open=%d",
+                    summary["bankroll"], summary["daily_pnl"], summary["open_positions"])
+    else:
+        logger.info("[Settlement] Sweep complete — no new settlements")
 
 
 # ---------------------------------------------------------------------------
@@ -2303,15 +2331,15 @@ def _run_startup_reconciliation():
 
 def start_scheduler() -> BackgroundScheduler:
     """
-    Initialize and start the APScheduler with all tiers plus market-open
-    trigger, settlement sweep, and startup reconciliation.
+    Initialize and start the APScheduler with all tiers, settlement sweeps,
+    and startup reconciliation.  Only same-day markets are traded.
 
     Schedule summary (all UTC):
       Tier 1  — sleep-based ~5 min   — METAR + exits + entries (post-ASOS-aligned)
       Tier 2  — every 10 min         — TAF amendments + auto-close on flip
       Tier 3  — 00:30 / 06:30 / 12:30 / 18:30  — GFS-aligned signal recompute
-      Tier 3  — 14:05               — Kalshi Day-1 market open (signal recompute only)
-      Sweep   — 09:00               — Morning settlement sweep
+      Sweep   — 09:00               — Morning LCD settlement sweep
+      Sweep   — 14-23Z every 30 min — Intraday settlement check for pending positions
     """
     global _scheduler, _risk_manager, _kalshi
 
@@ -2362,30 +2390,25 @@ def start_scheduler() -> BackgroundScheduler:
             misfire_grace_time=300,
         )
 
-    # Tier 3 — Kalshi Day-1 market open: fires at 14:05 UTC every day
-    scheduler.add_job(
-        _tier3_day1_market_open,
-        trigger=CronTrigger(
-            hour=MARKET_OPEN_UTC_HOUR,
-            minute=MARKET_OPEN_UTC_MINUTE,
-            timezone="UTC",
-        ),
-        id="tier3_market_open",
-        name=f"Signal Recompute — Market Open {MARKET_OPEN_UTC_HOUR:02d}:{MARKET_OPEN_UTC_MINUTE:02d}Z",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=300,
-    )
-
-    # Settlement sweep — 09:00 UTC every morning
+    # Settlement sweep — 09:00 UTC every morning (LCD overnight settlements)
+    # and every 30 min from 14:00–23:30 UTC to catch same-day closures early.
     scheduler.add_job(
         tier_settlement_sweep,
         trigger=CronTrigger(hour=SETTLEMENT_SWEEP_UTC_HOUR, minute=0, timezone="UTC"),
-        id="settlement_sweep",
+        id="settlement_sweep_morning",
         name="Morning Settlement Sweep",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=600,
+    )
+    scheduler.add_job(
+        tier_settlement_sweep,
+        trigger=CronTrigger(hour="14-23", minute="0,30", timezone="UTC"),
+        id="settlement_sweep_intraday",
+        name="Intraday Settlement Check",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
     )
 
     # Daily obs update — 10:00 UTC (6 AM ET), after CDO overnight publish
@@ -2417,10 +2440,9 @@ def start_scheduler() -> BackgroundScheduler:
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
-        "Tier3=00/06/12/18Z+30 + %02d:%02dZ market-open | "
-        "Settlement=%02d:00Z | ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
+        "Tier3=00/06/12/18Z+30 | Settlement=%02d:00Z + intraday 14-23Z@:00/:30 | "
+        "ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
-        MARKET_OPEN_UTC_HOUR, MARKET_OPEN_UTC_MINUTE,
         SETTLEMENT_SWEEP_UTC_HOUR,
         "DEMO" if USE_DEMO else "LIVE",
     )

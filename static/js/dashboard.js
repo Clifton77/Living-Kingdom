@@ -125,7 +125,19 @@ function initSSE() {
   src.addEventListener('position_price_update', e => {
     const d       = JSON.parse(e.data);
     const safeMid = d.market_id.replace(/-/g, '_');
-    const sign    = d.unrealized_pnl >= 0 ? '+' : '';
+
+    // If the market just closed, rebuild the card as "pending settlement"
+    if (d.pending_settlement) {
+      fetch('/api/state').then(r => r.json()).then(state => {
+        if (state.positions && state.positions[d.market_id]) {
+          const item = document.querySelector(`.carousel-item[data-market-id="${d.market_id}"]`);
+          if (item) item.innerHTML = buildPositionCardInner(d.market_id, state.positions[d.market_id]);
+        }
+      });
+      return;
+    }
+
+    const sign = d.unrealized_pnl >= 0 ? '+' : '';
 
     const askEl = document.getElementById(`pos-ask-${safeMid}`);
     if (askEl && d.current_ask != null) askEl.textContent = `$${d.current_ask.toFixed(2)}`;
@@ -575,12 +587,46 @@ function rebuildCarousel(positions) {
 
 function buildPositionCardInner(mid, pos) {
   const safeMid   = mid.replace(/-/g, '_');
-  const pnlClass  = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
-  const pctClass  = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
-  const sign      = pos.unrealized_pnl >= 0 ? '+' : '';
+  const pending   = !!pos.pending_settlement;
   const sig       = _signals[pos.station] || {};
   const lowerTail = sig.live_lower_tail !== undefined ? sig.live_lower_tail : 68;
   const upperTail = sig.live_upper_tail !== undefined ? sig.live_upper_tail : 77;
+
+  // ── Pending-settlement variant ──────────────────────────────────────────
+  if (pending) {
+    const payout    = typeof pos.pending_payout_usd === 'number' ? pos.pending_payout_usd : null;
+    const payoutStr = payout !== null ? `+$${payout.toFixed(2)}` : '—';
+    return `
+<div class="wb-position-card card mx-auto border-warning">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start mb-2">
+      <div>
+        <span class="fw-bold fs-5">${escHtml(pos.station)}</span>
+        <span class="fw-semibold text-muted ms-1">${escHtml(STATION_CITIES[pos.station] || pos.station)}</span>
+        <span class="badge bg-primary ms-2">HIGH</span>
+        <span class="badge bg-secondary ms-1">${fmtBucket(pos.bucket_lower, lowerTail, upperTail)}</span>
+        ${pos.entry_side === 'no' ? '<span class="badge bg-danger ms-1">NO</span>' : pos.entry_side === 'yes' ? '<span class="badge bg-success ms-1">YES</span>' : ''}
+      </div>
+      <span class="badge bg-warning text-dark fs-6">${payoutStr}</span>
+    </div>
+    <div class="alert alert-warning py-1 px-2 mb-2 small">
+      <strong>Settled (pending reconciliation)</strong> — market closed, awaiting Kalshi LCD confirmation.
+      Estimated payout if won: <strong>${payoutStr}</strong>
+    </div>
+    <div class="row g-1 text-muted small mb-3">
+      <div class="col-6">Contracts: <span class="text-body">${pos.contracts}</span></div>
+      <div class="col-6">Stake: <span class="text-body">$${pos.entry_usd.toFixed(2)}</span></div>
+      <div class="col-12">Entered: <span class="text-body">${escHtml(pos.entry_time_display || pos.entry_time)}</span></div>
+      <div class="col-12">Market: <span class="text-body">${escHtml(pos.event_date_display || pos.event_date)}</span></div>
+    </div>
+  </div>
+</div>`;
+  }
+
+  // ── Normal live-position variant ─────────────────────────────────────────
+  const pnlClass = pos.unrealized_pnl >= 0 ? 'bg-success' : 'bg-danger';
+  const pctClass = pos.pnl_pct >= 0 ? 'text-success' : 'text-danger';
+  const sign     = pos.unrealized_pnl >= 0 ? '+' : '';
   return `
 <div class="wb-position-card card mx-auto">
   <div class="card-body">
