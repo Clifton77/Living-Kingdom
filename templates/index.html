@@ -258,6 +258,19 @@
               {% endif %}
               <div class="text-end">
                 <div class="wb-decision-badge badge wb-badge-{{ decision|lower }}">{{ decision }}</div>
+                {% set ns = namespace(held_pos=none) %}
+                {% for _pos in initial_state.positions.values() %}
+                  {% if _pos.station == station %}{% set ns.held_pos = _pos %}{% endif %}
+                {% endfor %}
+                {% if ns.held_pos %}
+                {% set bl = ns.held_pos.bucket_lower %}
+                <div class="mt-1 d-flex gap-1 justify-content-end" id="pos-held-{{ station }}">
+                  <span class="badge bg-secondary">{% if sig and bl == sig.live_lower_tail %}≤{{ sig.live_lower_tail }}{% elif sig and bl == sig.live_upper_tail %}≥{{ sig.live_upper_tail }}{% else %}{{ bl }}–{{ bl + 1 }}{% endif %}°F</span>
+                  <span class="badge {{ 'bg-danger' if ns.held_pos.entry_side == 'no' else 'bg-success' }}">{{ ns.held_pos.entry_side | upper }}</span>
+                </div>
+                {% else %}
+                <div class="mt-1 d-none" id="pos-held-{{ station }}"></div>
+                {% endif %}
               </div>
             </div>
           </div>

@@ -114,6 +114,7 @@ function initSSE() {
   src.addEventListener('position_opened', e => {
     const d = JSON.parse(e.data);
     appendTradeHistoryRow(d);
+    _updatePosHeld(d.station, d.bucket_lower, d.entry_side || 'yes');
     fetch('/api/state').then(r => r.json()).then(state => {
       if (state.signals) _signals = state.signals;
       rebuildCarousel(state.positions);
@@ -165,6 +166,7 @@ function initSSE() {
     const d = JSON.parse(e.data);
     removeCarouselCard(d.market_id);
     appendTradeHistoryRow(d);
+    _updatePosHeld(d.station, null, null);
     showToast(`Position closed: ${d.market_id}`,
       `P/L: $${(d.realized_pnl >= 0 ? '+' : '') + d.realized_pnl.toFixed(4)}`,
       d.realized_pnl >= 0 ? 'success' : 'danger');
@@ -483,6 +485,24 @@ function _applySignalToCard(station, sig) {
       }
     }
   }
+}
+
+// ── Station card held-position badge ─────────────────────────
+function _updatePosHeld(station, bucketLower, entrySide) {
+  const el = document.getElementById(`pos-held-${station}`);
+  if (!el) return;
+  if (bucketLower == null) {
+    el.innerHTML = '';
+    el.classList.add('d-none');
+    return;
+  }
+  const sig       = _signals[station] || {};
+  const lowerTail = sig.live_lower_tail ?? 68;
+  const upperTail = sig.live_upper_tail ?? 77;
+  const dirClass  = entrySide === 'no' ? 'bg-danger' : 'bg-success';
+  el.innerHTML = `<span class="badge bg-secondary">${fmtBucket(bucketLower, lowerTail, upperTail)}</span>`
+    + ` <span class="badge ${dirClass}">${entrySide.toUpperCase()}</span>`;
+  el.classList.remove('d-none');
 }
 
 // ── Summary strip ────────────────────────────────────────────
