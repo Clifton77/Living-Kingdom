@@ -152,7 +152,6 @@ from config import (
     MIN_YES_ASK,
     MAX_YES_ASK,
     MIN_MODEL_PROB_FOR_ENTRY,
-    MIN_YES_ASK_FOR_ENTRY,
     MAX_DAILY_ENTRIES_PER_STATION,
     settlement_station,
 )
@@ -1043,14 +1042,24 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         return
 
     # ── Phase 4 gate: sole trade-validity check for new entries ──────────
-    # BUY_YES: price 40–70¢ (study: +0.034 edge; strong buy 60–70¢ = +0.081).
+    # BUY_YES: model's top bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
     # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
-    _p4_entry = next(
-        (s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_YES"),
-        None,
-    )
+    #
+    # Selection logic: start from the model's top bucket, then check if Phase 4
+    # validates it (price in 40–70¢ zone). This avoids the previous approach of
+    # picking an arbitrary BUY_YES bucket and post-hoc checking model alignment.
+    _p4_entry = None
+    _model_top_for_entry = None
+    if sig.buckets:
+        _model_top_for_entry = max(sig.buckets, key=lambda b: b.model_prob)
+        _p4_entry = next(
+            (s for s in _p4_latest_signals.get(station, [])
+             if s.action == "BUY_YES" and s.bucket_lower == _model_top_for_entry.bucket_lower),
+            None,
+        )
+
     if _p4_entry is None:
-        # Type 1 NO — structural tail: pick bucket closest to 30¢ (best liquidity)
+        # No Phase 4 BUY_YES on model's top bucket — check for BUY_NO
         _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
         _p4_no = max(_no_signals, key=lambda s: s.yes_ask, default=None)
         if _p4_no is None:
@@ -1067,40 +1076,14 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         entry_side   = "yes"
 
     if entry_side == "yes":
-        # Gate 1: model Gaussian must assign ≥30% probability to this specific bucket
-        _entry_bucket_sig = next(
-            (b for b in sig.buckets if b.bucket_lower == entry_bucket), None
-        )
-        _entry_model_prob = _entry_bucket_sig.model_prob if _entry_bucket_sig else 0.0
+        # Gate 1: model Gaussian must assign ≥30% probability to the entry bucket
+        _entry_model_prob = _model_top_for_entry.model_prob if _model_top_for_entry else 0.0
         if _entry_model_prob < MIN_MODEL_PROB_FOR_ENTRY:
             logger.info(
                 "[Tier1] %s Phase4 BUY_YES B%d skipped — model_prob %.3f < %.2f floor",
                 station, entry_bucket, _entry_model_prob, MIN_MODEL_PROB_FOR_ENTRY,
             )
             return
-
-        # Gate 2: yes_ask < 25¢ means market is deeply skeptical — that's the BUY_NO zone
-        if _p4_entry.yes_ask < MIN_YES_ASK_FOR_ENTRY:
-            logger.info(
-                "[Tier1] %s Phase4 BUY_YES B%d skipped — yes_ask %.2f < %.2f floor (BUY_NO zone)",
-                station, entry_bucket, _p4_entry.yes_ask, MIN_YES_ASK_FOR_ENTRY,
-            )
-            return
-
-        # Gate 3: entry bucket must also be the model's highest-probability bucket.
-        # The ≥30% floor (Gate 1) is insufficient when bias_std is wide — a tail
-        # bucket can exceed 30% via Gaussian leakage while a closer bucket has
-        # higher probability. Require the entry to be the model's actual top pick.
-        if sig.buckets:
-            _model_top = max(sig.buckets, key=lambda b: b.model_prob)
-            if entry_bucket != _model_top.bucket_lower:
-                logger.info(
-                    "[Tier1] %s Phase4 BUY_YES B%d skipped — not model's top bucket "
-                    "(model top=B%d prob=%.3f vs entry prob=%.3f)",
-                    station, entry_bucket, _model_top.bucket_lower,
-                    _model_top.model_prob, _entry_model_prob,
-                )
-                return
 
         logger.info(
             "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f model_prob=%.3f",
