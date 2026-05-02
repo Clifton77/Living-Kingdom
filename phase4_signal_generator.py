@@ -201,19 +201,25 @@ _OM_TIMEOUT = 12
 # ── 12z model availability cutoffs (UTC) ──────────────────────────────────────
 # GFS 12z initializes at 12:00 UTC; Open-Meteo typically ingests by ~15:30 UTC.
 # ECMWF 12z initializes at 12:00 UTC; Open-Meteo typically ingests by ~18:30 UTC.
-# BLEND requires both, so ECMWF cutoff applies.
+#
+# Gate policy: GFS 12z (15:30 UTC) is the universal entry gate for ALL stations.
+# Requiring ECMWF 12z (18:30 UTC) would lock out Eastern stations entirely
+# (entry cutoff = peak_hour-2h ≈ 17:00 UTC) and Central stations (≈18:00 UTC).
+# The 19:25 UTC ECMWF refresh still runs and silently upgrades data quality for
+# ECMWF/BLEND stations mid-session — entries are not held waiting for it.
 _GFS_12Z_READY   = dtime(15, 30)
-_ECMWF_12Z_READY = dtime(18, 30)
+_ECMWF_12Z_READY = dtime(18, 30)   # used only for the refresh job, not the entry gate
 
 
 def is_12z_ready(model_pref: str, now_utc: datetime) -> bool:
-    """Return True once the 12z model run for a station's preferred model is on Open-Meteo."""
-    today = now_utc.date()
-    if model_pref == "GFS":
-        cutoff = datetime.combine(today, _GFS_12Z_READY, tzinfo=timezone.utc)
-        return now_utc >= cutoff
-    # ECMWF and BLEND both wait for ECMWF 12z (it's the later / more valuable update)
-    cutoff = datetime.combine(today, _ECMWF_12Z_READY, tzinfo=timezone.utc)
+    """
+    Return True once at least one 12z model run is available on Open-Meteo.
+
+    GFS 12z (15:30 UTC) gates ALL stations regardless of preferred model.
+    Using ECMWF 12z as the gate would exclude Eastern (cutoff ~17:00 UTC) and
+    Central (cutoff ~18:00 UTC) stations entirely from same-day trading.
+    """
+    cutoff = datetime.combine(now_utc.date(), _GFS_12Z_READY, tzinfo=timezone.utc)
     return now_utc >= cutoff
 
 

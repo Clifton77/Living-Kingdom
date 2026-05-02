@@ -1087,9 +1087,12 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if len(existing) >= MAX_STATION_POSITIONS:
         return
 
-    # ── 12z model gate: hold all entries until 12z GFS/ECMWF is on Open-Meteo ──
-    # GFS stations unblock at 15:30 UTC; ECMWF and BLEND at 18:30 UTC.
-    # Also verifies _p4_forecasts was fetched after the cutoff (not stale pre-12z data).
+    # ── 12z model gate: hold all entries until 12z GFS is confirmed on Open-Meteo ──
+    # Universal gate: 15:30 UTC for all stations (GFS 12z ready).
+    # ECMWF 12z (18:30 UTC) would lock out Eastern/Central stations entirely
+    # — their entry windows close before ECMWF disseminates.
+    # The 19:25 UTC ECMWF refresh upgrades data silently; it does not gate entries.
+    # Also verifies _p4_forecasts was fetched after 15:30 (not stale pre-12z data).
     _p4_fc_gate = _p4_forecasts.get(station)
     _model_pref_gate = _p4_fc_gate.preferred_model if _p4_fc_gate else "ECMWF"
     if not is_12z_ready(_model_pref_gate, now_utc):
