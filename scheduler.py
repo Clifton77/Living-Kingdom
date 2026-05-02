@@ -315,6 +315,42 @@ def _refresh_all_kalshi_prices(kalshi) -> None:
                 station, len(updated), top.bucket_lower, top.yes_ask, top.edge,
             )
 
+            # Push carousel price updates for any open positions on this station.
+            # The exit loop in Tier 1 does the same but can be skipped by METAR
+            # failures or exceptions. Running here (Tier 1 + Tier 2) keeps carousel
+            # prices in sync with the station cards without extra API calls.
+            _rm = get_risk_manager()
+            for _mid, _pos in _rm.state.positions.items():
+                if _pos.station != station:
+                    continue
+                try:
+                    _pos_event_date = date.fromisoformat(_pos.event_date)
+                except ValueError:
+                    continue
+                if _pos_event_date != sig.event_date:
+                    continue
+                _pos_snap = snapshots.get(_pos.bucket_lower)
+                if _pos_snap is None:
+                    continue
+                _is_no_pos = getattr(_pos, "entry_side", "yes") == "no"
+                _p_bid = _pos_snap.no_bid if _is_no_pos else _pos_snap.yes_bid
+                _p_ask = _pos_snap.no_ask if _is_no_pos else _pos_snap.yes_ask
+                if _p_bid is None or _p_ask is None:
+                    continue
+                _pnl  = round((_p_bid - (_pos.entry_price or 0.0)) * _pos.contracts, 4)
+                _ppct = round(_pnl / _pos.entry_usd * 100, 2) if _pos.entry_usd else 0.0
+                push_event("position_price_update", {
+                    "market_id":      _mid,
+                    "station":        station,
+                    "bucket_lower":   _pos.bucket_lower,
+                    "entry_side":     getattr(_pos, "entry_side", "yes"),
+                    "current_bid":    _p_bid,
+                    "current_ask":    _p_ask,
+                    "yes_ask":        _pos_snap.yes_ask,
+                    "unrealized_pnl": _pnl,
+                    "pnl_pct":        _ppct,
+                })
+
         except Exception as exc:
             logger.error("[PriceRefresh] %s: %s", station, exc, exc_info=True)
 
