@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime, time as dtime, timezone
 from typing import Optional
 
 import requests
@@ -198,6 +198,24 @@ _PATTERN_SEASON: dict[str, str] = {
 _OM_URL     = "https://api.open-meteo.com/v1/forecast"
 _OM_TIMEOUT = 12
 
+# ── 12z model availability cutoffs (UTC) ──────────────────────────────────────
+# GFS 12z initializes at 12:00 UTC; Open-Meteo typically ingests by ~15:30 UTC.
+# ECMWF 12z initializes at 12:00 UTC; Open-Meteo typically ingests by ~18:30 UTC.
+# BLEND requires both, so ECMWF cutoff applies.
+_GFS_12Z_READY   = dtime(15, 30)
+_ECMWF_12Z_READY = dtime(18, 30)
+
+
+def is_12z_ready(model_pref: str, now_utc: datetime) -> bool:
+    """Return True once the 12z model run for a station's preferred model is on Open-Meteo."""
+    today = now_utc.date()
+    if model_pref == "GFS":
+        cutoff = datetime.combine(today, _GFS_12Z_READY, tzinfo=timezone.utc)
+        return now_utc >= cutoff
+    # ECMWF and BLEND both wait for ECMWF 12z (it's the later / more valuable update)
+    cutoff = datetime.combine(today, _ECMWF_12Z_READY, tzinfo=timezone.utc)
+    return now_utc >= cutoff
+
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -211,6 +229,7 @@ class Phase4ForecastData:
     ecmwf_corrected: Optional[float]   # ECMWF minus station bias
     blended_f:       Optional[float]   # model-selected / blended output
     preferred_model: str = "ECMWF"    # "GFS", "ECMWF", or "BLEND"
+    fetched_at:      datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass

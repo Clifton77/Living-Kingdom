@@ -153,7 +153,10 @@ from config import (
     MAX_DAILY_ENTRIES_PER_STATION,
     settlement_station,
 )
-from phase4_signal_generator import Phase4Forecaster, SignalGenerator, build_phase4_signals, _STATION_KELLY_MULT
+from phase4_signal_generator import (
+    Phase4Forecaster, SignalGenerator, build_phase4_signals,
+    _STATION_KELLY_MULT, is_12z_ready,
+)
 _p4_fetcher  = Phase4Forecaster()
 _p4_gen      = SignalGenerator()
 _p4_forecasts: dict = {}
@@ -1084,6 +1087,26 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     if len(existing) >= MAX_STATION_POSITIONS:
         return
 
+    # ── 12z model gate: hold all entries until 12z GFS/ECMWF is on Open-Meteo ──
+    # GFS stations unblock at 15:30 UTC; ECMWF and BLEND at 18:30 UTC.
+    # Also verifies _p4_forecasts was fetched after the cutoff (not stale pre-12z data).
+    _p4_fc_gate = _p4_forecasts.get(station)
+    _model_pref_gate = _p4_fc_gate.preferred_model if _p4_fc_gate else "ECMWF"
+    if not is_12z_ready(_model_pref_gate, now_utc):
+        logger.debug(
+            "[Tier1] %s holding — 12z %s not yet available (%.0f:%02.0f UTC)",
+            station, _model_pref_gate,
+            now_utc.hour, now_utc.minute,
+        )
+        return
+    if _p4_fc_gate is None or not is_12z_ready(_model_pref_gate, _p4_fc_gate.fetched_at):
+        logger.info(
+            "[Tier1] %s holding — Phase4 data pre-dates 12z %s cutoff (fetched %s UTC)",
+            station, _model_pref_gate,
+            _p4_fc_gate.fetched_at.strftime("%H:%M") if _p4_fc_gate else "never",
+        )
+        return
+
     # ── Phase 4 gate: sole trade-validity check for new entries ──────────
     # BUY_YES: model's top bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
     # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
@@ -1474,6 +1497,27 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
         push_alert(f"Exit failed — {market_id}", result.error or "unknown", "ERROR")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 forecast refresh — runs after 12z GFS (15:25 UTC) and 12z ECMWF
+# (19:25 UTC) to ensure _p4_forecasts holds post-12z data before the Tier 1
+# gate opens.  Does not recompute the full signal pass.
+# ---------------------------------------------------------------------------
+
+def _phase4_refresh():
+    """Re-fetch GFS + ECMWF forecasts from Open-Meteo and update _p4_forecasts."""
+    global _p4_forecasts
+    now_utc = datetime.now(timezone.utc)
+    try:
+        fresh = _p4_fetcher.fetch_all(date.today())
+        _p4_forecasts.update(fresh)
+        logger.info(
+            "[Phase4] 12z refresh complete at %s UTC — %d stations updated",
+            now_utc.strftime("%H:%M"), len(fresh),
+        )
+    except Exception as exc:
+        logger.warning("[Phase4] 12z refresh failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -2417,6 +2461,28 @@ def start_scheduler() -> BackgroundScheduler:
         misfire_grace_time=120,
     )
 
+    # Phase 4 forecast refresh — re-fetch GFS/ECMWF after 12z runs are on Open-Meteo.
+    # 15:25 UTC → 12z GFS available (~15:30); 19:25 UTC → 12z ECMWF available (~18:30).
+    # Fires 5 min before the Tier 1 gate opens so data is ready before entries attempt.
+    scheduler.add_job(
+        _phase4_refresh,
+        trigger=CronTrigger(hour=15, minute=25, timezone="UTC"),
+        id="phase4_refresh_gfs12z",
+        name="Phase4 GFS 12z Refresh",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _phase4_refresh,
+        trigger=CronTrigger(hour=19, minute=25, timezone="UTC"),
+        id="phase4_refresh_ecmwf12z",
+        name="Phase4 ECMWF 12z Refresh",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+
     # Daily obs update — 10:00 UTC (6 AM ET), after CDO overnight publish
     scheduler.add_job(
         _obs_incremental_update,
@@ -2446,7 +2512,8 @@ def start_scheduler() -> BackgroundScheduler:
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
-        "Tier3=00/06/12/18Z+30 | Settlement=%02d:00Z + intraday 14-23Z@:00/:30 | "
+        "Tier3=00/06/12/18Z+30 | P4Refresh=15:25Z(GFS)/19:25Z(ECMWF) | "
+        "Settlement=%02d:00Z + intraday 14-23Z@:00/:30 | "
         "ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
         SETTLEMENT_SWEEP_UTC_HOUR,
