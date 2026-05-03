@@ -53,6 +53,7 @@ from config import (
     NBM_BLEND_WEIGHT,
     NBM_DIVERGENCE_GATE,
     SIGMA_SPREAD_SCALE,
+    NBM_SPREAD_CALIBRATION,
 )
 
 logger = setup_logging("signal_engine")
@@ -550,6 +551,9 @@ def fetch_live_mos_forecast(station: str, target_date: date) -> float | None:
 # Per-station NBM cache: key = "{station}_{date_iso}", value = °F or None
 _nbm_cache: dict[str, float | None] = {}
 
+# Per-station NBM ensemble spread cache: key = "{station}_{date_iso}", value = °F or None
+_nbm_spread_cache: dict[str, float | None] = {}
+
 
 def fetch_nbm_forecast(station: str, target_date: date) -> float | None:
     """Fetch NBM daily max temperature for a station. Cached per (station, date)."""
@@ -568,6 +572,31 @@ def fetch_nbm_forecast(station: str, target_date: date) -> float | None:
     lat, lon = coords
     result = fetch_nbm_tmax(lat, lon, target_date)
     _nbm_cache[cache_key] = result
+    return result
+
+
+def fetch_nbm_ensemble_spread(station: str, target_date: date) -> float | None:
+    """
+    Fetch NBM ensemble TMAX std dev for a station. Cached per (station, date).
+
+    Returns the spread in degF — how much NBM ensemble members disagree on the
+    day's high temp. Used to widen bias_std on uncertain forecast days.
+    """
+    from utils.herbie_fetcher import fetch_nbm_tmax_spread
+
+    cache_key = f"{station}_{target_date.isoformat()}"
+    if cache_key in _nbm_spread_cache:
+        return _nbm_spread_cache[cache_key]
+
+    settle = settlement_station(station)
+    coords = STATION_COORDS.get(settle)
+    if coords is None:
+        _nbm_spread_cache[cache_key] = None
+        return None
+
+    lat, lon = coords
+    result = fetch_nbm_tmax_spread(lat, lon, target_date)
+    _nbm_spread_cache[cache_key] = result
     return result
 
 
@@ -1371,6 +1400,20 @@ def generate_signal(
                     station, bias_std, _inflated, _spread_f,
                 )
                 bias_std = _inflated
+
+    # ── 3c. NBM ensemble spread — day-specific sigma floor ───────────────
+    # Applies on both Phase4 and NWS paths. Widens the distribution on days
+    # where the NBM ensemble members are spread apart (uncertain atmosphere).
+    # effective_sigma = max(bias_std, nbm_spread * NBM_SPREAD_CALIBRATION)
+    _nbm_spread = fetch_nbm_ensemble_spread(station, event_date)
+    if _nbm_spread is not None:
+        _spread_sigma = _nbm_spread * NBM_SPREAD_CALIBRATION
+        if _spread_sigma > bias_std:
+            logger.info(
+                "%s NBM spread sigma: %.2f degF * %.1f = %.2f degF > bias_std %.2f — widening",
+                station, _nbm_spread, NBM_SPREAD_CALIBRATION, _spread_sigma, bias_std,
+            )
+            bias_std = _spread_sigma
 
     # ── 4. Weather gate ──────────────────────────────────────────────────
     weather_gate = compute_weather_gate(taf.condition)

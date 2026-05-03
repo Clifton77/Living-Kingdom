@@ -65,6 +65,58 @@ def fetch_nbm_tmax(lat: float, lon: float, event_date: date) -> Optional[float]:
         return None
 
 
+def fetch_nbm_tmax_spread(lat: float, lon: float, event_date: date) -> Optional[float]:
+    """
+    Fetch NBM ensemble spread (std dev) for daily max temperature.
+
+    Returns the TMAX ensemble standard deviation in °F, which reflects
+    how much the NBM ensemble members disagree on the day's high temperature.
+    High values indicate an uncertain atmospheric setup; low values indicate
+    a well-constrained forecast.
+
+    Uses the same 00Z run / fxx fallback chain as fetch_nbm_tmax.
+    Returns °F or None on failure.
+    """
+    try:
+        from herbie import Herbie
+
+        run_dt = datetime(event_date.year, event_date.month, event_date.day, 0, 0) - timedelta(days=1)
+        lon360 = lon % 360
+
+        for fxx in (24, 36, 12):
+            try:
+                H = Herbie(
+                    run_dt.strftime("%Y-%m-%d %H:%M"),
+                    model="nbm",
+                    product="co",
+                    fxx=fxx,
+                    verbose=False,
+                )
+                ds = H.xarray(":TMAX:2 m above ground:12-24 hour max fcst:ens std dev", remove_grib=True)
+                var    = list(ds.data_vars)[0]
+                lats2d = ds["latitude"].values
+                lons2d = ds["longitude"].values
+                dist   = (lats2d - lat) ** 2 + (lons2d - lon360) ** 2
+                yi, xi = np.unravel_index(dist.argmin(), dist.shape)
+                val_k  = float(ds[var].values[yi, xi])
+                # Std dev is in Kelvin — convert to °F (no offset, just scale)
+                std_f  = val_k * 9.0 / 5.0
+                if 0.0 < std_f < 20.0:
+                    logger.info(
+                        "NBM TMAX spread (fxx=%d): %.2f degF at (%.2f, %.2f)", fxx, std_f, lat, lon
+                    )
+                    return round(std_f, 2)
+            except Exception:
+                continue
+
+        logger.warning("fetch_nbm_tmax_spread: all fxx attempts failed for (%.2f, %.2f) %s", lat, lon, event_date)
+        return None
+
+    except Exception as exc:
+        logger.warning("fetch_nbm_tmax_spread failed: %s", exc)
+        return None
+
+
 def fetch_gfs_z500(target_date: date) -> Optional[pd.Series]:
     """
     Fetch 500mb geopotential height from GFS analysis (fxx=0) on the 0.25° grid,

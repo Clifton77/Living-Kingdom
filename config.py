@@ -515,9 +515,15 @@ TAF_POST_PEAK_WINDOW_HOURS = 1   # hours after peak to include
 BIAS_STD_GATE = 5.0   # skip if bias_std exceeds this (°F)
 
 # Sigma inflation — widen bias_std proportionally to NWS/NBM/MOS spread on the NWS path.
-# Inactive on Phase4 path (quantile spread already encodes model disagreement there).
+# Inactive on Phase4 path (NBM ensemble spread already encodes model disagreement there).
 # 0.10 = a 5°F model spread inflates sigma by 50%. Calibratable.
 SIGMA_SPREAD_SCALE = 0.10
+
+# NBM ensemble spread calibration — scales NBM ens std dev to match the magnitude of
+# historical forecast error (bias table ERA5 sigma). Mean NBM ens std dev ~1.68 degF;
+# mean historical sigma ~3.5 degF → calibration ~2.0. Using 1.5 to avoid over-gating
+# variable stations (KSEA, KORD). effective_sigma = max(bias_std, nbm_spread * scale).
+NBM_SPREAD_CALIBRATION = 1.5
 
 # Same-day entry cutoff: stop entering same-day markets this many hours before peak
 ENTRY_CUTOFF_PRE_PEAK_HOURS = 2
