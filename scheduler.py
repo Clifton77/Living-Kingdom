@@ -108,7 +108,7 @@ from utils.alerting import (
     alert_daily_loss_limit,
     alert_settlement_detected,
 )
-from scripts.signal_engine import run_signal_pass, TradeSignal, BucketAnalysis, check_forecast_availability
+from scripts.signal_engine import run_signal_pass, TradeSignal, BucketAnalysis, check_forecast_availability, condition_on_running_max
 from scripts.taf_interpreter import interpret_taf, get_metar
 from kalshi_client import KalshiClient, build_market_id
 from risk import RiskManager
@@ -1178,6 +1178,42 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         )
         return
 
+    # ── Intraday running-max conditioning ────────────────────────────────
+    # Condition the Tier 3 distribution on the observed ASOS running max.
+    # Dead buckets (entire range below running_max_f) are zeroed and the
+    # remainder renormalized before Phase 4 bucket selection.
+    # Read-only — does not write back to _latest_signals.
+    _cond_rm = _running_max_cache.get(station)
+    _conditioned_buckets = sig.buckets
+    if _cond_rm is not None and (now_utc - _cond_rm[1]).total_seconds() < 5400:
+        _rm_val = _cond_rm[0]
+        if _rm_val is not None and sig.buckets:
+            _live_lowers = sorted(b.bucket_lower for b in sig.buckets)
+            _live_lo_tail = _live_lowers[0]
+            _live_hi_tail = _live_lowers[-1]
+            _raw_probs = {b.bucket_lower: b.model_prob for b in sig.buckets}
+            _cond_probs = condition_on_running_max(
+                _raw_probs, _rm_val, _live_lo_tail, _live_hi_tail
+            )
+            _conditioned_buckets = [
+                BucketAnalysis(
+                    bucket_lower=b.bucket_lower,
+                    bucket_label=b.bucket_label,
+                    model_prob=_cond_probs.get(b.bucket_lower, 0.0),
+                    kalshi_prob=b.kalshi_prob,
+                    edge=_cond_probs.get(b.bucket_lower, 0.0) - b.kalshi_prob,
+                    yes_ask=b.yes_ask,
+                    yes_bid=b.yes_bid,
+                )
+                for b in sig.buckets
+            ]
+            _n_dead = sum(1 for b in _conditioned_buckets if b.model_prob == 0.0)
+            if _n_dead:
+                logger.info(
+                    "[Tier1] %s running-max conditioning: %.1f degF obs, %d bucket(s) zeroed",
+                    station, _rm_val, _n_dead,
+                )
+
     # ── Phase 4 gate: sole trade-validity check for new entries ──────────
     # BUY_YES: model's top bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
     # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
@@ -1187,8 +1223,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     # picking an arbitrary BUY_YES bucket and post-hoc checking model alignment.
     _p4_entry = None
     _model_top_for_entry = None
-    if sig.buckets:
-        _model_top_for_entry = max(sig.buckets, key=lambda b: b.model_prob)
+    if _conditioned_buckets:
+        _model_top_for_entry = max(_conditioned_buckets, key=lambda b: b.model_prob)
         _p4_entry = next(
             (s for s in _p4_latest_signals.get(station, [])
              if s.action == "BUY_YES" and s.bucket_lower == _model_top_for_entry.bucket_lower),

@@ -52,6 +52,7 @@ from config import (
     NWS_BLEND_WEIGHT,
     NBM_BLEND_WEIGHT,
     NBM_DIVERGENCE_GATE,
+    SIGMA_SPREAD_SCALE,
 )
 
 logger = setup_logging("signal_engine")
@@ -232,6 +233,49 @@ def build_probability_distribution(
         probs = {k: v / total for k, v in probs.items()}
 
     return probs
+
+
+def condition_on_running_max(
+    model_probs: dict[int, float],
+    running_max_f: float,
+    live_lower_tail: int,
+    live_upper_tail: int,
+) -> dict[int, float]:
+    """
+    Condition the bucket probability distribution on the observed running ASOS max.
+
+    Any bucket whose entire temperature range lies below running_max_f is
+    physically impossible — the daily high must be at least running_max_f.
+    Dead buckets are zeroed and the remainder renormalized.
+
+    Bucket upper bounds:
+      Interior: lower + 1.5  (e.g. B71 covers 70.5–72.5)
+      Lower tail: live_lower_tail + 0.5
+      Upper tail: extends to +inf — never dead
+
+    The partially-overlapping bucket (the one whose range contains
+    running_max_f) keeps its full prior probability; this is slightly
+    conservative but avoids a complex partial re-integration.
+    """
+    if not model_probs:
+        return model_probs
+
+    conditioned = {}
+    for lower, prob in model_probs.items():
+        if lower == live_upper_tail:
+            conditioned[lower] = prob  # upper tail always survives
+            continue
+        upper_bound = (live_lower_tail + 0.5) if lower == live_lower_tail else (lower + 1.5)
+        if upper_bound <= running_max_f:
+            conditioned[lower] = 0.0   # entire range below observed max
+        else:
+            conditioned[lower] = prob  # overlapping or above — keep prior
+
+    total = sum(conditioned.values())
+    if total > 0:
+        conditioned = {k: v / total for k, v in conditioned.items()}
+
+    return conditioned
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1355,22 @@ def generate_signal(
     bias_mean         = bias_info["bias_mean"]
     bias_std          = bias_info["bias_std"]
     forecast_adjusted = forecast_raw + bias_mean
+
+    # ── 3b. Sigma inflation — widen distribution when models disagree ────
+    # Only on NWS/NBM path; Phase4 path sets p4_forecast_f so spread is
+    # not meaningful (MOS/NBM weren't fetched against the same target).
+    if p4_forecast_f is None:
+        _spread_temps = [t for t in [forecast_raw, mos_forecast_raw, nbm_forecast_raw]
+                         if t is not None]
+        if len(_spread_temps) >= 2:
+            _spread_f = max(_spread_temps) - min(_spread_temps)
+            if _spread_f > 0:
+                _inflated = bias_std * (1.0 + SIGMA_SPREAD_SCALE * _spread_f)
+                logger.info(
+                    "%s sigma inflated %.1f -> %.1f degF (model spread %.1f degF)",
+                    station, bias_std, _inflated, _spread_f,
+                )
+                bias_std = _inflated
 
     # ── 4. Weather gate ──────────────────────────────────────────────────
     weather_gate = compute_weather_gate(taf.condition)

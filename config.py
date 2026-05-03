@@ -514,6 +514,11 @@ TAF_POST_PEAK_WINDOW_HOURS = 1   # hours after peak to include
 # bias_std gate — skip when forecast uncertainty is too high (Kelly can't compensate for wrong bucket)
 BIAS_STD_GATE = 5.0   # skip if bias_std exceeds this (°F)
 
+# Sigma inflation — widen bias_std proportionally to NWS/NBM/MOS spread on the NWS path.
+# Inactive on Phase4 path (quantile spread already encodes model disagreement there).
+# 0.10 = a 5°F model spread inflates sigma by 50%. Calibratable.
+SIGMA_SPREAD_SCALE = 0.10
+
 # Same-day entry cutoff: stop entering same-day markets this many hours before peak
 ENTRY_CUTOFF_PRE_PEAK_HOURS = 2
 
