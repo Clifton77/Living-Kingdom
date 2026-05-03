@@ -55,11 +55,11 @@ _MODEL_PREF: dict[str, str] = {
     # GFS preferred
     "KLAX": "GFS",    # ECMWF bias +5.80°F — catastrophic for coastal LA
     "KLAS": "GFS",    # ECMWF +1.12°F vs GFS +0.28°F
-    "KPHX": "GFS",    # ECMWF +0.75°F vs GFS correctable
-    "KDCA": "GFS",    # ECMWF +0.91°F vs GFS +1.48°F — both warm, GFS used
+    "KPHX": "ECMWF",  # backtest Oct24-Feb26: ECMWF MAE 0.36°F vs GFS 0.61°F
+    "KDCA": "ECMWF",  # backtest Oct24-Feb26: ECMWF MAE 0.75°F vs GFS 2.04°F
     "KMIA": "GFS",    # ECMWF +1.13°F vs GFS +0.84°F
     # BLEND — both models informative, averaging reduces variance
-    "KDFW": "BLEND",  # GFS +1.16°F, ECMWF +1.53°F
+    "KDFW": "GFS",    # backtest Oct24-Feb26: GFS MAE 1.03°F vs BLEND 1.54°F
     "KATL": "BLEND",  # GFS +0.97°F, ECMWF +0.69°F
     # ECMWF preferred for the remaining 13 stations
     "KHOU": "ECMWF",
@@ -74,7 +74,7 @@ _MODEL_PREF: dict[str, str] = {
     "KSAT": "ECMWF",
     "KBOS": "ECMWF",
     "KMSY": "ECMWF",
-    "KOKC": "ECMWF",
+    "KOKC": "GFS",    # backtest Oct24-Feb26: GFS MAE 0.76°F vs ECMWF 1.62°F
 }
 
 # ── GFS warm-bias corrections (°F to subtract from raw GFS) ──────────────────
