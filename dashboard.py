@@ -338,7 +338,9 @@ def close_position(market_id: str):
     if snap is None:
         return jsonify({"ok": False, "error": "Could not fetch market snapshot"}), 500
 
-    result = kalshi.close_position(market_id, pos.contracts, snap.yes_bid)
+    entry_side = getattr(pos, "entry_side", "yes")
+    bid = snap.no_bid if entry_side == "no" else snap.yes_bid
+    result = kalshi.close_position(market_id, pos.contracts, bid, entry_side=entry_side)
     if not result.success:
         return jsonify({"ok": False, "error": result.error}), 500
 
@@ -346,7 +348,7 @@ def close_position(market_id: str):
     bucket_lower = pos.bucket_lower
     entry_price  = pos.entry_price
 
-    realized = rm.close_position(market_id, snap.yes_bid, "Manual close via dashboard")
+    realized = rm.close_position(market_id, bid, "Manual close via dashboard")
 
     tz = ZoneInfo(cfg.STATION_TIMEZONES.get(station, "UTC"))
     now_local = datetime.now(tz)
@@ -355,7 +357,7 @@ def close_position(market_id: str):
     ts = f"{now_local.strftime('%b')} {now_local.day} {h}:{now_local.strftime('%M')} {ampm} {now_local.strftime('%Z')}"
 
     from utils.sheets import get_sheets_logger
-    get_sheets_logger().log_trade_closed(station, market_id, snap.yes_bid, realized, "Manual close via dashboard")
+    get_sheets_logger().log_trade_closed(station, market_id, bid, realized, "Manual close via dashboard")
 
     closed_record = {
         "ts":           ts,
@@ -364,7 +366,7 @@ def close_position(market_id: str):
         "station":      station,
         "bucket_lower": bucket_lower,
         "entry_price":  entry_price,
-        "exit_price":   snap.yes_bid,
+        "exit_price":   bid,
         "realized_pnl": realized,
         "reason":       "Manual close via dashboard",
     }
@@ -384,8 +386,9 @@ def close_all():
     results = []
     for market_id, pos in list(rm.state.positions.items()):
         snap = kalshi.get_market_snapshot(pos.station, date.fromisoformat(pos.event_date), pos.bucket_lower)
-        bid  = snap.yes_bid if snap else 0.0
-        result = kalshi.close_position(market_id, pos.contracts, bid)
+        entry_side = getattr(pos, "entry_side", "yes")
+        bid = (snap.no_bid if entry_side == "no" else snap.yes_bid) if snap else 0.0
+        result = kalshi.close_position(market_id, pos.contracts, bid, entry_side=entry_side)
         if result.success:
             station      = pos.station
             bucket_lower = pos.bucket_lower
