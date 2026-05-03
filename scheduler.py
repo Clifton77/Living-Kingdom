@@ -33,7 +33,7 @@ import dataclasses
 import signal
 import sys
 import threading
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -212,6 +212,23 @@ _trade_history: list = []
 # Prevents re-entering the same station+market more than MAX_DAILY_ENTRIES_PER_STATION times.
 _daily_entry_counts: dict[tuple[str, date], int] = {}
 _daily_entry_counts_lock = threading.Lock()
+
+# ── Overnight sleep window ────────────────────────────────────────────────────
+# After settlement the bot has nothing to do until 12z models are available.
+# Suppress all tier passes from 03:00 UTC (markets settled) to 15:00 UTC
+# (15 min before GFS 12z gate at 15:30 UTC), but only when there are no
+# open positions — we never sleep with money on the table.
+_SLEEP_WINDOW_START = dtime(3, 0)
+_SLEEP_WINDOW_END   = dtime(15, 0)
+
+
+def _in_sleep_window(now_utc: datetime) -> bool:
+    """Return True when we're in the overnight dead zone with no open positions."""
+    t = now_utc.time().replace(tzinfo=None)
+    if not (_SLEEP_WINDOW_START <= t < _SLEEP_WINDOW_END):
+        return False
+    rm = get_risk_manager()
+    return len(rm.state.positions) == 0
 
 
 def get_trade_history() -> list:
@@ -396,6 +413,11 @@ def tier2_taf_monitor():
 
     if rm.is_halted:
         logger.info("[Tier2] Bot halted — skipping")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    if _in_sleep_window(now_utc):
+        logger.debug("[Tier2] Overnight sleep window — skipping")
         return
 
     # Refresh Kalshi bucket prices before evaluating TAF conditions
@@ -726,6 +748,10 @@ def tier1_metar_entries_exits():
             return
 
         now_utc = datetime.now(timezone.utc)
+
+        if _in_sleep_window(now_utc):
+            logger.debug("[Tier1] Overnight sleep window — skipping")
+            return
 
         # ── Near-hour obs window tracking ────────────────────────────────────
         global _near_hour_window_active, _current_hour_obs_seen
@@ -1613,6 +1639,11 @@ def tier3_full_signal_pass(event_date: date | None = None):
         if not rm.state.kill_switch_active:
             limit = rm.state.bankroll * DAILY_LOSS_LIMIT_PCT
             alert_daily_loss_limit(rm.state.daily_pnl, limit)
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    if _in_sleep_window(now_utc):
+        logger.info("[Tier3] Overnight sleep window — skipping signal recompute")
         return
 
     from scripts.pattern_classifier import classify_pattern
