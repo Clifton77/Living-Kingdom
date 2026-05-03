@@ -1573,7 +1573,9 @@ def _execute_exit(market_id, pos, bid_price, reason, kalshi, rm):
 # ---------------------------------------------------------------------------
 # Phase 4 forecast refresh — runs after 12z GFS (15:25 UTC) and 12z ECMWF
 # (19:25 UTC) to ensure _p4_forecasts holds post-12z data before the Tier 1
-# gate opens.  Does not recompute the full signal pass.
+# gate opens.  Triggers a full Tier 3 signal recompute so _latest_signals is
+# populated before the 12z gate opens (15:30 UTC), allowing Tier 1 to enter
+# trades without waiting for the next scheduled 18:30Z Tier 3 pass.
 # ---------------------------------------------------------------------------
 
 def _phase4_refresh():
@@ -1589,6 +1591,13 @@ def _phase4_refresh():
         )
     except Exception as exc:
         logger.warning("[Phase4] 12z refresh failed: %s", exc)
+        return
+
+    t = threading.Thread(
+        target=tier3_full_signal_pass, daemon=True, name="phase4_signal_trigger"
+    )
+    t.start()
+    logger.info("[Phase4] Signal recompute triggered")
 
 
 # ---------------------------------------------------------------------------
@@ -2588,7 +2597,7 @@ def start_scheduler() -> BackgroundScheduler:
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
-        "Tier3=00/06/12/18Z+30 | P4Refresh=15:25Z(GFS)/19:25Z(ECMWF) | "
+        "Tier3=00/06/12/18Z+30+P4trigger | P4Refresh=15:25Z(GFS)/19:25Z(ECMWF) | "
         "Settlement=%02d:00Z + intraday 14-23Z@:00/:30 | "
         "ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
