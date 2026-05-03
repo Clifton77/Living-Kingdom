@@ -214,7 +214,9 @@ def evaluate_exit(
             )
 
     # ── 6. Early profit exit ──────────────────────────────────────────────
-    if current_bid >= EARLY_EXIT_BID_THRESHOLD:
+    # NO positions have structurally high no_bid (0.85-0.95) — skip this block entirely
+    _is_no_pos = getattr(pos, "entry_side", "yes") == "no"
+    if not _is_no_pos and current_bid >= EARLY_EXIT_BID_THRESHOLD:
         past_peak          = (local_hour is not None and peak_heating_hour is not None
                               and local_hour >= peak_heating_hour)
         confirmed_in_bucket = (running_max is not None and running_max >= bucket_lo)
@@ -246,15 +248,14 @@ def evaluate_exit(
                     exit_type="early_profit",
                 )
         else:
-            # No METAR data and before peak — take profit at high bid conservatively
+            # METAR unavailable — hold and warn rather than force-close
             return ExitDecision(
-                should_exit=True,
+                should_exit=False,
                 reason=(
-                    f"Early profit exit: bid {current_bid:.2f} ≥ {EARLY_EXIT_BID_THRESHOLD:.2f}. "
-                    "No METAR available to confirm — exiting conservatively."
+                    f"Early profit hold: bid {current_bid:.2f} ≥ {EARLY_EXIT_BID_THRESHOLD:.2f} "
+                    "but METAR unavailable to confirm temp in bucket — holding position."
                 ),
-                urgency="recommended",
-                exit_type="early_profit",
+                urgency="warning",
             )
 
     return ExitDecision(should_exit=False, reason="Hold — no exit condition met", urgency="none")

@@ -796,14 +796,20 @@ def tier1_metar_entries_exits():
                 local_now  = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
                 local_hour = local_now.hour
 
-                if metar_ok:
+                try:
                     rm_data     = running_max_with_confluence(settle, now_utc.date())
                     running_max = rm_data["running_max_f"]
                     _running_max_cache[station] = (running_max, now_utc)
                     if not rm_data["in_confluence"]:
                         logger.warning("[Tier1] %s temp confluence issue (settle=%s): %s", station, settle, rm_data["note"])
-                else:
-                    running_max = None
+                except Exception as _rm_exc:
+                    logger.warning("[Tier1] %s running_max fetch failed: %s — using cached", station, _rm_exc)
+                    _cached_rm = _running_max_cache.get(station)
+                    running_max = _cached_rm[0] if _cached_rm else None
+
+                # obs_temp requires live METAR; running_max uses IEM 1-min data independently
+                if not metar_ok:
+                    obs_temp = None
 
                 for market_id, pos in station_positions.items():
                     snap = kalshi.get_market_snapshot(
