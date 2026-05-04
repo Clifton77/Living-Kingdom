@@ -1215,14 +1215,37 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                 )
 
     # ── Entry bucket selection ────────────────────────────────────────────
-    # BUY_YES: model must assign ≥45% probability to its top bucket (conviction
-    #          that the temperature will land there) AND have positive edge vs ask.
-    # BUY_NO:  fallback when model conviction is absent; Phase 4 price-zone logic
-    #          (5–30¢ sell zone) still applies unchanged.
-    _model_top_for_entry = (
-        max(_conditioned_buckets, key=lambda b: b.model_prob)
-        if _conditioned_buckets else None
-    )
+    # BUY_YES (two-step):
+    #   1. GFS/ECMWF blended forecast determines the target bucket (where the
+    #      NWP model says the high will land).
+    #   2. The Gaussian distribution must assign ≥45% probability to that same
+    #      bucket — confirming our model agrees the high will hit there.
+    # BUY_NO: fallback when NWP data absent or Gaussian < 45%; Phase 4
+    #         price-zone logic (5–30¢ sell zone) still applies unchanged.
+
+    # Step 1: find which bucket the NWP blended forecast falls into
+    _nwp_target_bucket = None
+    if _p4_fc_gate is not None and _p4_fc_gate.blended_f is not None and _conditioned_buckets:
+        _fc_f = _p4_fc_gate.blended_f
+        _live_lowers = sorted(b.bucket_lower for b in _conditioned_buckets)
+        _lo_tail, _hi_tail = _live_lowers[0], _live_lowers[-1]
+        for _bl in _live_lowers:
+            if _bl == _lo_tail:
+                if _fc_f <= _bl + 0.5:
+                    _nwp_target_bucket = _bl
+                    break
+            elif _bl == _hi_tail:
+                _nwp_target_bucket = _bl  # upper tail catches everything above
+            elif _bl - 0.5 <= _fc_f < _bl + 1.5:
+                _nwp_target_bucket = _bl
+                break
+
+    # Step 2: look up our model's probability for that NWP-indicated bucket
+    _model_top_for_entry = None
+    if _nwp_target_bucket is not None:
+        _model_top_for_entry = next(
+            (b for b in _conditioned_buckets if b.bucket_lower == _nwp_target_bucket), None
+        )
 
     _yes_valid = (
         _model_top_for_entry is not None
@@ -1234,21 +1257,30 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         entry_bucket = _model_top_for_entry.bucket_lower
         entry_side   = "yes"
         logger.info(
-            "[Tier1] %s BUY_YES B%d — model_prob=%.3f ask=%.2f edge=%+.3f",
+            "[Tier1] %s BUY_YES B%d — NWP=%.1f model_prob=%.3f ask=%.2f edge=%+.3f",
             station, entry_bucket,
+            _p4_fc_gate.blended_f,
             _model_top_for_entry.model_prob,
             _model_top_for_entry.yes_ask,
             _model_top_for_entry.edge,
         )
     else:
-        # Model not confident enough for YES — check for BUY_NO opportunity
+        if _nwp_target_bucket is not None and _model_top_for_entry is not None:
+            logger.info(
+                "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f or edge=%+.3f",
+                station, _nwp_target_bucket,
+                _p4_fc_gate.blended_f if _p4_fc_gate else 0.0,
+                _model_top_for_entry.model_prob,
+                MIN_MODEL_PROB_FOR_ENTRY,
+                _model_top_for_entry.edge,
+            )
+        elif _p4_fc_gate is None or _p4_fc_gate.blended_f is None:
+            logger.info("[Tier1] %s no NWP forecast — skipping BUY_YES", station)
+        # Fall back to BUY_NO
         _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
         _p4_no = max(_no_signals, key=lambda s: s.yes_ask, default=None)
         if _p4_no is None:
-            logger.info("[Tier1] %s no entry — model_prob=%.3f < %.2f floor, no BUY_NO",
-                        station,
-                        _model_top_for_entry.model_prob if _model_top_for_entry else 0.0,
-                        MIN_MODEL_PROB_FOR_ENTRY)
+            logger.info("[Tier1] %s no entry — no BUY_NO available either", station)
             return
         entry_bucket = _p4_no.bucket_lower
         entry_side   = "no"
