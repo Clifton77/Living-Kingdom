@@ -149,6 +149,7 @@ def evaluate_exit(
 
     bucket_lo = pos.bucket_lower
     bucket_hi = bucket_lo + 2    # 2°F wide bin
+    _is_no_pos = getattr(pos, "entry_side", "yes") == "no"
 
     # ── 1. Static stop-loss ───────────────────────────────────────────────
     stop_trigger = pos.entry_price * STOP_LOSS_PCT
@@ -163,8 +164,9 @@ def evaluate_exit(
             exit_type="stop_loss",
         )
 
-    # ── 2 & 3. Undershoot protection (requires intraday running max) ────────
-    if running_max is not None and local_hour is not None and peak_heating_hour is not None:
+    # ── 2 & 3. Undershoot protection (YES only) ───────────────────────────
+    # For NO positions, temp tracking below the bucket means we're winning — hold.
+    if not _is_no_pos and running_max is not None and local_hour is not None and peak_heating_hour is not None:
         undershoot_trigger = bucket_lo - UNDERSHOOT_EXIT_BUFFER_F
 
         if running_max < undershoot_trigger:
@@ -197,8 +199,10 @@ def evaluate_exit(
                     urgency="warning",
                 )
 
-    # ── 5. Overshoot exit (lock profit before temp retreats) ─────────────
-    if running_max is not None and local_hour is not None and peak_heating_hour is not None:
+    # ── 5. Overshoot exit (YES only, lock profit before temp retreats) ────
+    # For NO positions, temp entering/exceeding the bucket is a loss already
+    # captured by the stop-loss on the falling no_bid — not a profit-lock.
+    if not _is_no_pos and running_max is not None and local_hour is not None and peak_heating_hour is not None:
         overshoot_trigger = bucket_hi - OVERSHOOT_EXIT_BUFFER_F
         if running_max >= overshoot_trigger and local_hour < peak_heating_hour:
             return ExitDecision(
@@ -215,7 +219,6 @@ def evaluate_exit(
 
     # ── 6. Early profit exit ──────────────────────────────────────────────
     # NO positions have structurally high no_bid (0.85-0.95) — skip this block entirely
-    _is_no_pos = getattr(pos, "entry_side", "yes") == "no"
     if not _is_no_pos and current_bid >= EARLY_EXIT_BID_THRESHOLD:
         past_peak          = (local_hour is not None and peak_heating_hour is not None
                               and local_hour >= peak_heating_hour)
