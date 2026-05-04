@@ -1242,17 +1242,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             return None
 
         if _p4_fc_gate.ecmwf_corrected is not None:
-            # ECMWF is available — it is the authoritative signal
+            # ECMWF is the only authority — GFS never gates entries
             _auth_b   = _bucket_for_f(_p4_fc_gate.ecmwf_corrected)
             _auth_src = "ECMWF"
             _auth_val = _p4_fc_gate.ecmwf_corrected
-        elif _p4_fc_gate.gfs_corrected is not None:
-            # Pre-18Z: only GFS available
-            _auth_b   = _bucket_for_f(_p4_fc_gate.gfs_corrected)
-            _auth_src = "GFS"
-            _auth_val = _p4_fc_gate.gfs_corrected
         else:
-            _auth_b   = _nwp_target_bucket  # nothing to check — NBM alone
+            # ECMWF not yet available — NBM runs freely, no gate
+            _auth_b   = _nwp_target_bucket
             _auth_src = "NBM"
             _auth_val = _p4_fc_gate.blended_f
 
