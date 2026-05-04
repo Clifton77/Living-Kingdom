@@ -1228,7 +1228,6 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     _yes_valid = (
         _model_top_for_entry is not None
         and _model_top_for_entry.model_prob >= MIN_MODEL_PROB_FOR_ENTRY
-        and _model_top_for_entry.edge > 0
     )
 
     if _yes_valid:
@@ -1245,12 +1244,11 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     else:
         if _nwp_target_bucket is not None and _model_top_for_entry is not None:
             logger.info(
-                "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f or edge=%+.3f",
+                "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f conviction floor",
                 station, _nwp_target_bucket,
                 _p4_fc_gate.blended_f if _p4_fc_gate else 0.0,
                 _model_top_for_entry.model_prob,
                 MIN_MODEL_PROB_FOR_ENTRY,
-                _model_top_for_entry.edge,
             )
         elif _p4_fc_gate is None or _p4_fc_gate.blended_f is None:
             logger.info("[Tier1] %s no NWP forecast — skipping BUY_YES", station)
