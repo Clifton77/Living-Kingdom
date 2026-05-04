@@ -1225,9 +1225,50 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             (b for b in _conditioned_buckets if b.bucket_lower == _nwp_target_bucket), None
         )
 
+    # Step 3: authoritative-model gate — after ECMWF 12Z arrives (~18 UTC) use
+    # ECMWF alone; before that fall back to GFS; if neither is present, skip.
+    # Prevents entering on an NBM hourly shift that a later full-model run contradicts.
+    _authority_agree = True
+    if _nwp_target_bucket is not None and _p4_fc_gate is not None and _live_lowers:
+        def _bucket_for_f(f: float) -> int | None:
+            for _bl in _live_lowers:
+                if _bl == _lo_tail:
+                    if f <= _bl + 0.5:
+                        return _bl
+                elif _bl == _hi_tail:
+                    return _bl
+                elif _bl - 0.5 <= f < _bl + 1.5:
+                    return _bl
+            return None
+
+        if _p4_fc_gate.ecmwf_corrected is not None:
+            # ECMWF is available — it is the authoritative signal
+            _auth_b   = _bucket_for_f(_p4_fc_gate.ecmwf_corrected)
+            _auth_src = "ECMWF"
+            _auth_val = _p4_fc_gate.ecmwf_corrected
+        elif _p4_fc_gate.gfs_corrected is not None:
+            # Pre-18Z: only GFS available
+            _auth_b   = _bucket_for_f(_p4_fc_gate.gfs_corrected)
+            _auth_src = "GFS"
+            _auth_val = _p4_fc_gate.gfs_corrected
+        else:
+            _auth_b   = _nwp_target_bucket  # nothing to check — NBM alone
+            _auth_src = "NBM"
+            _auth_val = _p4_fc_gate.blended_f
+
+        if _auth_b != _nwp_target_bucket:
+            _authority_agree = False
+            logger.info(
+                "[Tier1] %s authority conflict — %s=%.1f→B%s blended→B%d — holding YES",
+                station, _auth_src, _auth_val,
+                str(_auth_b) if _auth_b is not None else "?",
+                _nwp_target_bucket,
+            )
+
     _yes_valid = (
         _model_top_for_entry is not None
         and _model_top_for_entry.model_prob >= MIN_MODEL_PROB_FOR_ENTRY
+        and _authority_agree
     )
 
     if _yes_valid:
@@ -1243,13 +1284,16 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         )
     else:
         if _nwp_target_bucket is not None and _model_top_for_entry is not None:
-            logger.info(
-                "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f conviction floor",
-                station, _nwp_target_bucket,
-                _p4_fc_gate.blended_f if _p4_fc_gate else 0.0,
-                _model_top_for_entry.model_prob,
-                MIN_MODEL_PROB_FOR_ENTRY,
-            )
+            if not _authority_agree:
+                pass  # conflict already logged above
+            else:
+                logger.info(
+                    "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f conviction floor",
+                    station, _nwp_target_bucket,
+                    _p4_fc_gate.blended_f if _p4_fc_gate else 0.0,
+                    _model_top_for_entry.model_prob,
+                    MIN_MODEL_PROB_FOR_ENTRY,
+                )
         elif _p4_fc_gate is None or _p4_fc_gate.blended_f is None:
             logger.info("[Tier1] %s no NWP forecast — skipping BUY_YES", station)
         # Fall back to BUY_NO
