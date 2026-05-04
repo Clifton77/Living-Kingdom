@@ -1526,23 +1526,27 @@ def generate_signal(
             station, peak_prob * 100, filtered_labels,
         )
 
-    # Rank buckets by Kalshi yes_ask; top bucket used for TradeSignal metadata.
-    # Phase 4 price-zone logic (in scheduler) determines the actual entry bucket.
-    ranked = sorted(bucket_analyses, key=lambda b: b.yes_ask, reverse=True)
-    top3   = ranked[:3]
+    # Rank buckets by model edge (model_prob − kalshi_prob) — the bucket where we most
+    # disagree with the market. Trading the market's favorite (by yes_ask) gives no edge.
+    by_edge = sorted(bucket_analyses, key=lambda b: b.edge, reverse=True)
+    top3    = by_edge[:3]
 
     logger.info(
-        "%s market top3: %s | forecast=%.1f°F",
+        "%s edge top3: %s | forecast=%.1f°F",
         station,
-        [(b.bucket_lower, round(b.yes_ask, 3)) for b in top3],
+        [(b.bucket_lower, round(b.edge, 3), round(b.yes_ask, 3)) for b in top3],
         forecast_adjusted,
     )
 
-    top = top3[0]  # Highest-ask bucket — used for signal metadata, not entry selection
+    top = top3[0]  # Best-edge bucket
 
-    # Entry decision — Phase 4 price-zone logic handles bucket selection and validation.
-    # Kelly self-regulates stake size based on edge magnitude; no edge floor required.
-    decision = "TRADE"
+    # Gate on minimum edge — no positive edge means no favorable YES trade.
+    decision = "TRADE" if top.edge >= MIN_EDGE else "WATCH"
+    if decision == "WATCH":
+        logger.info(
+            "%s — best edge %+.3f on B%d below MIN_EDGE %.2f → WATCH",
+            station, top.edge, top.bucket_lower, MIN_EDGE,
+        )
 
     # ── 8. Kelly sizing with confidence scaling ──────────────────────────
     kelly_frac, kelly_usd, kelly_contracts = kelly_stake(
@@ -1567,16 +1571,12 @@ def generate_signal(
         kelly_contracts = int(math.floor(kelly_usd / top.yes_ask)) if top.yes_ask > 0 else 0
         kelly_usd       = round(kelly_contracts * top.yes_ask, 2)
 
-    # Enforce minimum stake — floor at MIN_KELLY_STAKE rather than downgrading to WATCH.
-    # With market-led selection the top bucket often has yes_ask > model_prob (negative
-    # Kelly edge), but we enter anyway with minimum size since the market confirms the range.
+    # Kelly below minimum stake → WATCH; never force a trade with near-zero sizing.
     if decision == "TRADE" and kelly_usd < MIN_KELLY_STAKE:
-        kelly_contracts = max(1, int(math.floor(MIN_KELLY_STAKE / top.yes_ask))) if top.yes_ask > 0 else 1
-        kelly_usd       = round(kelly_contracts * top.yes_ask, 2)
-        kelly_frac      = round(kelly_usd / bankroll, 6) if bankroll > 0 else 0.0
+        decision = "WATCH"
         logger.info(
-            "%s — Kelly floored to min stake: %d contract(s) @ $%.2f = $%.2f",
-            station, kelly_contracts, top.yes_ask, kelly_usd,
+            "%s — Kelly $%.2f below MIN_KELLY_STAKE $%.2f → WATCH",
+            station, kelly_usd, MIN_KELLY_STAKE,
         )
 
     # ── 9. Structured plain-English reasoning ────────────────────────────

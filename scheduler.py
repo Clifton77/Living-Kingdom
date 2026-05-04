@@ -1096,7 +1096,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     existing = rm.station_positions(station)
 
     # ── Existing position routing (TRADE signals only) ────────────────────
-    if existing:
+    if existing and sig.decision == "TRADE":
         existing_pos = existing[0]
         dist = _bucket_distance(existing_pos.bucket_lower, sig.top_bucket)
 
@@ -1215,21 +1215,24 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                 )
 
     # ── Phase 4 gate: sole trade-validity check for new entries ──────────
-    # BUY_YES: model's top bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
+    # BUY_YES: best-edge bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
     # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
     #
-    # Selection logic: start from the model's top bucket, then check if Phase 4
-    # validates it (price in 40–70¢ zone). This avoids the previous approach of
-    # picking an arbitrary BUY_YES bucket and post-hoc checking model alignment.
+    # Selection logic: start from the bucket with the highest positive edge (model
+    # disagrees most with market), then check if Phase 4 validates it (40–70¢ zone).
+    # Using max(model_prob) previously selected the consensus bucket where market is
+    # already correct — no edge.
     _p4_entry = None
     _model_top_for_entry = None
     if _conditioned_buckets:
-        _model_top_for_entry = max(_conditioned_buckets, key=lambda b: b.model_prob)
-        _p4_entry = next(
-            (s for s in _p4_latest_signals.get(station, [])
-             if s.action == "BUY_YES" and s.bucket_lower == _model_top_for_entry.bucket_lower),
-            None,
-        )
+        _pos_edge = [b for b in _conditioned_buckets if b.edge > 0]
+        _model_top_for_entry = max(_pos_edge, key=lambda b: b.edge) if _pos_edge else None
+        if _model_top_for_entry is not None:
+            _p4_entry = next(
+                (s for s in _p4_latest_signals.get(station, [])
+                 if s.action == "BUY_YES" and s.bucket_lower == _model_top_for_entry.bucket_lower),
+                None,
+            )
 
     if _p4_entry is None:
         # No Phase 4 BUY_YES on model's top bucket — check for BUY_NO
