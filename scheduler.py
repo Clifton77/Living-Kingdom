@@ -2586,11 +2586,12 @@ def start_scheduler() -> BackgroundScheduler:
     )
 
     # Phase 4 forecast refresh — re-fetch GFS/ECMWF after 12z runs are on Open-Meteo.
-    # 15:25 UTC → 12z GFS available (~15:30); 19:25 UTC → 12z ECMWF available (~18:30).
-    # Fires 5 min before the Tier 1 gate opens so data is ready before entries attempt.
+    # 15:31 UTC → fires after GFS 12z gate (15:30) so fetched_at > cutoff and Tier 1 gate passes.
+    # 19:25 UTC → 12z ECMWF available (~18:30).
+    # Firing before 15:30 caused fetched_at ≈ 15:26 which always failed the ≥15:30 staleness check.
     scheduler.add_job(
         _phase4_refresh,
-        trigger=CronTrigger(hour=15, minute=25, timezone="UTC"),
+        trigger=CronTrigger(hour=15, minute=31, timezone="UTC"),
         id="phase4_refresh_gfs12z",
         name="Phase4 GFS 12z Refresh",
         max_instances=1,
@@ -2636,7 +2637,7 @@ def start_scheduler() -> BackgroundScheduler:
 
     logger.info(
         "Scheduler started | Tier1=~%ds sleep-based | Tier2=%ds TAF | "
-        "Tier3=00/06/12/18Z+30+P4trigger | P4Refresh=15:25Z(GFS)/19:25Z(ECMWF) | "
+        "Tier3=00/06/12/18Z+30+P4trigger | P4Refresh=15:31Z(GFS)/19:25Z(ECMWF) | "
         "Settlement=%02d:00Z + intraday 14-23Z@:00/:30 | "
         "ObsUpdate=10:00Z | Z500=1st@02:00Z | mode=%s",
         TIER1_INTERVAL_SECONDS, TIER2_INTERVAL_SECONDS,
