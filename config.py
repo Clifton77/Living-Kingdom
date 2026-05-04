@@ -433,6 +433,9 @@ MAX_STATION_POSITIONS       = 2      # max simultaneous positions per station
 SIGNIFICANT_REPOSITION_EDGE_MIN = 0.22   # 2-step shift: higher bar than adjacent expansion
 MAJOR_REPOSITION_EDGE_MIN       = 0.25   # 3+ step shift: highest bar, large forecast revision
 
+# Distribution-shift exit — close YES position when model no longer backs the bucket
+DIST_SHIFT_EXIT_FLOOR = 0.15   # exit when open bucket model_prob drops below this
+
 # Liquidity guards — applied before every order
 MIN_MARKET_VOLUME  = 50    # minimum contracts traded in this market before we enter
 MAX_BID_ASK_SPREAD = 0.20  # max acceptable bid-ask spread (20¢); wider = illiquid, retry

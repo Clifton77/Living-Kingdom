@@ -128,11 +128,8 @@ from config import (
     KALSHI_BUCKET_LOWER_TAIL,
     KALSHI_BUCKET_UPPER_TAIL,
     KALSHI_BUCKET_STARTS,
-    EXPANSION_EDGE_MIN,
-    EXPANSION_CURRENT_EDGE_MAX,
     MAX_STATION_POSITIONS,
-    SIGNIFICANT_REPOSITION_EDGE_MIN,
-    MAJOR_REPOSITION_EDGE_MIN,
+    DIST_SHIFT_EXIT_FLOOR,
     MIN_MARKET_VOLUME,
     MAX_BID_ASK_SPREAD,
     LIQUIDITY_RETRY_INTERVAL_MIN,
@@ -891,6 +888,26 @@ def tier1_metar_entries_exits():
                     _cur_bid = snap.no_bid if _is_no else snap.yes_bid
                     _cur_ask = snap.no_ask if _is_no else snap.yes_ask
 
+                    # Distribution-shift exit: Tier 1.5 rebuilds distributions hourly.
+                    # If the open bucket's model_prob has fallen below the floor, the
+                    # model no longer backs it — close now; re-entry fires naturally on
+                    # the next cycle once conviction lands on a new bucket.
+                    if not _is_no and pos_is_today and sig is not None and sig.buckets:
+                        _ob = next(
+                            (b for b in sig.buckets if b.bucket_lower == pos.bucket_lower),
+                            None,
+                        )
+                        if _ob is not None and _ob.model_prob < DIST_SHIFT_EXIT_FLOOR:
+                            _ds_reason = (
+                                f"Distribution shift: B{pos.bucket_lower} "
+                                f"model_prob={_ob.model_prob:.3f} < {DIST_SHIFT_EXIT_FLOOR} floor"
+                            )
+                            logger.warning("[Tier1] %s DIST-SHIFT EXIT %s — %s",
+                                           station, market_id, _ds_reason)
+                            _execute_exit(market_id, pos, _cur_bid, _ds_reason, kalshi, rm)
+                            _last_snapshot_time.pop(market_id, None)
+                            continue
+
                     exit_decision = rm.update_position(
                         market_id=market_id,
                         current_bid=_cur_bid,
@@ -1107,60 +1124,9 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
 
     existing = rm.station_positions(station)
 
-    # ── Existing position routing (TRADE signals only) ────────────────────
-    if existing and sig.decision == "TRADE":
-        existing_pos = existing[0]
-        dist = _bucket_distance(existing_pos.bucket_lower, sig.top_bucket)
-
-        if dist == 0:
-            return  # already in this bucket
-
-        snap_check = kalshi.get_market_snapshot(station, sig.event_date, sig.top_bucket)
-        if snap_check is None or not snap_check.is_open:
-            return
-
-        market_id = snap_check.market_id  # use API ticker (avoids B68 vs T68 mismatch)
-        fresh_edge_check = sig.top_model_prob - snap_check.yes_ask
-        push_event("kalshi_top_update", {
-            "station":        station,
-            "top_bucket":     sig.top_bucket,
-            "yes_ask":        snap_check.yes_ask,
-            "yes_bid":        snap_check.yes_bid,
-            "fresh_edge":     round(fresh_edge_check, 4),
-            "top_model_prob": sig.top_model_prob,
-        })
-
-        if dist == 1:
-            expansion_decision = _evaluate_expansion(
-                existing_pos=existing_pos,
-                new_sig=sig,
-                rm=rm,
-                event_date=sig.event_date,
-            )
-            if expansion_decision["eligible"]:
-                _execute_expansion(existing_pos, sig, market_id, sig.event_date,
-                                   expansion_decision, kalshi, rm)
-            else:
-                logger.info("[Tier1] %s expansion ineligible: %s",
-                            station, expansion_decision["reason"])
-        else:
-            required_edge = (
-                SIGNIFICANT_REPOSITION_EDGE_MIN if dist == 2
-                else MAJOR_REPOSITION_EDGE_MIN
-            )
-            reposition_ok, repo_reason = _evaluate_reposition(
-                existing_pos=existing_pos,
-                new_sig=sig,
-                required_edge=required_edge,
-                rm=rm,
-                event_date=sig.event_date,
-            )
-            if reposition_ok:
-                _execute_reposition(existing_pos, sig, market_id, required_edge,
-                                    dist, sig.event_date, kalshi, rm)
-            else:
-                logger.info("[Tier1] %s reposition blocked (dist=%d): %s",
-                            station, dist, repo_reason)
+    # ── Skip if already positioned — distribution-shift exit (in the exit
+    # pass) closes stale positions; re-entry fires naturally next cycle. ──
+    if existing:
         return
 
     # ── New position — skip if at station limit ───────────────────────────
@@ -1977,271 +1943,6 @@ def _bucket_distance(a: int, b: int) -> int:
         return 0
 
 
-def _evaluate_expansion(
-    existing_pos,
-    new_sig,
-    rm: RiskManager,
-    event_date: date,
-) -> dict:
-    """
-    Evaluate whether the new signal qualifies as an adjacent-bucket expansion.
-
-    Returns a dict with:
-        eligible  : bool
-        reason    : human-readable explanation (always populated for the card)
-        guardrails: dict of each check and its result (for dashboard card)
-    """
-    station     = existing_pos.station
-    old_bucket  = existing_pos.bucket_lower
-    new_bucket  = new_sig.top_bucket
-    new_edge    = new_sig.top_edge
-    old_edge    = existing_pos.last_edge   # last edge stored on position
-
-    # Current local time and event-day awareness
-    tz          = ZoneInfo(STATION_TIMEZONES[station])
-    local_now   = datetime.now(tz)
-    local_hour  = local_now.hour
-    is_event_day = (date.today() == event_date)
-    peak_hour    = get_peak_hour(station, event_date)
-
-    # Before peak hour: always true on Day -1; time-checked on event day
-    before_peak = (not is_event_day) or (local_hour < peak_hour)
-
-    checks = {
-        "adjacent_bucket":    _buckets_adjacent(old_bucket, new_bucket),
-        "new_edge_sufficient": new_edge >= EXPANSION_EDGE_MIN,
-        "old_edge_degraded":   old_edge <= EXPANSION_CURRENT_EDGE_MAX,
-        "before_peak_hour":    before_peak,
-        "expansion_allowed":   rm.can_expand_station(station)[0],
-    }
-
-    ok, expand_reason = rm.can_expand_station(station)
-    checks["expansion_allowed"] = ok
-
-    eligible = all(checks.values())
-
-    if eligible:
-        reason = (
-            f"Adjacent expansion: {old_bucket}°F edge degraded to {old_edge:+.3f} "
-            f"(≤ {EXPANSION_CURRENT_EDGE_MAX}). New bucket {new_bucket}°F edge "
-            f"{new_edge:+.3f} (≥ {EXPANSION_EDGE_MIN}). "
-            f"{'Day-1 window' if not is_event_day else f'Event day, {local_hour:02d}h < peak {peak_hour:02d}h'}. "
-            f"Holding {old_bucket}°F — both positions open, loser exits automatically."
-        )
-    else:
-        failed = [k for k, v in checks.items() if not v]
-        reason = f"Expansion blocked — failed: {', '.join(failed)}"
-        if not ok:
-            reason += f" ({expand_reason})"
-
-    return {"eligible": eligible, "reason": reason, "guardrails": checks}
-
-
-def _evaluate_reposition(
-    existing_pos,
-    new_sig,
-    required_edge: float,
-    rm: RiskManager,
-    event_date: date,
-) -> tuple[bool, str]:
-    """
-    Evaluate whether a significant (2-step) or major (3+step) reposition is allowed.
-
-    Conditions:
-      - New bucket edge ≥ required_edge (0.22 for 2-step, 0.25 for 3+step)
-      - Old position edge has degraded (last_edge ≤ EXPANSION_CURRENT_EDGE_MAX)
-      - Before peak heating hour (no repositioning after peak has passed)
-      - Station is NOT reversal-blocked (blocks new entry, not reposition close)
-
-    Returns (allowed: bool, reason: str).
-    """
-    station    = existing_pos.station
-    old_bucket = existing_pos.bucket_lower
-    new_bucket = new_sig.top_bucket
-    new_edge   = new_sig.top_edge
-    old_edge   = existing_pos.last_edge
-
-    tz         = ZoneInfo(STATION_TIMEZONES[station])
-    local_hour = datetime.now(tz).hour
-    is_event_day = (date.today() == event_date)
-    peak_hour    = get_peak_hour(station, event_date)
-    before_peak  = (not is_event_day) or (local_hour < peak_hour)
-
-    if not before_peak:
-        return False, f"Past peak hour ({local_hour:02d}h ≥ {peak_hour:02d}h) — no reposition after peak"
-
-    if new_edge < required_edge:
-        return False, (
-            f"New bucket {new_bucket}°F edge {new_edge:+.3f} < required {required_edge:+.3f} "
-            f"for {'2-step' if required_edge == SIGNIFICANT_REPOSITION_EDGE_MIN else '3+-step'} reposition"
-        )
-
-    if old_edge > EXPANSION_CURRENT_EDGE_MAX:
-        return False, (
-            f"Old bucket {old_bucket}°F still has edge {old_edge:+.3f} "
-            f"(> {EXPANSION_CURRENT_EDGE_MAX}) — not degraded enough to reposition"
-        )
-
-    # Note: reversal block only prevents NEW independent entries, not repositions
-    # that close the old position first. We intentionally skip that check here.
-    return True, "OK"
-
-
-def _execute_reposition(
-    existing_pos,
-    new_sig,
-    new_market_id: str,
-    required_edge: float,
-    dist: int,
-    event_date: date,
-    kalshi: KalshiClient,
-    rm: RiskManager,
-):
-    """
-    Close the old position (without triggering reversal block) and
-    open a new one in the shifted bucket.
-
-    The close reason is deliberately worded to avoid the "reversal" keyword
-    so the station remains eligible for re-entry via the new position.
-    """
-    station    = new_sig.station
-    old_bucket = existing_pos.bucket_lower
-    new_bucket = new_sig.top_bucket
-    label      = "Significant" if dist == 2 else "Major"
-
-    logger.info(
-        "[Tier3] %s REPOSITION (%s, %d-step): %d°F → %d°F | new_edge=%+.3f (min=%.2f)",
-        station, label, dist, old_bucket, new_bucket, new_sig.top_edge, required_edge,
-    )
-
-    # ── Step 1: Close old position ────────────────────────────────────────
-    old_snap = kalshi.get_market_snapshot(station, event_date, old_bucket)
-    if old_snap is None:
-        logger.error("[Tier3] Cannot fetch old market snapshot for %s bucket %d — aborting reposition", station, old_bucket)
-        return
-
-    close_result = kalshi.close_position(
-        existing_pos.market_id,
-        existing_pos.contracts,
-        old_snap.yes_bid,
-    )
-
-    if not close_result.success:
-        logger.error(
-            "[Tier3] Failed to close old position %s before reposition: %s",
-            existing_pos.market_id, close_result.error,
-        )
-        return
-
-    # Record close — reason avoids "reversal" so station stays unblocked
-    close_reason = (
-        f"{label} forecast reposition: model shifted {dist} buckets "
-        f"({old_bucket}°F → {new_bucket}°F). Closing old position to open new."
-    )
-    realized = rm.close_position(existing_pos.market_id, old_snap.yes_bid, close_reason)
-    get_sheets_logger().log_trade_closed(station, existing_pos.market_id, old_snap.yes_bid, realized, close_reason)
-    logger.info(
-        "[Tier3] Old position closed | %s | realized P/L $%+.4f",
-        existing_pos.market_id, realized,
-    )
-
-    # ── Step 2: Open new position ─────────────────────────────────────────
-    ok, reason = rm.can_open_position(new_sig.kelly_stake_usd, station=station)
-    if not ok:
-        logger.warning("[Tier3] Reposition open blocked for %s: %s", station, reason)
-        return
-
-    max_price = new_sig.top_yes_ask
-
-    result = kalshi.place_order_with_fill_check(
-        market_id=new_market_id,
-        contracts=new_sig.kelly_contracts,
-        limit_price=max_price,
-        side="yes",
-    )
-
-    if result.success:
-        rm.open_position(
-            station=station,
-            market_id=new_market_id,
-            bucket_lower=new_bucket,
-            contracts=new_sig.kelly_contracts,
-            entry_price=max_price,
-            event_date=event_date,
-        )
-        note = (
-            f"{label} reposition ({dist}-step): forecast shifted from {old_bucket}°F "
-            f"to {new_bucket}°F bucket. Old position closed at ${old_snap.yes_bid:.2f} "
-            f"(P/L ${realized:+.4f}). New position opened at ${max_price:.2f}."
-        )
-        if new_sig.reasoning:
-            new_sig.reasoning.expansion_note = note
-        with _latest_signals_lock:
-            _latest_signals[station] = new_sig
-        logger.info("[Tier3] Reposition complete: %s → %s", existing_pos.market_id, new_market_id)
-    else:
-        logger.error(
-            "[Tier3] Reposition new-entry order failed for %s: %s",
-            new_market_id, result.error,
-        )
-        alert_order_failure(station, new_market_id, result.error or "unknown")
-
-
-def _execute_expansion(
-    existing_pos,
-    sig,
-    market_id: str,
-    event_date: date,
-    expansion_decision: dict,
-    kalshi: KalshiClient,
-    rm: RiskManager,
-):
-    """Place order for the new adjacent bucket and record the expansion."""
-    station = sig.station
-    logger.info(
-        "[Tier3] EXPANSION %s → bucket %d°F | edge=%+.3f | %s",
-        station, sig.top_bucket, sig.top_edge, expansion_decision["reason"],
-    )
-
-    ok, reason = rm.can_open_position(sig.kelly_stake_usd, station=station)
-    if not ok:
-        logger.warning("[Tier3] Expansion exposure check failed for %s: %s", station, reason)
-        return
-
-    result = kalshi.place_order(
-        market_id=market_id,
-        contracts=sig.kelly_contracts,
-        limit_price=sig.top_yes_ask,
-        side="yes",
-    )
-
-    if result.success:
-        rm.open_position(
-            station=station,
-            market_id=market_id,
-            bucket_lower=sig.top_bucket,
-            contracts=sig.kelly_contracts,
-            entry_price=sig.top_yes_ask,
-            event_date=event_date,
-        )
-        rm.record_expansion(station)
-
-        logger.info(
-            "[Tier3] Expansion complete: %s | new=%s @ $%.2f | "
-            "holding %s @ $%.2f | combined exposure $%.2f",
-            station, market_id, sig.top_yes_ask,
-            existing_pos.market_id, existing_pos.entry_price,
-            rm.total_exposure(),
-        )
-
-        # Store expansion note in reasoning for dashboard card
-        if sig.reasoning:
-            sig.reasoning.expansion_note      = expansion_decision["reason"]
-            sig.reasoning.expansion_guardrails = expansion_decision.get("guardrails", {})
-        with _latest_signals_lock:
-            _latest_signals[station] = sig
-    else:
-        logger.error("[Tier3] Expansion order failed for %s: %s", market_id, result.error)
 
 
 # ---------------------------------------------------------------------------
