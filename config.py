@@ -503,7 +503,7 @@ STATION_PEAK_HOURS: dict[str, dict[int, int]] = {
 MIN_EDGE             = 0.06   # minimum edge (normalized) required to enter a trade
 MIN_YES_ASK          = 0.04   # floor on Kalshi yes_ask — never enter below 4¢ (market pricing near-impossible)
 MAX_YES_ASK          = 0.55   # ceiling on Kalshi yes_ask — never enter above this price (reduces stop-loss dollar risk)
-MIN_MODEL_PROB_FOR_ENTRY = 0.30   # model Gaussian must assign ≥30% to the entry bucket
+MIN_MODEL_PROB_FOR_ENTRY = 0.45   # model Gaussian must assign ≥45% to the entry bucket (conviction floor)
 MIN_YES_ASK_FOR_ENTRY    = 0.25   # market must not be deeply skeptical; below 25¢ = BUY_NO zone
 MAX_DAILY_ENTRIES_PER_STATION = 2   # max new position opens per station per event date
 

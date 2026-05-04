@@ -1214,57 +1214,47 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                     station, _rm_val, _n_dead,
                 )
 
-    # ── Phase 4 gate: sole trade-validity check for new entries ──────────
-    # BUY_YES: best-edge bucket must be priced 40–70¢ (study: +0.034/+0.081 edge).
-    # BUY_NO:  price 5–30¢  (study: 93.75% win rate; +5.7¢ avg edge per contract).
-    #
-    # Selection logic: start from the bucket with the highest positive edge (model
-    # disagrees most with market), then check if Phase 4 validates it (40–70¢ zone).
-    # Using max(model_prob) previously selected the consensus bucket where market is
-    # already correct — no edge.
-    _p4_entry = None
-    _model_top_for_entry = None
-    if _conditioned_buckets:
-        _pos_edge = [b for b in _conditioned_buckets if b.edge > 0]
-        _model_top_for_entry = max(_pos_edge, key=lambda b: b.edge) if _pos_edge else None
-        if _model_top_for_entry is not None:
-            _p4_entry = next(
-                (s for s in _p4_latest_signals.get(station, [])
-                 if s.action == "BUY_YES" and s.bucket_lower == _model_top_for_entry.bucket_lower),
-                None,
-            )
+    # ── Entry bucket selection ────────────────────────────────────────────
+    # BUY_YES: model must assign ≥45% probability to its top bucket (conviction
+    #          that the temperature will land there) AND have positive edge vs ask.
+    # BUY_NO:  fallback when model conviction is absent; Phase 4 price-zone logic
+    #          (5–30¢ sell zone) still applies unchanged.
+    _model_top_for_entry = (
+        max(_conditioned_buckets, key=lambda b: b.model_prob)
+        if _conditioned_buckets else None
+    )
 
-    if _p4_entry is None:
-        # No Phase 4 BUY_YES on model's top bucket — check for BUY_NO
+    _yes_valid = (
+        _model_top_for_entry is not None
+        and _model_top_for_entry.model_prob >= MIN_MODEL_PROB_FOR_ENTRY
+        and _model_top_for_entry.edge > 0
+    )
+
+    if _yes_valid:
+        entry_bucket = _model_top_for_entry.bucket_lower
+        entry_side   = "yes"
+        logger.info(
+            "[Tier1] %s BUY_YES B%d — model_prob=%.3f ask=%.2f edge=%+.3f",
+            station, entry_bucket,
+            _model_top_for_entry.model_prob,
+            _model_top_for_entry.yes_ask,
+            _model_top_for_entry.edge,
+        )
+    else:
+        # Model not confident enough for YES — check for BUY_NO opportunity
         _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
         _p4_no = max(_no_signals, key=lambda s: s.yes_ask, default=None)
         if _p4_no is None:
-            logger.info("[Tier1] %s Phase4 PASS — no actionable bucket", station)
+            logger.info("[Tier1] %s no entry — model_prob=%.3f < %.2f floor, no BUY_NO",
+                        station,
+                        _model_top_for_entry.model_prob if _model_top_for_entry else 0.0,
+                        MIN_MODEL_PROB_FOR_ENTRY)
             return
         entry_bucket = _p4_no.bucket_lower
         entry_side   = "no"
         logger.info(
             "[Tier1] %s Phase4 BUY_NO B%d yes_ask=%.2f (no_cost=%.2f)",
             station, entry_bucket, _p4_no.yes_ask, 1 - _p4_no.yes_ask,
-        )
-    else:
-        entry_bucket = _p4_entry.bucket_lower
-        entry_side   = "yes"
-
-    if entry_side == "yes":
-        # Gate 1: model Gaussian must assign ≥30% probability to the entry bucket
-        _entry_model_prob = _model_top_for_entry.model_prob if _model_top_for_entry else 0.0
-        if _entry_model_prob < MIN_MODEL_PROB_FOR_ENTRY:
-            logger.info(
-                "[Tier1] %s Phase4 BUY_YES B%d skipped — model_prob %.3f < %.2f floor",
-                station, entry_bucket, _entry_model_prob, MIN_MODEL_PROB_FOR_ENTRY,
-            )
-            return
-
-        logger.info(
-            "[Tier1] %s Phase4 %s B%d ask=%.2f conf=%.3f model_prob=%.3f",
-            station, _p4_entry.action, entry_bucket, _p4_entry.yes_ask,
-            _p4_entry.confidence, _entry_model_prob,
         )
 
     snap = kalshi.get_market_snapshot(station, sig.event_date, entry_bucket)
@@ -1302,9 +1292,8 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         )
         return
 
-    # Price bounds validated by Phase 4 (40–70¢ BUY_YES zone).
-    # MIN_YES_ASK / MAX_YES_ASK guards removed — they would block the
-    # 60–70¢ strong-buy zone that has the highest study edge (+0.081).
+    # Price bounds: YES entries require model_prob ≥ 45% AND edge > 0 (checked above).
+    # No hard yes_ask ceiling — the model conviction check is the gate.
 
     # Daily entry cap: limit re-entries per station per market date
     with _daily_entry_counts_lock:
