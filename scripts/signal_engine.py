@@ -236,6 +236,58 @@ def build_probability_distribution(
     return probs
 
 
+def build_truncated_distribution(
+    forecast_adjusted: float,
+    bias_std: float,
+    running_max_f: float,
+    live_buckets: list[int] | None = None,
+) -> dict[int, float]:
+    """
+    Probability distribution truncated at the observed ASOS running max.
+
+    The daily high is physically guaranteed to be ≥ running_max_f.  Using a
+    truncated normal (rather than zeroing dead buckets) correctly concentrates
+    the remaining mass — a bucket at 35% can jump to 60%+ once lower buckets
+    are ruled out, potentially crossing the 45% conviction threshold.
+
+    Parameters mirror build_probability_distribution; running_max_f is the
+    lower truncation point (observed intraday max in °F).
+    """
+    mu    = forecast_adjusted
+    sigma = max(bias_std, 1.0)
+
+    buckets = live_buckets if live_buckets is not None else all_bucket_lowers()
+
+    if live_buckets is not None and len(live_buckets) >= 2:
+        live_lower_tail = live_buckets[0]
+        live_upper_tail = live_buckets[-1]
+    else:
+        live_lower_tail = KALSHI_BUCKET_LOWER_TAIL
+        live_upper_tail = KALSHI_BUCKET_UPPER_TAIL
+
+    # Truncate at running_max_f — P(daily_high < running_max_f) = 0
+    a = (running_max_f - mu) / sigma
+    dist = scipy_stats.truncnorm(a=a, b=math.inf, loc=mu, scale=sigma)
+
+    probs = {}
+    for lower in buckets:
+        if lower == live_lower_tail:
+            lo, hi = -math.inf, lower + 0.5
+        elif lower == live_upper_tail:
+            lo, hi = lower - 0.5, math.inf
+        else:
+            lo, hi = lower - 0.5, lower + 1.5
+        # truncnorm CDF is 0 for x < running_max_f, so dead buckets naturally → 0
+        p = dist.cdf(hi) - dist.cdf(lo)
+        probs[lower] = float(np.clip(p, 0.0, 1.0))
+
+    total = sum(probs.values())
+    if total > 0:
+        probs = {k: v / total for k, v in probs.items()}
+
+    return probs
+
+
 def condition_on_running_max(
     model_probs: dict[int, float],
     running_max_f: float,

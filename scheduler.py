@@ -13,6 +13,15 @@ Tier 1 — sleep-based, ~5 min after each completion:
     (TIER1_INTERVAL_SECONDS after its own completion).  The loop drifts
     naturally toward ASOS post times, keeping obs freshness ≤ a few min.
 
+Tier 1.5 — every hour at :10 UTC (CronTrigger):
+    Intraday distribution rebuild.  Re-fetches Phase 4 forecasts (latest
+    hourly NBM/ECMWF run), tightens Gaussian sigma with a sqrt-of-time rule
+    as peak hour approaches, then rebuilds each station's bucket probability
+    distribution.  If an ASOS running max is cached, uses a truncated normal
+    (lower bound = observed max) so physically dead buckets get exactly zero
+    mass — more aggressive than zeroing + renormalizing.  Updates
+    _latest_signals in-place; Tier 1 acts on refreshed distributions.
+
 Tier 2 — every 10 minutes (clock-aligned IntervalTrigger):
     TAF amendment monitor.  Detects AMD flags; if found, regenerates the
     signal for that station immediately.  If the new signal flips to
@@ -108,7 +117,7 @@ from utils.alerting import (
     alert_daily_loss_limit,
     alert_settlement_detected,
 )
-from scripts.signal_engine import run_signal_pass, TradeSignal, BucketAnalysis, check_forecast_availability, condition_on_running_max
+from scripts.signal_engine import run_signal_pass, TradeSignal, BucketAnalysis, check_forecast_availability, condition_on_running_max, build_truncated_distribution, build_probability_distribution
 from scripts.taf_interpreter import interpret_taf, get_metar
 from kalshi_client import KalshiClient, build_market_id
 from risk import RiskManager
@@ -151,6 +160,8 @@ from config import (
     MAX_YES_ASK,
     MIN_MODEL_PROB_FOR_ENTRY,
     MAX_DAILY_ENTRIES_PER_STATION,
+    LATE_ENTRY_KELLY_MIN_SCALE,
+    LATE_ENTRY_KELLY_WINDOW_HOURS,
     settlement_station,
 )
 from phase4_signal_generator import (
@@ -191,6 +202,7 @@ _liquidity_retry_counts: dict[str, int] = {}   # key = market_id
 # Last-run timestamps per tier — read by dashboard
 _tier_last_run: dict[str, str] = {
     "tier1":      "never",
+    "tier1.5":    "never",
     "tier2":      "never",
     "tier3":      "never",
     "settlement": "never",
@@ -1376,11 +1388,26 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         "fresh_edge":     round(fresh_edge, 4),
         "top_model_prob": sig.top_model_prob,
     })
+    # Late-entry Kelly scaling — shrink stake linearly as peak hour approaches.
+    # At LATE_ENTRY_KELLY_WINDOW_HOURS out: full Kelly. At 0h: LATE_ENTRY_KELLY_MIN_SCALE.
+    import math as _math
+    if entry_side == "yes":
+        _peak_hr      = get_peak_hour(station, event_date)
+        _stn_now      = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
+        _hrs_to_peak  = max(0, _peak_hr - _stn_now.hour)
+        _time_scale   = max(
+            LATE_ENTRY_KELLY_MIN_SCALE,
+            min(1.0, _hrs_to_peak / float(LATE_ENTRY_KELLY_WINDOW_HOURS)),
+        )
+        if _time_scale < 1.0:
+            logger.info("[Tier1] %s late-entry scale %.2f× (%dh to peak)", station, _time_scale, _hrs_to_peak)
+    else:
+        _time_scale = 1.0
+
     # Size primary entry. NO positions only get half-Kelly (higher win rate but
     # per-contract cost is 70–95¢, so 2% bankroll = 2 contracts max).
-    import math as _math
     splits = 2 if (entry_side == "yes" and _dual_entry_eligible(sig)) else 1
-    primary_budget = round(rm.state.bankroll * MAX_STAKE_PCT / splits, 2)
+    primary_budget = round(rm.state.bankroll * MAX_STAKE_PCT / splits * _time_scale, 2)
 
     ok, reason = rm.can_open_position(primary_budget, station=station)
     if not ok:
@@ -1661,6 +1688,122 @@ def _phase4_refresh():
 
 
 # ---------------------------------------------------------------------------
+# Tier 1.5 — Hourly intraday distribution refresh
+# ---------------------------------------------------------------------------
+
+def tier15_intraday_refresh():
+    """
+    Hourly intraday distribution rebuild for all active stations.
+
+    For each station:
+      1. Re-fetches Phase 4 forecasts from Open-Meteo (picks up the latest
+         hourly NBM/ECMWF run, available ~20 min after each top-of-hour).
+      2. Narrows the Gaussian sigma using a sqrt-of-time rule:
+             sigma = bias_std × sqrt(hours_to_peak / 12)
+         so uncertainty shrinks as the high approaches.
+      3. If a running ASOS max is cached, builds a *truncated* normal
+         (lower bound = observed max) instead of a plain normal — correctly
+         concentrating probability mass on still-possible buckets.
+
+    Updates _latest_signals[station].buckets and top_* fields in-place.
+    No orders placed; Tier 1 acts on the refreshed distributions.
+    """
+    import math as _math
+
+    now_utc = datetime.now(timezone.utc)
+
+    if _in_sleep_window(now_utc):
+        logger.debug("[Tier1.5] Overnight sleep — skipping")
+        return
+
+    rm = get_risk_manager()
+    if rm.is_halted:
+        logger.debug("[Tier1.5] Bot halted — skipping")
+        return
+
+    _tier_last_run["tier1.5"] = now_utc.strftime("%H:%M UTC")
+    push_event("tier_heartbeat", _tier_last_run)
+
+    # Re-fetch Phase 4 forecasts — picks up the latest hourly NBM run
+    try:
+        probe_date = date.today()
+        fresh_p4 = _p4_fetcher.fetch_all(probe_date)
+        _p4_forecasts.update(fresh_p4)
+        logger.info("[Tier1.5] Phase4 forecasts refreshed: %d stations", len(fresh_p4))
+    except Exception as exc:
+        logger.warning("[Tier1.5] Phase4 fetch failed: %s — using cached forecasts", exc)
+
+    with _latest_signals_lock:
+        signals_snapshot = dict(_latest_signals)
+
+    updated = 0
+    for station, sig in signals_snapshot.items():
+        if not sig.buckets or sig.decision == "HARD_SKIP":
+            continue
+        try:
+            p4_fc = _p4_forecasts.get(station)
+            if p4_fc is None or p4_fc.blended_f is None:
+                continue
+            mu = p4_fc.blended_f
+
+            # Sigma narrows with sqrt-of-time as peak approaches
+            station_now   = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
+            peak_hr       = get_peak_hour(station, sig.event_date)
+            hours_to_peak = max(0, peak_hr - station_now.hour)
+            time_frac     = min(1.0, hours_to_peak / 12.0)
+            sigma         = max(sig.bias_std * _math.sqrt(time_frac), 1.0)
+
+            live_buckets = sorted(b.bucket_lower for b in sig.buckets)
+
+            # Use truncated distribution if a fresh running max is cached
+            _rm = _running_max_cache.get(station)
+            rm_val = _rm[0] if (_rm is not None and (now_utc - _rm[1]).total_seconds() < 5400) else None
+
+            if rm_val is not None and rm_val > live_buckets[0]:
+                new_probs = build_truncated_distribution(mu, sigma, rm_val, live_buckets)
+                method = f"truncated@{rm_val:.1f}°F"
+            else:
+                new_probs = build_probability_distribution(mu, sigma, live_buckets)
+                method = "standard"
+
+            new_buckets = [
+                BucketAnalysis(
+                    bucket_lower=b.bucket_lower,
+                    bucket_label=b.bucket_label,
+                    model_prob=round(new_probs.get(b.bucket_lower, 0.0), 4),
+                    kalshi_prob=b.kalshi_prob,
+                    edge=round(new_probs.get(b.bucket_lower, 0.0) - b.kalshi_prob, 4),
+                    yes_ask=b.yes_ask,
+                    yes_bid=b.yes_bid,
+                )
+                for b in sig.buckets
+            ]
+            top = max(new_buckets, key=lambda b: b.model_prob)
+
+            with _latest_signals_lock:
+                live_sig = _latest_signals.get(station)
+                if live_sig is not None and live_sig.event_date == sig.event_date:
+                    live_sig.buckets         = new_buckets
+                    live_sig.top_bucket      = top.bucket_lower
+                    live_sig.top_model_prob  = top.model_prob
+                    live_sig.top_kalshi_prob = top.kalshi_prob
+                    live_sig.top_edge        = top.edge
+                    live_sig.top_yes_ask     = top.yes_ask
+
+            _push_signal_update(sig)
+            updated += 1
+            logger.info(
+                "[Tier1.5] %s (%s) mu=%.1f sigma=%.2f top=B%d prob=%.3f edge=%+.3f",
+                station, method, mu, sigma,
+                top.bucket_lower, top.model_prob, top.edge,
+            )
+
+        except Exception as exc:
+            logger.error("[Tier1.5] %s failed: %s", station, exc, exc_info=True)
+
+    logger.info("[Tier1.5] Refresh complete: %d/%d stations updated", updated, len(signals_snapshot))
+
+
 # Tier 3 — Full signal recompute only (every 6 hours, no order execution)
 # ---------------------------------------------------------------------------
 
@@ -2530,11 +2673,12 @@ def start_scheduler() -> BackgroundScheduler:
     and startup reconciliation.  Only same-day markets are traded.
 
     Schedule summary (all UTC):
-      Tier 1  — sleep-based ~5 min   — METAR + exits + entries (post-ASOS-aligned)
-      Tier 2  — every 10 min         — TAF amendments + auto-close on flip
-      Tier 3  — 00:30 / 06:30 / 12:30 / 18:30  — GFS-aligned signal recompute
-      Sweep   — 09:00               — Morning LCD settlement sweep
-      Sweep   — 14-23Z every 30 min — Intraday settlement check for pending positions
+      Tier 1   — sleep-based ~5 min       — METAR + exits + entries (post-ASOS-aligned)
+      Tier 1.5 — every hour at :10        — Intraday distribution rebuild (NBM + running max)
+      Tier 2   — every 10 min             — TAF amendments + auto-close on flip
+      Tier 3   — 00:30/06:30/12:30/18:30  — GFS-aligned full signal recompute
+      Sweep    — 09:00                    — Morning LCD settlement sweep
+      Sweep    — 14-23Z every 30 min      — Intraday settlement check for pending positions
     """
     global _scheduler, _risk_manager, _kalshi
 
@@ -2571,6 +2715,19 @@ def start_scheduler() -> BackgroundScheduler:
         max_instances=1,
         coalesce=True,
         misfire_grace_time=120,
+    )
+
+    # Tier 1.5 — Hourly intraday distribution refresh.
+    # Fires at :10 past each hour — catches the previous hour's ASOS obs
+    # (~:53-:58) and the latest NBM run (available ~:20-:30 after top-of-hour).
+    scheduler.add_job(
+        tier15_intraday_refresh,
+        trigger=CronTrigger(minute=10, timezone="UTC"),
+        id="tier15_intraday",
+        name="Intraday Distribution Refresh",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
 
     # Tier 3 — GFS cycle aligned: 00:30, 06:30, 12:30, 18:30 UTC

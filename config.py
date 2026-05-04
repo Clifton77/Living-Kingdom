@@ -507,6 +507,11 @@ MIN_MODEL_PROB_FOR_ENTRY = 0.45   # model Gaussian must assign ≥45% to the ent
 MIN_YES_ASK_FOR_ENTRY    = 0.25   # market must not be deeply skeptical; below 25¢ = BUY_NO zone
 MAX_DAILY_ENTRIES_PER_STATION = 2   # max new position opens per station per event date
 
+# Late-entry Kelly scaling — reduce stake as peak hour approaches to reflect
+# the narrowing profit window.  Applies to YES entries only.
+LATE_ENTRY_KELLY_MIN_SCALE   = 0.25  # floor: never below 25% Kelly in the final hour
+LATE_ENTRY_KELLY_WINDOW_HOURS = 4    # hours before peak where scaling begins
+
 # Peak-window TAF scoring — how far around the expected high-temp hour to check
 TAF_PRE_PEAK_WINDOW_HOURS  = 3   # hours before peak to include (approaching storm matters)
 TAF_POST_PEAK_WINDOW_HOURS = 1   # hours after peak to include
