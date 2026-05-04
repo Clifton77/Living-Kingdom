@@ -1201,10 +1201,23 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
     # BUY_NO: fallback when NWP data absent or Gaussian < 45%; Phase 4
     #         price-zone logic (5–30¢ sell zone) still applies unchanged.
 
-    # Step 1: find which bucket the NWP blended forecast falls into
+    # Step 1: determine the target temperature.
+    # ECMWF-preferred stations after 18 UTC: use ecmwf_corrected — if ECMWF has
+    # shifted from the Tier 3 mean, NBM must confirm the ECMWF temp for new entries.
+    # GFS/BLEND stations: NBM drives the mean freely throughout the day.
+    _fc_f   = None
+    _fc_src = "blended"
+    if _p4_fc_gate is not None:
+        _is_ecmwf_stn = (_p4_fc_gate.preferred_model == "ECMWF")
+        if _is_ecmwf_stn and now_utc.hour >= 18 and _p4_fc_gate.ecmwf_corrected is not None:
+            _fc_f   = _p4_fc_gate.ecmwf_corrected
+            _fc_src = "ECMWF"
+        else:
+            _fc_f   = _p4_fc_gate.blended_f
+            _fc_src = "blended"
+
     _nwp_target_bucket = None
-    if _p4_fc_gate is not None and _p4_fc_gate.blended_f is not None and _conditioned_buckets:
-        _fc_f = _p4_fc_gate.blended_f
+    if _fc_f is not None and _conditioned_buckets:
         _live_lowers = sorted(b.bucket_lower for b in _conditioned_buckets)
         _lo_tail, _hi_tail = _live_lowers[0], _live_lowers[-1]
         for _bl in _live_lowers:
@@ -1218,79 +1231,39 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                 _nwp_target_bucket = _bl
                 break
 
-    # Step 2: look up our model's probability for that NWP-indicated bucket
+    # Step 2: NBM distribution must assign ≥45% to the target bucket
     _model_top_for_entry = None
     if _nwp_target_bucket is not None:
         _model_top_for_entry = next(
             (b for b in _conditioned_buckets if b.bucket_lower == _nwp_target_bucket), None
         )
 
-    # Step 3: authoritative-model gate — after ECMWF 12Z arrives (~18 UTC) use
-    # ECMWF alone; before that fall back to GFS; if neither is present, skip.
-    # Prevents entering on an NBM hourly shift that a later full-model run contradicts.
-    _authority_agree = True
-    if _nwp_target_bucket is not None and _p4_fc_gate is not None and _live_lowers:
-        def _bucket_for_f(f: float) -> int | None:
-            for _bl in _live_lowers:
-                if _bl == _lo_tail:
-                    if f <= _bl + 0.5:
-                        return _bl
-                elif _bl == _hi_tail:
-                    return _bl
-                elif _bl - 0.5 <= f < _bl + 1.5:
-                    return _bl
-            return None
-
-        if _p4_fc_gate.ecmwf_corrected is not None:
-            # ECMWF is the only authority — GFS never gates entries
-            _auth_b   = _bucket_for_f(_p4_fc_gate.ecmwf_corrected)
-            _auth_src = "ECMWF"
-            _auth_val = _p4_fc_gate.ecmwf_corrected
-        else:
-            # ECMWF not yet available — NBM runs freely, no gate
-            _auth_b   = _nwp_target_bucket
-            _auth_src = "NBM"
-            _auth_val = _p4_fc_gate.blended_f
-
-        if _auth_b != _nwp_target_bucket:
-            _authority_agree = False
-            logger.info(
-                "[Tier1] %s authority conflict — %s=%.1f→B%s blended→B%d — holding YES",
-                station, _auth_src, _auth_val,
-                str(_auth_b) if _auth_b is not None else "?",
-                _nwp_target_bucket,
-            )
-
     _yes_valid = (
         _model_top_for_entry is not None
         and _model_top_for_entry.model_prob >= MIN_MODEL_PROB_FOR_ENTRY
-        and _authority_agree
     )
 
     if _yes_valid:
         entry_bucket = _model_top_for_entry.bucket_lower
         entry_side   = "yes"
         logger.info(
-            "[Tier1] %s BUY_YES B%d — NWP=%.1f model_prob=%.3f ask=%.2f edge=%+.3f",
+            "[Tier1] %s BUY_YES B%d — %s=%.1f model_prob=%.3f ask=%.2f edge=%+.3f",
             station, entry_bucket,
-            _p4_fc_gate.blended_f,
+            _fc_src, _fc_f,
             _model_top_for_entry.model_prob,
             _model_top_for_entry.yes_ask,
             _model_top_for_entry.edge,
         )
     else:
         if _nwp_target_bucket is not None and _model_top_for_entry is not None:
-            if not _authority_agree:
-                pass  # conflict already logged above
-            else:
-                logger.info(
-                    "[Tier1] %s BUY_YES B%d blocked — NWP=%.1f model_prob=%.3f < %.2f conviction floor",
-                    station, _nwp_target_bucket,
-                    _p4_fc_gate.blended_f if _p4_fc_gate else 0.0,
-                    _model_top_for_entry.model_prob,
-                    MIN_MODEL_PROB_FOR_ENTRY,
-                )
-        elif _p4_fc_gate is None or _p4_fc_gate.blended_f is None:
+            logger.info(
+                "[Tier1] %s BUY_YES B%d blocked — %s=%.1f model_prob=%.3f < %.2f conviction floor",
+                station, _nwp_target_bucket,
+                _fc_src, _fc_f,
+                _model_top_for_entry.model_prob,
+                MIN_MODEL_PROB_FOR_ENTRY,
+            )
+        elif _fc_f is None:
             logger.info("[Tier1] %s no NWP forecast — skipping BUY_YES", station)
         # Fall back to BUY_NO
         _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
@@ -1748,7 +1721,16 @@ def tier15_intraday_refresh():
             p4_fc = _p4_forecasts.get(station)
             if p4_fc is None or p4_fc.blended_f is None:
                 continue
-            mu = p4_fc.blended_f
+
+            # ECMWF-preferred stations use ecmwf_corrected after 18 UTC so
+            # the card and distribution both reflect the authoritative mean.
+            _is_ecmwf_stn15 = (p4_fc.preferred_model == "ECMWF")
+            if _is_ecmwf_stn15 and now_utc.hour >= 18 and p4_fc.ecmwf_corrected is not None:
+                mu        = p4_fc.ecmwf_corrected
+                _src15    = "ECMWF"
+            else:
+                mu        = p4_fc.blended_f
+                _src15    = p4_fc.preferred_model  # GFS / BLEND / ECMWF pre-18Z
 
             # Sigma narrows with sqrt-of-time as peak approaches
             station_now   = now_utc.astimezone(ZoneInfo(STATION_TIMEZONES[station]))
@@ -1787,18 +1769,20 @@ def tier15_intraday_refresh():
             with _latest_signals_lock:
                 live_sig = _latest_signals.get(station)
                 if live_sig is not None and live_sig.event_date == sig.event_date:
-                    live_sig.buckets         = new_buckets
-                    live_sig.top_bucket      = top.bucket_lower
-                    live_sig.top_model_prob  = top.model_prob
-                    live_sig.top_kalshi_prob = top.kalshi_prob
-                    live_sig.top_edge        = top.edge
-                    live_sig.top_yes_ask     = top.yes_ask
+                    live_sig.buckets           = new_buckets
+                    live_sig.top_bucket        = top.bucket_lower
+                    live_sig.top_model_prob    = top.model_prob
+                    live_sig.top_kalshi_prob   = top.kalshi_prob
+                    live_sig.top_edge          = top.edge
+                    live_sig.top_yes_ask       = top.yes_ask
+                    live_sig.forecast_adjusted = mu
+                    live_sig.model_source      = _src15
 
             _push_signal_update(sig)
             updated += 1
             logger.info(
-                "[Tier1.5] %s (%s) mu=%.1f sigma=%.2f top=B%d prob=%.3f edge=%+.3f",
-                station, method, mu, sigma,
+                "[Tier1.5] %s (%s) %s=%.1f sigma=%.2f top=B%d prob=%.3f edge=%+.3f",
+                station, method, _src15, mu, sigma,
                 top.bucket_lower, top.model_prob, top.edge,
             )
 
