@@ -1643,7 +1643,7 @@ def _phase4_refresh():
 # Tier 3 — Full signal recompute only (every 6 hours, no order execution)
 # ---------------------------------------------------------------------------
 
-def tier3_full_signal_pass(event_date: date | None = None):
+def tier3_full_signal_pass(event_date: date | None = None, bypass_sleep: bool = False):
     """
     Full signal recompute for all stations.  Updates _latest_signals so
     Tier 1 can act on fresh distributions at the next 5-min cycle.
@@ -1690,7 +1690,7 @@ def tier3_full_signal_pass(event_date: date | None = None):
         return
 
     now_utc = datetime.now(timezone.utc)
-    if _in_sleep_window(now_utc):
+    if _in_sleep_window(now_utc) and not bypass_sleep:
         logger.info("[Tier3] Overnight sleep window — skipping signal recompute")
         return
 
@@ -2691,7 +2691,8 @@ def trigger_signal_pass_now():
     Runs in a background thread so it doesn't block the HTTP response.
     """
     t = threading.Thread(
-        target=tier3_full_signal_pass, daemon=True, name="manual_signal_pass"
+        target=lambda: tier3_full_signal_pass(bypass_sleep=True),
+        daemon=True, name="manual_signal_pass"
     )
     t.start()
-    logger.info("Manual Tier 3 signal pass triggered")
+    logger.info("Manual Tier 3 signal pass triggered (sleep window bypassed)")
