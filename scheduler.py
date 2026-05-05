@@ -1196,17 +1196,15 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
 
     # ── Entry bucket selection ────────────────────────────────────────────
     # BUY_YES (two-step):
-    #   1. GFS/ECMWF blended forecast determines the target bucket (where the
-    #      NWP model says the high will land).
-    #   2. The Gaussian distribution must assign ≥45% probability to that same
-    #      bucket — confirming our model agrees the high will hit there.
-    # BUY_NO: fallback when NWP data absent or Gaussian < 45%; Phase 4
+    #   1. Open-Meteo (GFS/ECMWF blended) determines the target bucket.
+    #   2. NBM distribution must assign ≥45% to that bucket — confirmation.
+    #      The signal engine centers its Gaussian on NBM, so model_prob IS
+    #      the NBM distribution. NWS/AFM is not used for YES decisions.
+    # BUY_NO: fallback when Open-Meteo absent or NBM <45%; Phase 4
     #         price-zone logic (5–30¢ sell zone) still applies unchanged.
 
-    # Step 1: determine the target temperature.
-    # ECMWF-preferred stations after 18 UTC: use ecmwf_corrected — if ECMWF has
-    # shifted from the Tier 3 mean, NBM must confirm the ECMWF temp for new entries.
-    # GFS/BLEND stations: NBM drives the mean freely throughout the day.
+    # Step 1: Open-Meteo target temperature → target bucket.
+    # After 18 UTC, ECMWF-preferred stations switch to ecmwf_corrected if available.
     _fc_f   = None
     _fc_src = "blended"
     if _p4_fc_gate is not None:
@@ -1228,12 +1226,13 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
                     _nwp_target_bucket = _bl
                     break
             elif _bl == _hi_tail:
-                _nwp_target_bucket = _bl  # upper tail catches everything above
+                _nwp_target_bucket = _bl
             elif _bl - 0.5 <= _fc_f < _bl + 1.5:
                 _nwp_target_bucket = _bl
                 break
 
-    # Step 2: NBM distribution must assign ≥45% to the target bucket
+    # Step 2: NBM distribution must assign ≥45% to the Open-Meteo target bucket.
+    # signal_engine centers its Gaussian on NBM, so model_prob reflects NBM.
     _model_top_for_entry = None
     if _nwp_target_bucket is not None:
         _model_top_for_entry = next(
@@ -1245,28 +1244,34 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
         and _model_top_for_entry.model_prob >= MIN_MODEL_PROB_FOR_ENTRY
     )
 
+    _nbm_f = sig.nbm_forecast_raw
+
     if _yes_valid:
         entry_bucket = _model_top_for_entry.bucket_lower
         entry_side   = "yes"
         logger.info(
-            "[Tier1] %s BUY_YES B%d — %s=%.1f model_prob=%.3f ask=%.2f edge=%+.3f",
+            "[Tier1] %s BUY_YES B%d — %s=%.1f NBM=%.1f nbm_prob=%.3f ask=%.2f",
             station, entry_bucket,
             _fc_src, _fc_f,
+            _nbm_f if _nbm_f is not None else float("nan"),
             _model_top_for_entry.model_prob,
             _model_top_for_entry.yes_ask,
-            _model_top_for_entry.edge,
         )
     else:
         if _nwp_target_bucket is not None and _model_top_for_entry is not None:
             logger.info(
-                "[Tier1] %s BUY_YES B%d blocked — %s=%.1f model_prob=%.3f < %.2f conviction floor",
+                "[Tier1] %s BUY_YES B%d blocked — %s=%.1f NBM=%.1f nbm_prob=%.3f < %.2f",
                 station, _nwp_target_bucket,
                 _fc_src, _fc_f,
+                _nbm_f if _nbm_f is not None else float("nan"),
                 _model_top_for_entry.model_prob,
                 MIN_MODEL_PROB_FOR_ENTRY,
             )
         elif _fc_f is None:
-            logger.info("[Tier1] %s no NWP forecast — skipping BUY_YES", station)
+            logger.info("[Tier1] %s no Open-Meteo forecast — skipping BUY_YES", station)
+        elif _nbm_f is None:
+            logger.info("[Tier1] %s NBM unavailable — cannot confirm %s=%.1f",
+                        station, _fc_src, _fc_f)
         # Fall back to BUY_NO
         _no_signals = [s for s in _p4_latest_signals.get(station, []) if s.action == "BUY_NO"]
         _p4_no = max(_no_signals, key=lambda s: s.yes_ask, default=None)

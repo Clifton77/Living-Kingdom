@@ -1512,9 +1512,12 @@ def generate_signal(
                             pattern, "No Kalshi market data", **_fcst_kwargs)
 
     # ── 6. Probability distribution over live Kalshi buckets ─────────────
+    # Center on NBM when available — the distribution confirms the NWP (Open-Meteo)
+    # target bucket in Tier 1, so it must reflect NBM's view, not NWS/AFM.
     live_buckets = sorted(snapshots.keys())
+    _dist_mu = nbm_forecast_raw if nbm_forecast_raw is not None else forecast_adjusted
     model_probs = build_probability_distribution(
-        forecast_adjusted, bias_std, live_buckets=live_buckets
+        _dist_mu, bias_std, live_buckets=live_buckets
     )
 
     # ── 7. Edge per bucket ────────────────────────────────────────────────
