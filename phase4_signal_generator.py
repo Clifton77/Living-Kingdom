@@ -276,24 +276,28 @@ class Phase4Forecaster:
     def _fetch_model(
         self, lat: float, lon: float, target_date: date, model: str
     ) -> Optional[float]:
-        date_str = target_date.isoformat()
+        # Do NOT pass start_date/end_date — past ~16:00 UTC, Open-Meteo stops
+        # returning data for the current UTC day.  Fetch forecast_days=3 with
+        # local auto-timezone and find the row matching target_date instead.
         params = {
             "latitude":         lat,
             "longitude":        lon,
             "daily":            "temperature_2m_max",
             "temperature_unit": "fahrenheit",
-            "forecast_days":    2,
-            "start_date":       date_str,
-            "end_date":         date_str,
+            "forecast_days":    3,
             "models":           model,
-            "timezone":         "UTC",
+            "timezone":         "auto",
         }
         try:
             r = requests.get(_OM_URL, params=params, timeout=_OM_TIMEOUT)
             r.raise_for_status()
-            temps = r.json().get("daily", {}).get("temperature_2m_max", [])
-            if temps and temps[0] is not None:
-                return float(temps[0])
+            daily = r.json().get("daily", {})
+            dates = daily.get("time", [])
+            temps = daily.get("temperature_2m_max", [])
+            date_str = target_date.isoformat()
+            for d, t in zip(dates, temps):
+                if d == date_str and t is not None:
+                    return float(t)
         except Exception as exc:
             logger.debug("Open-Meteo %s (%.3f,%.3f): %s", model, lat, lon, exc)
         return None
