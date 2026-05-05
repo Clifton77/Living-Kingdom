@@ -1339,18 +1339,25 @@ def generate_signal(
 
     # ── 2. Forecast (Phase 4 GFS/ECMWF preferred; NWS+NBM fallback) ─────
     if p4_forecast_f is not None:
-        # Phase 4 supplies a bias-corrected station-dependent model forecast.
-        # MOS/NBM divergence checks are not meaningful against this source.
+        # Phase 4 (Open-Meteo) determines the target bucket.
+        # Fetch NBM independently so the Gaussian centers on a true second opinion,
+        # not a self-consistency check against the same Open-Meteo source.
         forecast_raw       = p4_forecast_f
         mos_forecast_raw   = None
-        nbm_forecast_raw   = None
+        nbm_forecast_raw   = fetch_nbm_forecast(station, event_date)
         model_divergence_f = None
-        nbm_divergence_f   = None
+        nbm_divergence_f   = (
+            round(forecast_raw - nbm_forecast_raw, 1)
+            if nbm_forecast_raw is not None else None
+        )
         model_source_used  = p4_model
         logger.info(
-            "%s Phase4 forecast [%s]: %.1f°F",
+            "%s Phase4 [%s]: %.1f°F  NBM: %s",
             station, p4_model, forecast_raw,
+            f"{nbm_forecast_raw:.1f}°F" if nbm_forecast_raw is not None else "unavailable",
         )
+        if nbm_divergence_f is not None:
+            logger.info("%s Phase4/NBM divergence: %+.1f°F", station, nbm_divergence_f)
     else:
         forecast_raw, mos_forecast_raw, model_source_used, nbm_forecast_raw = (
             fetch_live_forecast(station, event_date)
