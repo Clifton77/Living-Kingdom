@@ -393,6 +393,8 @@ def get_risk_manager() -> RiskManager:
     global _risk_manager
     if _risk_manager is None:
         _risk_manager = RiskManager()
+    else:
+        _risk_manager._reset_if_new_day()
     return _risk_manager
 
 def get_kalshi() -> KalshiClient:
