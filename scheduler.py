@@ -1216,7 +1216,7 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             _fc_src = "ECMWF"
         else:
             _fc_f   = _p4_fc_gate.blended_f
-            _fc_src = "blended"
+            _fc_src = getattr(_p4_fc_gate, "blended_source", "blended")
 
     _nwp_target_bucket = None
     if _fc_f is not None and _conditioned_buckets:

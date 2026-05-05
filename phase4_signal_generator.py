@@ -235,6 +235,7 @@ class Phase4ForecastData:
     ecmwf_corrected: Optional[float]   # ECMWF minus station bias
     blended_f:       Optional[float]   # model-selected / blended output
     preferred_model: str = "ECMWF"    # "GFS", "ECMWF", or "BLEND"
+    blended_source:  str = "ECMWF"    # actual model driving blended_f: "GFS", "ECMWF", "BLEND", "GFS_fallback"
     fetched_at:      datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -317,13 +318,27 @@ class Phase4Forecaster:
             pref = _MODEL_PREF.get(station, "ECMWF")
             if pref == "GFS":
                 blended = gfs_c
+                blended_src = "GFS"
             elif pref == "BLEND":
                 if gfs_c is not None and ecmwf_c is not None:
                     blended = round((gfs_c + ecmwf_c) / 2.0, 1)
                 else:
                     blended = gfs_c if gfs_c is not None else ecmwf_c
+                blended_src = "BLEND"
             else:
-                blended = ecmwf_c
+                # ECMWF preferred — fall back to GFS if ECMWF not yet ingested
+                # (ECMWF 12z disseminates ~18:30 UTC; GFS 12z available ~15:30 UTC)
+                if ecmwf_c is not None:
+                    blended = ecmwf_c
+                    blended_src = "ECMWF"
+                else:
+                    blended = gfs_c
+                    blended_src = "GFS_fallback"
+                    if gfs_c is not None:
+                        logger.info(
+                            "[Phase4] %s ECMWF unavailable — using GFS fallback %.1f°F for target",
+                            station, gfs_c,
+                        )
 
             results[station] = Phase4ForecastData(
                 station=station,
@@ -334,13 +349,14 @@ class Phase4Forecaster:
                 ecmwf_corrected=ecmwf_c,
                 blended_f=blended,
                 preferred_model=pref,
+                blended_source=blended_src,
             )
             logger.debug(
-                "[Phase4] %s  GFS %.1f→%.1f  ECMWF %.1f→%.1f  blend=%.1f [%s]",
+                "[Phase4] %s  GFS %.1f→%.1f  ECMWF %.1f→%.1f  blend=%.1f [%s/%s]",
                 station,
                 gfs_raw   or 0.0, gfs_c   or 0.0,
                 ecmwf_raw or 0.0, ecmwf_c or 0.0,
-                blended   or 0.0, pref,
+                blended   or 0.0, pref, blended_src,
             )
 
         logger.info("[Phase4] fetch_all complete: %d stations for %s", len(results), target_date)
