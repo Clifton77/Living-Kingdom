@@ -1126,14 +1126,12 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
 
     existing = rm.station_positions(station)
 
-    # ── Skip if already positioned — distribution-shift exit (in the exit
-    # pass) closes stale positions; re-entry fires naturally next cycle. ──
-    if existing:
-        return
-
-    # ── New position — skip if at station limit ───────────────────────────
+    # ── Station position limit ────────────────────────────────────────────
     if len(existing) >= MAX_STATION_POSITIONS:
         return
+
+    # Track which buckets are already held so we don't double-enter same bucket
+    _existing_buckets = {p.bucket_lower for p in existing}
 
     # ── 12z model gate: hold all entries until 12z GFS is confirmed on Open-Meteo ──
     # Universal gate: 15:30 UTC for all stations (GFS 12z ready).
@@ -1284,6 +1282,10 @@ def _tier1_entry_pass(station: str, event_date, now_utc, rm, kalshi):
             "[Tier1] %s Phase4 BUY_NO B%d yes_ask=%.2f (no_cost=%.2f)",
             station, entry_bucket, _p4_no.yes_ask, 1 - _p4_no.yes_ask,
         )
+
+    if entry_bucket in _existing_buckets:
+        logger.info("[Tier1] %s B%d already held — skipping duplicate entry", station, entry_bucket)
+        return
 
     snap = kalshi.get_market_snapshot(station, sig.event_date, entry_bucket)
     if snap is None or not snap.is_open:
