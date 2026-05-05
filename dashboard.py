@@ -23,6 +23,11 @@ from zoneinfo import ZoneInfo
 
 _BUILD_VERSION = str(int(time.time()))
 
+# Throttle: reconcile with Kalshi at most once per minute when serving state
+_last_reconcile_ts: float = 0.0
+_reconcile_lock = threading.Lock()
+_RECONCILE_INTERVAL = 60.0  # seconds
+
 import config as cfg
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from utils.events import get_alert_history, push_event, register_client, unregister_client
@@ -173,9 +178,24 @@ def _enrich_position_display(pos: dict, now_utc: datetime) -> dict:
 
 def _get_full_state() -> dict:
     """Build a complete state snapshot for initial page render or /api/state."""
-    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_trade_history
+    global _last_reconcile_ts
+    from scheduler import get_risk_manager, get_latest_signals, _tier_last_run, get_trade_history, get_kalshi
 
-    rm      = get_risk_manager()
+    rm = get_risk_manager()
+
+    # Sync local position state against Kalshi at most once per minute.
+    # Removes phantom positions (unfilled, already settled, or from a prior
+    # session) so the carousel and open-count reflect Kalshi reality.
+    now_ts = time.time()
+    with _reconcile_lock:
+        if now_ts - _last_reconcile_ts >= _RECONCILE_INTERVAL:
+            try:
+                kalshi = get_kalshi()
+                rm.reconcile_with_kalshi(kalshi)
+                _last_reconcile_ts = now_ts
+            except Exception as exc:
+                logger.debug("Dashboard reconcile skipped: %s", exc)
+
     summary = rm.summary()
     signals = get_latest_signals()
 

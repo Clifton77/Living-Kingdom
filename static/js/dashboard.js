@@ -528,8 +528,12 @@ function updateSummaryStrip(s) {
   setPnl('stat-daily-pnl',   s.daily_pnl);
   setPnl('stat-total-pnl',   s.realized_pnl);
   setText('stat-win-rate',   `${s.win_rate}%`);
-  setText('stat-open',       s.open_positions);
-  updatePositionCount(s.open_positions);
+  // Drive the open-count from the DOM carousel — the server count can lag
+  // behind Kalshi reality (phantom positions, unsettled trades).  The carousel
+  // is the authoritative visual source; use it for both the stat card and badge.
+  const domCount = document.querySelectorAll('#carousel-inner .carousel-item').length;
+  setText('stat-open',  domCount);
+  updatePositionCount(domCount);
 
   const haltBadge = document.getElementById('halt-badge');
   if (haltBadge) haltBadge.classList.toggle('d-none', !s.is_halted);
