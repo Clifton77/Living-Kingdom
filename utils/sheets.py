@@ -244,6 +244,35 @@ class GoogleSheetsLogger:
         except Exception as exc:
             logger.warning("log_trade_opened failed: %s", exc)
 
+    def log_trade_opened_v2(self, station: str, signal) -> None:
+        """Append an OPEN row for a v2 HRRR divergence trade.
+        Reuses the Trade Log tab; v2-specific fields go in columns 12-16."""
+        try:
+            stake = round(signal.kalshi_price * signal.contracts, 2)
+            run_str = signal.run_time.strftime("%Hz") if signal.run_time else ""
+            row = [[
+                self._local_time(station),
+                str(signal.event_date),
+                station,
+                signal.bucket_lower,
+                signal.side,
+                round(signal.kalshi_price, 4),
+                "",                              # exit price — filled on close
+                signal.contracts,
+                stake,
+                "",                              # P&L — filled on close
+                "",                              # exit reason — filled on close
+                signal.signal_type,              # col 12 (was: cluster_id)
+                round(signal.hrrr_delta_f, 1),   # col 13 (was: season)
+                round(signal.p_model, 4),         # col 14 (was: pattern_confidence)
+                run_str,                         # col 15 (was: weather_condition)
+                round(signal.edge, 4),           # col 16 (was: edge_at_entry)
+                "", "", "",
+            ]]
+            self._append(SHEET_TABS["trade_log"], row)
+        except Exception as exc:
+            logger.warning("log_trade_opened_v2 failed: %s", exc)
+
     def log_trade_closed(
         self,
         station: str,

@@ -42,6 +42,7 @@ from signal_engine_v2 import HRRRSignalEngine, TradeSignal
 from utils.asos_live import get_best_obs_temp, get_running_max
 from utils.hrrr_fetcher import fetch_station_tmax
 from utils.peak_hours import get_peak_hour
+from utils.sheets import get_sheets_logger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,12 +67,13 @@ class OpenPositionV2:
     event_date:   date
     entry_time:   datetime
     # Updated each poll cycle
-    current_bid:    float          = 0.0
-    current_ask:    float          = 0.0
-    unrealized_pnl: float          = 0.0
-    current_obs_f:  float | None   = None   # latest METAR temp
-    running_max_f:  float | None   = None   # today's high so far (IEM 1-min)
-    last_checked:   datetime | None = None
+    current_bid:       float          = 0.0
+    current_ask:       float          = 0.0
+    unrealized_pnl:    float          = 0.0
+    current_obs_f:     float | None   = None   # latest METAR temp
+    running_max_f:     float | None   = None   # today's high so far (IEM 1-min)
+    last_checked:      datetime | None = None
+    pending_settlement: bool           = False  # market closed, awaiting Kalshi confirmation
 
 
 _open_positions: dict[str, OpenPositionV2] = {}
@@ -79,6 +81,12 @@ _station_snapshots: dict[str, list[MarketSnapshot]] = {}  # all buckets per stat
 _positions_lock = threading.Lock()
 _trade_history: list[dict] = []
 _engine: HRRRSignalEngine | None = None
+
+# Running P&L counters — updated by _record_settlement()
+_bankroll:   float = STARTING_BANKROLL
+_daily_pnl:  float = 0.0
+_wins_today:  int  = 0
+_losses_today: int = 0
 
 _STATE_DIR       = Path(__file__).parent / "state"
 _POSITIONS_FILE  = _STATE_DIR / "positions.json"
@@ -95,14 +103,15 @@ def _save_positions() -> None:
     with _positions_lock:
         for mid, pos in _open_positions.items():
             data[mid] = {
-                "station":      pos.station,
-                "market_id":    pos.market_id,
-                "bucket_lower": pos.bucket_lower,
-                "contracts":    pos.contracts,
-                "entry_price":  pos.entry_price,
-                "side":         pos.side,
-                "event_date":   pos.event_date.isoformat(),
-                "entry_time":   pos.entry_time.isoformat(),
+                "station":           pos.station,
+                "market_id":         pos.market_id,
+                "bucket_lower":      pos.bucket_lower,
+                "contracts":         pos.contracts,
+                "entry_price":       pos.entry_price,
+                "side":              pos.side,
+                "event_date":        pos.event_date.isoformat(),
+                "entry_time":        pos.entry_time.isoformat(),
+                "pending_settlement": pos.pending_settlement,
             }
     _POSITIONS_FILE.write_text(json.dumps(data, indent=2))
 
@@ -123,6 +132,7 @@ def _load_positions() -> None:
                 side=d["side"],
                 event_date=date.fromisoformat(d["event_date"]),
                 entry_time=datetime.fromisoformat(d["entry_time"]),
+                pending_settlement=d.get("pending_settlement", False),
             )
             count += 1
         logger.info("Restored %d open position(s) from disk", count)
@@ -169,6 +179,184 @@ def _load_hrrr_state(engine: HRRRSignalEngine) -> None:
         logger.info("Restored HRRR state for %d station(s) from disk", count)
     except Exception as exc:
         logger.warning("Failed to load HRRR state: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Settlement helpers
+# ---------------------------------------------------------------------------
+
+def _record_settlement(pos: OpenPositionV2, settlement_value: float, reason: str) -> None:
+    """
+    Record a settled position without placing any Kalshi order.
+    settlement_value: per-contract payout (0.0 = lost, 1.0 = won — from Kalshi's perspective).
+    For a YES position that won: payout = 1.0/contract; for YES that lost: payout = 0.0.
+    For a NO position that won: payout = 1.0/contract; for NO that lost: payout = 0.0.
+    pnl = (settlement_value - entry_price) * contracts
+    """
+    global _bankroll, _daily_pnl, _wins_today, _losses_today
+
+    pnl = (settlement_value - pos.entry_price) * pos.contracts
+    _bankroll  += pnl
+    _daily_pnl += pnl
+    if pnl >= 0:
+        _wins_today  += 1
+    else:
+        _losses_today += 1
+
+    with _positions_lock:
+        _open_positions.pop(pos.market_id, None)
+
+    _save_positions()
+
+    _trade_history.append({
+        "ts":           datetime.now(timezone.utc).strftime("%H:%Mz"),
+        "type":         "SETTLE",
+        "station":      pos.station,
+        "side":         pos.side,
+        "bucket_lower": pos.bucket_lower,
+        "contracts":    pos.contracts,
+        "entry_price":  pos.entry_price,
+        "exit_price":   settlement_value,
+        "pnl":          round(pnl, 2),
+        "reason":       reason,
+    })
+
+    logger.info(
+        "[Settlement] %s  entry=%.2f  settle=%.2f  pnl=$%+.2f  bankroll=$%.2f  reason=%s",
+        pos.market_id, pos.entry_price, settlement_value, pnl, _bankroll, reason,
+    )
+
+
+def _build_summary() -> dict:
+    total_trades = sum(1 for t in _trade_history if t["type"] in ("CLOSE", "SETTLE"))
+    wins   = sum(1 for t in _trade_history if t["type"] in ("CLOSE", "SETTLE") and t.get("pnl", 0) >= 0)
+    losses = total_trades - wins
+    return {
+        "bankroll":          round(_bankroll, 2),
+        "available_capital": round(_bankroll, 2),
+        "daily_pnl":         round(_daily_pnl, 2),
+        "realized_pnl":      round(_bankroll - STARTING_BANKROLL, 2),
+        "open_positions":    len(_open_positions),
+        "trade_count_today": total_trades,
+        "wins_today":        wins,
+        "losses_today":      losses,
+        "win_rate":          round(wins / total_trades * 100, 1) if total_trades > 0 else 0.0,
+    }
+
+
+def _run_settlement_sweep(client: KalshiClient) -> None:
+    """
+    Check every pending-settlement position (and any position whose event_date
+    is in the past) against Kalshi.  For each confirmed settlement:
+      - call _record_settlement()
+      - log to Google Sheets (trade closed + dashboard)
+    Runs at startup (to catch overnight settlements) and every morning at 09:00z.
+    """
+    sheets = get_sheets_logger()
+    now_utc = datetime.now(timezone.utc)
+    today   = now_utc.date()
+
+    with _positions_lock:
+        candidates = {
+            mid: pos for mid, pos in _open_positions.items()
+            if pos.pending_settlement or pos.event_date < today
+        }
+
+    if not candidates:
+        logger.info("[SettlementSweep] No pending positions to check.")
+        return
+
+    logger.info("[SettlementSweep] Checking %d candidate(s)…", len(candidates))
+
+    # Fetch bulk feed for all relevant event dates
+    dates_needed = {pos.event_date for pos in candidates.values()}
+    feed_results: dict[str, float] = {}
+    for ev_date in dates_needed:
+        try:
+            feed_results.update(client.get_settled_markets(ev_date))
+        except Exception as exc:
+            logger.warning("[SettlementSweep] feed fetch failed for %s: %s", ev_date, exc)
+
+    settled_count = 0
+    for market_id, pos in candidates.items():
+        # Try the bulk feed first (fast, but misses zero-payout positions)
+        if market_id in feed_results:
+            settle_val = feed_results[market_id]
+            reason = "settlement-feed"
+        else:
+            # Per-market fallback — handles losing positions the feed skips
+            settle_val = client.get_market_result(market_id)
+            if settle_val is None:
+                logger.info("[SettlementSweep] %s not yet finalized — will retry next sweep", market_id)
+                continue
+            reason = "market-result"
+
+        _record_settlement(pos, settle_val, reason)
+        sheets.log_trade_closed(
+            station=pos.station,
+            market_id=market_id,
+            exit_price=settle_val,
+            realized_pnl=(settle_val - pos.entry_price) * pos.contracts,
+            exit_reason=f"SETTLED ({reason})",
+        )
+        settled_count += 1
+
+    if settled_count > 0:
+        summary = _build_summary()
+        mode = "DRY RUN" if DRY_RUN else "LIVE"
+        sheets.update_dashboard(summary, mode=mode)
+        logger.info(
+            "[SettlementSweep] Settled %d position(s)  bankroll=$%.2f  daily_pnl=$%+.2f",
+            settled_count, _bankroll, _daily_pnl,
+        )
+
+        # EOD summary if it's the first sweep after midnight ET
+        et_now = now_utc.astimezone(pytz.timezone("America/New_York"))
+        if et_now.hour < 10:
+            sheets.log_eod_summary(
+                summary=summary,
+                session_date=today.isoformat(),
+                mode=mode,
+            )
+
+
+class SettlementSweep:
+    """
+    Daemon thread: runs _run_settlement_sweep() once on startup, then every
+    day at 09:00 UTC (after Kalshi overnight settlement finishes around 08:00z).
+    """
+
+    _DAILY_RUN_UTC_HOUR = 9
+
+    def __init__(self, client: KalshiClient):
+        self._client = client
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="settlement-sweep"
+        )
+
+    def start(self) -> None:
+        logger.info("SettlementSweep started")
+        self._thread.start()
+
+    def _loop(self) -> None:
+        # Immediate startup sweep — catch anything that settled overnight
+        try:
+            _run_settlement_sweep(self._client)
+        except Exception as exc:
+            logger.warning("[SettlementSweep] startup sweep error: %s", exc)
+
+        while True:
+            now = datetime.now(timezone.utc)
+            target = now.replace(hour=self._DAILY_RUN_UTC_HOUR, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            sleep_s = (target - now).total_seconds()
+            logger.info("[SettlementSweep] Next sweep at %s (%.0fs)", target.strftime("%H:%Mz"), sleep_s)
+            time.sleep(sleep_s)
+            try:
+                _run_settlement_sweep(self._client)
+            except Exception as exc:
+                logger.warning("[SettlementSweep] daily sweep error: %s", exc)
 
 
 def _station_hrrr_coords(station: str) -> tuple[float, float]:
@@ -248,6 +436,7 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
             "edge":         round(signal.edge, 3),
         })
         _save_positions()
+        get_sheets_logger().log_trade_opened_v2(signal.station, signal)
     else:
         logger.error("%s: order failed — %s", signal.station, result.error)
     return result.success
@@ -262,7 +451,14 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
         pos.market_id, pos.contracts, bid, entry_side=pos.side.lower()
     )
     if result.success:
+        global _bankroll, _daily_pnl, _wins_today, _losses_today
         pnl = (bid - pos.entry_price) * pos.contracts
+        _bankroll  += pnl
+        _daily_pnl += pnl
+        if pnl >= 0:
+            _wins_today   += 1
+        else:
+            _losses_today += 1
         with _positions_lock:
             _open_positions.pop(pos.market_id, None)
         _save_positions()
@@ -279,9 +475,17 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
             "reason":       reason,
         })
         logger.info(
-            "[Exit] Complete: %s  entry=%.2f  exit=%.2f  pnl=$%+.2f",
-            pos.market_id, pos.entry_price, bid, pnl,
+            "[Exit] Complete: %s  entry=%.2f  exit=%.2f  pnl=$%+.2f  bankroll=$%.2f",
+            pos.market_id, pos.entry_price, bid, pnl, _bankroll,
         )
+        get_sheets_logger().log_trade_closed(
+            station=pos.station,
+            market_id=pos.market_id,
+            exit_price=bid,
+            realized_pnl=pnl,
+            exit_reason=reason,
+        )
+        get_sheets_logger().update_dashboard(_build_summary(), mode="DRY RUN" if DRY_RUN else "LIVE")
     else:
         logger.error("[Exit] Failed: %s — %s", pos.market_id, result.error)
     return result.success
@@ -453,9 +657,11 @@ class ExitMonitor:
         market = next((m for m in markets if m.market_id == market_id), None)
 
         if market is None or not market.is_open:
-            logger.info("[ExitMonitor] %s market closed — pending settlement", market_id)
             with _positions_lock:
-                _open_positions.pop(market_id, None)
+                if market_id in _open_positions and not _open_positions[market_id].pending_settlement:
+                    _open_positions[market_id].pending_settlement = True
+                    _save_positions()
+                    logger.info("[ExitMonitor] %s market closed — marked pending settlement", market_id)
             return
 
         current_bid = market.yes_bid if pos.side == "YES" else (1.0 - market.yes_ask)
@@ -526,6 +732,10 @@ def main() -> None:
 
     monitor = ExitMonitor(client, _engine)
     monitor.start()
+
+    sweep = SettlementSweep(client)
+    sweep.start()
+
     logger.info(
         "scheduler_v2 started — dry_run=%s  restored %d position(s)",
         DRY_RUN, len(_open_positions),
