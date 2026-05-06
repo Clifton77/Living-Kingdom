@@ -238,7 +238,20 @@ class HRRRSignalEngine:
 
         # ── HRRR divergence: compare to previous run ──────────────────────
         if state.last_tmax_f is not None:
-            delta = snapshot.tmax_corrected_f - state.last_tmax_f
+            # If the gap between runs is > 1.5h (we skipped a run due to HRRR
+            # availability delay), normal diurnal drift can exceed HRRR_MATERIAL_MOVE_F
+            # without any real forecast shift.  Reset the baseline and skip this cycle.
+            run_gap_h = (
+                (snapshot.run_time - state.last_run_time).total_seconds() / 3600
+                if state.last_run_time is not None else 1.0
+            )
+            if run_gap_h > 1.5:
+                logger.info(
+                    "%s: run gap %.1fh > 1.5h — resetting baseline, skipping divergence check",
+                    station, run_gap_h,
+                )
+            else:
+                delta = snapshot.tmax_corrected_f - state.last_tmax_f
 
             if abs(delta) >= HRRR_MATERIAL_MOVE_F:
                 new_bucket = tmax_to_bucket(snapshot.tmax_corrected_f, markets)

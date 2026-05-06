@@ -227,8 +227,29 @@ def run_cycle(
     coords = {s: _station_hrrr_coords(s) for s in active}
     peaks = {s: _peak_utc(s, event_date) for s in active}
 
-    # Fetch HRRR
+    # Fetch HRRR — retry every 5 min for up to 25 min while current run posts,
+    # then fall back to the previous hour's run as a last resort.
+    _HRRR_RETRY_INTERVAL = 300   # seconds between retries
+    _HRRR_MAX_RETRIES    = 5     # 5 retries = up to 25 min of waiting
+
     tmax_by_station = fetch_station_tmax(run_time, coords, peaks)
+    for _attempt in range(_HRRR_MAX_RETRIES):
+        if any(v is not None for v in tmax_by_station.values()):
+            break
+        logger.info(
+            "HRRR %sz not available yet — retry %d/%d in %ds",
+            run_time.strftime("%H"), _attempt + 1, _HRRR_MAX_RETRIES, _HRRR_RETRY_INTERVAL,
+        )
+        time.sleep(_HRRR_RETRY_INTERVAL)
+        tmax_by_station = fetch_station_tmax(run_time, coords, peaks)
+
+    if not any(v is not None for v in tmax_by_station.values()):
+        prev_run = run_time - timedelta(hours=1)
+        logger.info(
+            "HRRR %sz unavailable after %d retries — falling back to %sz",
+            run_time.strftime("%H"), _HRRR_MAX_RETRIES, prev_run.strftime("%H"),
+        )
+        tmax_by_station = fetch_station_tmax(prev_run, coords, peaks)
 
     for station in active:
         raw_tmax = tmax_by_station.get(station)
