@@ -213,7 +213,7 @@ def _record_settlement(pos: OpenPositionV2, settlement_value: float, reason: str
     _save_positions()
 
     _trade_history.append({
-        "ts":           datetime.now(timezone.utc).strftime("%H:%Mz"),
+        "ts":           datetime.now(timezone.utc).isoformat(),
         "type":         "SETTLE",
         "station":      pos.station,
         "side":         pos.side,
@@ -428,7 +428,7 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
         with _positions_lock:
             _open_positions[signal.market_id] = pos
         _trade_history.append({
-            "ts":           now.strftime("%H:%Mz"),
+            "ts":           now.isoformat(),
             "type":         "OPEN",
             "station":      signal.station,
             "side":         signal.side,
@@ -467,7 +467,7 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
             _open_positions.pop(pos.market_id, None)
         _save_positions()
         _trade_history.append({
-            "ts":           datetime.now(timezone.utc).strftime("%H:%Mz"),
+            "ts":           datetime.now(timezone.utc).isoformat(),
             "type":         "CLOSE",
             "station":      pos.station,
             "side":         pos.side,
