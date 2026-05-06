@@ -607,6 +607,50 @@ DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")   # required — set in
 # ---------------------------------------------------------------------------
 CLUSTER_PKL = CENTROIDS_PKL   # pattern_classifier.py uses this name
 
+# ---------------------------------------------------------------------------
+# HRRR Rebuild — new signal engine constants
+# ---------------------------------------------------------------------------
+
+# Stake sizing
+STARTING_BANKROLL  = 109.0   # current bankroll in USD
+KELLY_FRAC         = 0.50    # half Kelly
+MIN_STAKE          = 1.00    # Kalshi minimum per trade ($)
+MAX_STAKE_PCT      = 0.02    # 2% hard cap per trade
+
+# HRRR signal thresholds
+HRRR_MATERIAL_MOVE_F          = 2.0   # minimum run-to-run delta to trigger signal (°F)
+HRRR_COLD_BIAS_F              = 1.7   # apply before bucket mapping (HRRR runs cold)
+MORNING_OVERCONFIDENCE_THRESH = 0.35  # flag buckets priced >= 35% at morning scan
+HRRR_START_UTC_HOUR           = 12    # 12z run — first useful same-day run
+HRRR_START_UTC_MINUTE         = 30    # available ~30 min after run time
+
+# Per-station HRRR sigma (°F) from 14-day calibration study (Apr 17 – May 1 2026)
+# Keyed by Kalshi station label. Used to compute P(peak bucket) for Kelly sizing.
+# KDEN: only 2 data points — treat as provisional.
+# KSFO, KSEA: MAE >> sigma (systematic marine layer bias) — flagged for special handling.
+HRRR_STATION_SIGMA: dict[str, float] = {
+    "KPHX": 0.94,
+    "KLAS": 1.14,
+    "KLAX": 1.23,
+    "KDEN": 1.28,   # provisional — only 2 obs
+    "KMIA": 2.05,
+    "KJFK": 2.33,
+    "KHOU": 2.49,
+    "KSEA": 2.63,   # flagged: marine layer bias
+    "KOKC": 2.77,
+    "KBOS": 2.77,
+    "KMSY": 2.87,
+    "KATL": 3.01,
+    "KSFO": 3.09,   # flagged: marine layer bias
+    "KMSP": 3.18,
+    "KPHL": 3.22,
+    "KAUS": 3.74,
+    "KSAT": 3.81,
+    "KDCA": 4.05,
+    "KORD": 4.60,
+    "KDFW": 5.14,
+}
+
 
 # ---------------------------------------------------------------------------
 # Settlement station helper
