@@ -120,6 +120,16 @@
     .log-line:last-child { border-bottom: none; }
     .log-ts   { color: #4a5060; margin-right: 6px; }
 
+    /* ── Trade history entries ──────────────────────── */
+    .hist-entry  { padding: 7px 0; border-bottom: 1px solid #1e2130; }
+    .hist-entry:last-child { border-bottom: none; }
+    .hist-top    { display: flex; align-items: center; gap: 5px; font-size: 11px; flex-wrap: wrap; }
+    .hist-city   { color: var(--text); font-weight: 700; }
+    .hist-bucket { color: var(--muted); font-size: 11px; }
+    .hist-pnl    { margin-left: auto; font-weight: 700; font-size: 12px; }
+    .hist-detail { font-size: 10px; color: #4a5060; padding: 3px 0 0 6px; letter-spacing: 0.02em; }
+    .tag-settle  { background: #2a1a3a; color: #b070e0; }
+
     /* ── Connection indicator ───────────────────────── */
     #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
     #conn-dot.live { background: var(--green); }
@@ -399,21 +409,36 @@ function renderHRRR(hrrr, positions) {
 function renderHistory(history) {
   const el = document.getElementById('trade-history-list');
   if (!history.length) { el.innerHTML = '<div class="empty">No trades yet</div>'; return; }
-  el.innerHTML = history.slice(0, 50).map(t => {
+  el.innerHTML = history.slice().reverse().slice(0, 50).map(t => {
     const city = CITY_NAMES[t.station] || t.station;
-    const tag = t.type === 'OPEN'
-      ? `<span class="tag tag-open">OPEN</span>`
-      : `<span class="tag tag-close">CLOSE</span>`;
-    const side = t.side
-      ? `<span class="tag tag-${(t.side||'').toLowerCase()}">${t.side}</span>`
-      : '';
-    const pnl = t.pnl != null ? ` ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
-    const detail = t.type === 'OPEN'
-      ? `${t.contracts}× @ ${fmt(t.price)}  edge=${t.edge}`
-      : `${t.contracts}× entry=${fmt(t.entry_price)} exit=${fmt(t.exit_price)}${pnl}`;
-    return `<div class="log-line">
-      <span class="log-ts">${t.ts}</span>${tag} ${side}
-      <strong>${city}</strong> B${t.bucket_lower} — ${detail}
+
+    const typeClass = t.type === 'OPEN' ? 'tag-open' : t.type === 'SETTLE' ? 'tag-settle' : 'tag-close';
+    const typeTag  = `<span class="tag ${typeClass}">${t.type}</span>`;
+    const sideTag  = t.side ? `<span class="tag tag-${t.side.toLowerCase()}">${t.side}</span>` : '';
+
+    let pnlHtml = '';
+    if (t.pnl != null) {
+      const cls = t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : 'neu';
+      pnlHtml = `<span class="hist-pnl ${cls}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>`;
+    }
+
+    let detail = '';
+    if (t.type === 'OPEN') {
+      const delta = t.delta_f != null ? ` · Δ${t.delta_f > 0 ? '+' : ''}${t.delta_f}°F` : '';
+      detail = `${t.contracts}× @ ${fmt(t.price)} · edge ${t.edge != null ? (t.edge * 100).toFixed(1) + '¢' : '—'}${delta}`;
+    } else {
+      detail = `${t.contracts}× · ${fmt(t.entry_price)} → ${fmt(t.exit_price)}`;
+      if (t.reason) detail += ` · ${t.reason}`;
+    }
+
+    return `<div class="hist-entry">
+      <div class="hist-top">
+        <span class="log-ts">${t.ts}</span>${typeTag}${sideTag}
+        <span class="hist-city">${city}</span>
+        <span class="hist-bucket">B${t.bucket_lower}</span>
+        ${pnlHtml}
+      </div>
+      <div class="hist-detail">${detail}</div>
     </div>`;
   }).join('');
 }
