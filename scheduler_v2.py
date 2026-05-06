@@ -15,12 +15,15 @@ Loop:
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 import pytz
 
 from config import (
+    DRY_RUN,
     HRRR_COLD_BIAS_F,
     HRRR_MATERIAL_MOVE_F,
     HRRR_START_UTC_HOUR,
@@ -30,6 +33,7 @@ from config import (
     STATION_TIMEZONES,
     STATIONS,
     STARTING_BANKROLL,
+    STOP_LOSS_PCT,
 )
 from kalshi_client import KalshiClient, MarketSnapshot
 from signal_engine_v2 import HRRRSignalEngine, TradeSignal
@@ -43,8 +47,25 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler_v2")
 
 ET = pytz.timezone("America/New_York")
-MORNING_SCAN_ET_HOUR = 8
+MORNING_SCAN_ET_HOUR   = 8
 MORNING_SCAN_ET_MINUTE = 30
+EXIT_POLL_INTERVAL     = 300   # seconds between exit checks when positions are open
+
+
+@dataclass
+class OpenPositionV2:
+    station:      str
+    market_id:    str
+    bucket_lower: int
+    contracts:    int
+    entry_price:  float        # per contract, 0–1
+    side:         str          # "YES" or "NO"
+    event_date:   date
+    entry_time:   datetime
+
+
+_open_positions: dict[str, OpenPositionV2] = {}
+_positions_lock = threading.Lock()
 
 
 def _station_hrrr_coords(station: str) -> tuple[float, float]:
@@ -97,8 +118,42 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
         limit_price=signal.kalshi_price,
         side=signal.side.lower(),
     )
-    if not result.success:
+    if result.success:
+        pos = OpenPositionV2(
+            station=signal.station,
+            market_id=signal.market_id,
+            bucket_lower=signal.bucket_lower,
+            contracts=signal.contracts,
+            entry_price=signal.kalshi_price,
+            side=signal.side,
+            event_date=signal.event_date,
+            entry_time=datetime.now(timezone.utc),
+        )
+        with _positions_lock:
+            _open_positions[signal.market_id] = pos
+    else:
         logger.error("%s: order failed — %s", signal.station, result.error)
+    return result.success
+
+
+def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason: str) -> bool:
+    logger.info(
+        "[Exit] %s %s bucket %d  bid=%.2f  reason=%s",
+        pos.station, pos.side, pos.bucket_lower, bid, reason,
+    )
+    result = client.close_position(
+        pos.market_id, pos.contracts, bid, entry_side=pos.side.lower()
+    )
+    if result.success:
+        with _positions_lock:
+            _open_positions.pop(pos.market_id, None)
+        logger.info(
+            "[Exit] Complete: %s  entry=%.2f  exit=%.2f  pnl=$%+.2f",
+            pos.market_id, pos.entry_price, bid,
+            (bid - pos.entry_price) * pos.contracts,
+        )
+    else:
+        logger.error("[Exit] Failed: %s — %s", pos.market_id, result.error)
     return result.success
 
 
@@ -168,6 +223,78 @@ def run_cycle(
         )
 
 
+class ExitMonitor:
+    """
+    Background thread that checks open positions every EXIT_POLL_INTERVAL seconds.
+
+    Exit conditions (in priority order):
+      1. Market closed (is_open=False) — remove from tracking, let settlement sweep handle it
+      2. Stop-loss — bid fell to <= STOP_LOSS_PCT of entry price
+      3. HRRR reversal — HRRR TMAX has moved away from our YES bucket, or into our NO bucket
+    """
+
+    def __init__(self, client: KalshiClient, engine: HRRRSignalEngine):
+        self._client = client
+        self._engine = engine
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="exit-monitor"
+        )
+
+    def start(self) -> None:
+        logger.info("ExitMonitor started — poll every %ds", EXIT_POLL_INTERVAL)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while True:
+            time.sleep(EXIT_POLL_INTERVAL)
+            with _positions_lock:
+                if not _open_positions:
+                    continue
+                snapshot = dict(_open_positions)
+            for market_id, pos in snapshot.items():
+                try:
+                    self._check(market_id, pos)
+                except Exception as exc:
+                    logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
+
+    def _check(self, market_id: str, pos: OpenPositionV2) -> None:
+        markets = _get_markets(self._client, pos.station, pos.event_date)
+        market = next((m for m in markets if m.market_id == market_id), None)
+
+        if market is None or not market.is_open:
+            logger.info("[ExitMonitor] %s market closed — pending settlement", market_id)
+            with _positions_lock:
+                _open_positions.pop(market_id, None)
+            return
+
+        current_bid = market.yes_bid if pos.side == "YES" else (1.0 - market.yes_ask)
+        stop_level  = pos.entry_price * STOP_LOSS_PCT
+
+        if current_bid <= stop_level:
+            _exit_position(
+                self._client, pos, current_bid,
+                f"stop-loss: bid {current_bid:.2f} <= {stop_level:.2f} ({STOP_LOSS_PCT:.0%} of entry)",
+            )
+            return
+
+        engine_state = self._engine._state.get(pos.station)
+        if engine_state and engine_state.last_tmax_f is not None:
+            bucket_center = float(pos.bucket_lower + 1)
+            dist = abs(engine_state.last_tmax_f - bucket_center)
+            if pos.side == "YES" and dist >= HRRR_MATERIAL_MOVE_F:
+                _exit_position(
+                    self._client, pos, current_bid,
+                    f"HRRR reversal: TMAX={engine_state.last_tmax_f:.1f}F, {dist:.1f}F from bucket {pos.bucket_lower}",
+                )
+                return
+            if pos.side == "NO" and dist < 1.0:
+                _exit_position(
+                    self._client, pos, current_bid,
+                    f"HRRR reversed into NO bucket: TMAX={engine_state.last_tmax_f:.1f}F",
+                )
+                return
+
+
 def _next_run_time() -> datetime:
     """Next HRRR run time to check (~:30 past each UTC hour)."""
     now = datetime.now(timezone.utc)
@@ -187,6 +314,8 @@ def _sleep_until(target: datetime) -> None:
 def main() -> None:
     client = KalshiClient()
     engine = HRRRSignalEngine(bankroll=STARTING_BANKROLL)
+    monitor = ExitMonitor(client, engine)
+    monitor.start()
     logger.info("scheduler_v2 started — dry_run=%s", DRY_RUN)
 
     while True:
