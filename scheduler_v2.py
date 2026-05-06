@@ -54,7 +54,10 @@ logger = logging.getLogger("scheduler_v2")
 ET = pytz.timezone("America/New_York")
 MORNING_SCAN_ET_HOUR   = 8
 MORNING_SCAN_ET_MINUTE = 30
-EXIT_POLL_INTERVAL     = 300   # seconds between exit checks when positions are open
+EXIT_POLL_INTERVAL         = 300   # seconds between exit checks (normal)
+EXIT_NEAR_HOUR_INTERVAL    = 60    # seconds during :47–:05 window (ASOS posts ~:53–:58)
+EXIT_NEAR_HOUR_START_MIN   = 47    # minute-of-hour where fast polling begins
+EXIT_NEAR_HOUR_END_MIN     = 5     # minute-of-hour where fast polling ends
 
 
 @dataclass
@@ -610,42 +613,66 @@ class ExitMonitor:
         )
 
     def start(self) -> None:
-        logger.info("ExitMonitor started — poll every %ds", EXIT_POLL_INTERVAL)
+        logger.info(
+            "ExitMonitor started — normal poll %ds, near-hour poll %ds (:47–:05)",
+            EXIT_POLL_INTERVAL, EXIT_NEAR_HOUR_INTERVAL,
+        )
         self._thread.start()
 
-    def _loop(self) -> None:
-        while True:
-            time.sleep(EXIT_POLL_INTERVAL)
+    @staticmethod
+    def _poll_interval() -> int:
+        """60s near the top of each hour (ASOS posts ~:53–:58), 300s otherwise."""
+        m = datetime.now(timezone.utc).minute
+        if m >= EXIT_NEAR_HOUR_START_MIN or m < EXIT_NEAR_HOUR_END_MIN:
+            return EXIT_NEAR_HOUR_INTERVAL
+        return EXIT_POLL_INTERVAL
+
+    def _poll(self) -> None:
+        """Single poll cycle: fetch obs + markets, run exit checks."""
+        with _positions_lock:
+            if not _open_positions:
+                return
+            snapshot = dict(_open_positions)
+
+        # Group by station — fetch markets + obs once per station
+        by_station: dict[str, list[tuple[str, OpenPositionV2]]] = {}
+        for market_id, pos in snapshot.items():
+            by_station.setdefault(pos.station, []).append((market_id, pos))
+
+        for station, entries in by_station.items():
+            event_date = entries[0][1].event_date
+            markets = _get_markets(self._client, station, event_date)
+
+            try:
+                obs_temp    = get_best_obs_temp(station)
+                running_max = get_running_max(station, event_date)
+            except Exception as exc:
+                logger.warning("[ExitMonitor] %s: obs fetch failed — %s", station, exc)
+                obs_temp    = None
+                running_max = None
+
             with _positions_lock:
-                if not _open_positions:
-                    continue
-                snapshot = dict(_open_positions)
+                _station_snapshots[station] = markets
 
-            # Group by station — fetch markets + obs once per station
-            by_station: dict[str, list[tuple[str, OpenPositionV2]]] = {}
-            for market_id, pos in snapshot.items():
-                by_station.setdefault(pos.station, []).append((market_id, pos))
-
-            for station, entries in by_station.items():
-                event_date = entries[0][1].event_date
-                markets = _get_markets(self._client, station, event_date)
-
+            for market_id, pos in entries:
                 try:
-                    obs_temp    = get_best_obs_temp(station)
-                    running_max = get_running_max(station, event_date)
+                    self._check(market_id, pos, markets, obs_temp, running_max)
                 except Exception as exc:
-                    logger.warning("[ExitMonitor] %s: obs fetch failed — %s", station, exc)
-                    obs_temp    = None
-                    running_max = None
+                    logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
 
-                with _positions_lock:
-                    _station_snapshots[station] = markets
+    def _loop(self) -> None:
+        # Immediate first poll so newly opened positions show obs right away.
+        try:
+            self._poll()
+        except Exception as exc:
+            logger.warning("[ExitMonitor] startup poll error: %s", exc)
 
-                for market_id, pos in entries:
-                    try:
-                        self._check(market_id, pos, markets, obs_temp, running_max)
-                    except Exception as exc:
-                        logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
+        while True:
+            time.sleep(self._poll_interval())
+            try:
+                self._poll()
+            except Exception as exc:
+                logger.warning("[ExitMonitor] poll error: %s", exc)
 
     def _check(
         self,

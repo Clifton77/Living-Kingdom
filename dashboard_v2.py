@@ -112,8 +112,12 @@ def _get_full_state() -> dict:
             d["entry_time_display"] = "—"
             d["elapsed"] = "—"
 
-        d["city"]        = cfg.STATION_CITY_NAMES.get(station, station)
-        d["bucket_label"] = f"{pos.bucket_lower}–{pos.bucket_lower + 2}°F"
+        d["city"] = cfg.STATION_CITY_NAMES.get(station, station)
+        # Use the real Kalshi label from the snapshot (e.g. "79° to 80°").
+        # Fall back to constructing it only if no snapshot is available yet.
+        station_markets = snapshots_raw.get(station, [])
+        snap = next((m for m in station_markets if m.market_id == mid), None)
+        d["bucket_label"] = snap.bucket_label if snap else f"{pos.bucket_lower}° to {pos.bucket_lower + 1}°"
         total_unrealized += pos.unrealized_pnl or 0.0
         positions_out[mid] = d
 
