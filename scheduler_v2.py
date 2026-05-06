@@ -14,11 +14,13 @@ Loop:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytz
 
@@ -77,6 +79,96 @@ _station_snapshots: dict[str, list[MarketSnapshot]] = {}  # all buckets per stat
 _positions_lock = threading.Lock()
 _trade_history: list[dict] = []
 _engine: HRRRSignalEngine | None = None
+
+_STATE_DIR       = Path(__file__).parent / "state"
+_POSITIONS_FILE  = _STATE_DIR / "positions.json"
+_HRRR_STATE_FILE = _STATE_DIR / "hrrr_state.json"
+
+
+# ---------------------------------------------------------------------------
+# State persistence — positions and HRRR baselines survive restarts
+# ---------------------------------------------------------------------------
+
+def _save_positions() -> None:
+    _STATE_DIR.mkdir(exist_ok=True)
+    data = {}
+    with _positions_lock:
+        for mid, pos in _open_positions.items():
+            data[mid] = {
+                "station":      pos.station,
+                "market_id":    pos.market_id,
+                "bucket_lower": pos.bucket_lower,
+                "contracts":    pos.contracts,
+                "entry_price":  pos.entry_price,
+                "side":         pos.side,
+                "event_date":   pos.event_date.isoformat(),
+                "entry_time":   pos.entry_time.isoformat(),
+            }
+    _POSITIONS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_positions() -> None:
+    if not _POSITIONS_FILE.exists():
+        return
+    try:
+        data = json.loads(_POSITIONS_FILE.read_text())
+        count = 0
+        for mid, d in data.items():
+            _open_positions[mid] = OpenPositionV2(
+                station=d["station"],
+                market_id=d["market_id"],
+                bucket_lower=d["bucket_lower"],
+                contracts=d["contracts"],
+                entry_price=d["entry_price"],
+                side=d["side"],
+                event_date=date.fromisoformat(d["event_date"]),
+                entry_time=datetime.fromisoformat(d["entry_time"]),
+            )
+            count += 1
+        logger.info("Restored %d open position(s) from disk", count)
+    except Exception as exc:
+        logger.warning("Failed to load positions: %s", exc)
+
+
+def _save_hrrr_state(engine: HRRRSignalEngine) -> None:
+    _STATE_DIR.mkdir(exist_ok=True)
+    data = {}
+    for station, st in engine._state.items():
+        if st.last_tmax_f is None:
+            continue
+        data[station] = {
+            "last_tmax_f":   st.last_tmax_f,
+            "last_run_time": st.last_run_time.isoformat() if st.last_run_time else None,
+            "traded": [
+                [ev_date.isoformat(), bucket_lo, side]
+                for (ev_date, bucket_lo, side) in st.traded
+            ],
+        }
+    _HRRR_STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_hrrr_state(engine: HRRRSignalEngine) -> None:
+    if not _HRRR_STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(_HRRR_STATE_FILE.read_text())
+        count = 0
+        for station, sdata in data.items():
+            if station not in engine._state:
+                continue
+            st = engine._state[station]
+            st.last_tmax_f  = sdata["last_tmax_f"]
+            st.last_run_time = (
+                datetime.fromisoformat(sdata["last_run_time"])
+                if sdata.get("last_run_time") else None
+            )
+            for entry in sdata.get("traded", []):
+                ev_date_str, bucket_lo, side = entry
+                st.traded.add((date.fromisoformat(ev_date_str), int(bucket_lo), side))
+            count += 1
+        logger.info("Restored HRRR state for %d station(s) from disk", count)
+    except Exception as exc:
+        logger.warning("Failed to load HRRR state: %s", exc)
 
 
 def _station_hrrr_coords(station: str) -> tuple[float, float]:
@@ -155,6 +247,7 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
             "delta_f":      signal.hrrr_delta_f,
             "edge":         round(signal.edge, 3),
         })
+        _save_positions()
     else:
         logger.error("%s: order failed — %s", signal.station, result.error)
     return result.success
@@ -172,6 +265,7 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
         pnl = (bid - pos.entry_price) * pos.contracts
         with _positions_lock:
             _open_positions.pop(pos.market_id, None)
+        _save_positions()
         _trade_history.append({
             "ts":           datetime.now(timezone.utc).strftime("%H:%Mz"),
             "type":         "CLOSE",
@@ -280,6 +374,10 @@ def run_cycle(
             station, raw_tmax, snapshot.tmax_corrected_f,
             snapshot.peak_bucket_lower, len(signals),
         )
+
+    # Persist HRRR baselines after every cycle so restart can skip the dead
+    # first-cycle / baseline-only run and detect divergences immediately.
+    _save_hrrr_state(engine)
 
 
 class ExitMonitor:
@@ -417,9 +515,21 @@ def main() -> None:
     global _engine
     client  = KalshiClient()
     _engine = HRRRSignalEngine(bankroll=STARTING_BANKROLL)
+
+    # Restore open positions and HRRR baselines from the previous run.
+    # Positions remain live on Kalshi regardless of bot state — we just
+    # reload our record of them so ExitMonitor resumes monitoring immediately.
+    # HRRR baselines let the first post-restart cycle detect divergences
+    # instead of being a dead baseline-only run.
+    _load_positions()
+    _load_hrrr_state(_engine)
+
     monitor = ExitMonitor(client, _engine)
     monitor.start()
-    logger.info("scheduler_v2 started — dry_run=%s", DRY_RUN)
+    logger.info(
+        "scheduler_v2 started — dry_run=%s  restored %d position(s)",
+        DRY_RUN, len(_open_positions),
+    )
 
     while True:
         now_utc = datetime.now(timezone.utc)
