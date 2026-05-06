@@ -37,6 +37,7 @@ from config import (
 )
 from kalshi_client import KalshiClient, MarketSnapshot
 from signal_engine_v2 import HRRRSignalEngine, TradeSignal
+from utils.asos_live import get_best_obs_temp, get_running_max
 from utils.hrrr_fetcher import fetch_station_tmax
 from utils.peak_hours import get_peak_hour
 
@@ -62,9 +63,17 @@ class OpenPositionV2:
     side:         str          # "YES" or "NO"
     event_date:   date
     entry_time:   datetime
+    # Updated each poll cycle
+    current_bid:    float          = 0.0
+    current_ask:    float          = 0.0
+    unrealized_pnl: float          = 0.0
+    current_obs_f:  float | None   = None   # latest METAR temp
+    running_max_f:  float | None   = None   # today's high so far (IEM 1-min)
+    last_checked:   datetime | None = None
 
 
 _open_positions: dict[str, OpenPositionV2] = {}
+_station_snapshots: dict[str, list[MarketSnapshot]] = {}  # all buckets per station
 _positions_lock = threading.Lock()
 
 
@@ -203,6 +212,8 @@ def run_cycle(
         markets = _get_markets(client, station, event_date)
         if not markets:
             continue
+        with _positions_lock:
+            _station_snapshots[station] = markets
 
         snapshot = engine.build_snapshot(station, run_time, raw_tmax)
         signals = engine.update(
@@ -227,10 +238,17 @@ class ExitMonitor:
     """
     Background thread that checks open positions every EXIT_POLL_INTERVAL seconds.
 
+    Per poll cycle:
+      - Groups positions by station
+      - Fetches markets + observations once per station (not once per position)
+      - Updates _station_snapshots (all buckets) for dashboard consumption
+      - Updates per-position fields: current_bid, current_ask, unrealized_pnl,
+        current_obs_f, running_max_f, last_checked
+
     Exit conditions (in priority order):
-      1. Market closed (is_open=False) — remove from tracking, let settlement sweep handle it
+      1. Market closed — remove from tracking, let settlement sweep handle it
       2. Stop-loss — bid fell to <= STOP_LOSS_PCT of entry price
-      3. HRRR reversal — HRRR TMAX has moved away from our YES bucket, or into our NO bucket
+      3. HRRR reversal — TMAX moved away from YES bucket, or into NO bucket
     """
 
     def __init__(self, client: KalshiClient, engine: HRRRSignalEngine):
@@ -251,14 +269,41 @@ class ExitMonitor:
                 if not _open_positions:
                     continue
                 snapshot = dict(_open_positions)
-            for market_id, pos in snapshot.items():
-                try:
-                    self._check(market_id, pos)
-                except Exception as exc:
-                    logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
 
-    def _check(self, market_id: str, pos: OpenPositionV2) -> None:
-        markets = _get_markets(self._client, pos.station, pos.event_date)
+            # Group by station — fetch markets + obs once per station
+            by_station: dict[str, list[tuple[str, OpenPositionV2]]] = {}
+            for market_id, pos in snapshot.items():
+                by_station.setdefault(pos.station, []).append((market_id, pos))
+
+            for station, entries in by_station.items():
+                event_date = entries[0][1].event_date
+                markets = _get_markets(self._client, station, event_date)
+
+                try:
+                    obs_temp    = get_best_obs_temp(station)
+                    running_max = get_running_max(station, event_date)
+                except Exception as exc:
+                    logger.warning("[ExitMonitor] %s: obs fetch failed — %s", station, exc)
+                    obs_temp    = None
+                    running_max = None
+
+                with _positions_lock:
+                    _station_snapshots[station] = markets
+
+                for market_id, pos in entries:
+                    try:
+                        self._check(market_id, pos, markets, obs_temp, running_max)
+                    except Exception as exc:
+                        logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
+
+    def _check(
+        self,
+        market_id: str,
+        pos: OpenPositionV2,
+        markets: list[MarketSnapshot],
+        obs_temp: float | None,
+        running_max: float | None,
+    ) -> None:
         market = next((m for m in markets if m.market_id == market_id), None)
 
         if market is None or not market.is_open:
@@ -268,8 +313,17 @@ class ExitMonitor:
             return
 
         current_bid = market.yes_bid if pos.side == "YES" else (1.0 - market.yes_ask)
-        stop_level  = pos.entry_price * STOP_LOSS_PCT
+        current_ask = market.yes_ask if pos.side == "YES" else (1.0 - market.yes_bid)
 
+        with _positions_lock:
+            pos.current_bid    = current_bid
+            pos.current_ask    = current_ask
+            pos.unrealized_pnl = (current_bid - pos.entry_price) * pos.contracts
+            pos.current_obs_f  = obs_temp
+            pos.running_max_f  = running_max
+            pos.last_checked   = datetime.now(timezone.utc)
+
+        stop_level = pos.entry_price * STOP_LOSS_PCT
         if current_bid <= stop_level:
             _exit_position(
                 self._client, pos, current_bid,
