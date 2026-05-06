@@ -31,6 +31,7 @@ from config import (
     HRRR_START_UTC_HOUR,
     HRRR_START_UTC_MINUTE,
     KALSHI_SETTLEMENT_STATION,
+    LOW_PRICE_STOP_THRESHOLD,
     STATION_COORDS,
     STATION_TIMEZONES,
     STATIONS,
@@ -675,13 +676,14 @@ class ExitMonitor:
             pos.running_max_f  = running_max
             pos.last_checked   = datetime.now(timezone.utc)
 
-        stop_level = pos.entry_price * STOP_LOSS_PCT
-        if current_bid <= stop_level:
-            _exit_position(
-                self._client, pos, current_bid,
-                f"stop-loss: bid {current_bid:.2f} <= {stop_level:.2f} ({STOP_LOSS_PCT:.0%} of entry)",
-            )
-            return
+        if pos.entry_price > LOW_PRICE_STOP_THRESHOLD:
+            stop_level = pos.entry_price * STOP_LOSS_PCT
+            if current_bid <= stop_level:
+                _exit_position(
+                    self._client, pos, current_bid,
+                    f"stop-loss: bid {current_bid:.2f} <= {stop_level:.2f} ({STOP_LOSS_PCT:.0%} of entry)",
+                )
+                return
 
         engine_state = self._engine._state.get(pos.station)
         if engine_state and engine_state.last_tmax_f is not None:

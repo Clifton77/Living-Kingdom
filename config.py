@@ -617,6 +617,12 @@ KELLY_FRAC         = 0.50    # half Kelly
 MIN_STAKE          = 1.00    # Kalshi minimum per trade ($)
 MAX_STAKE_PCT      = 0.02    # 2% hard cap per trade
 
+# Stop-loss behaviour
+# Positions entered at or below this price skip the price-based stop entirely;
+# HRRR reversal is the only exit. Thin-market noise at the tails makes percentage
+# stops fire on random ticks rather than real signal changes.
+LOW_PRICE_STOP_THRESHOLD = 0.08   # skip price stop if entry_price <= this
+
 # HRRR signal thresholds
 HRRR_MATERIAL_MOVE_F          = 2.0   # minimum run-to-run delta to trigger signal (°F)
 HRRR_COLD_BIAS_F              = 1.7   # apply before bucket mapping (HRRR runs cold)
