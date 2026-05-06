@@ -91,7 +91,8 @@ class StationState:
 def tmax_to_bucket(tmax_f: float, markets: list[MarketSnapshot]) -> Optional[int]:
     """
     Map a TMAX (°F) to the Kalshi bucket lower bound that contains it.
-    Uses live market list to handle tail buckets correctly.
+    Uses the live market list so it works for any bucket alignment
+    (odd-start, even-start, or irregular spacing by station/season).
     """
     if not markets:
         return None
@@ -99,12 +100,17 @@ def tmax_to_bucket(tmax_f: float, markets: list[MarketSnapshot]) -> Optional[int
     lowers = sorted(m.bucket_lower for m in markets)
     floor_bucket = lowers[0]
     ceil_bucket  = lowers[-1]
-    if t <= floor_bucket + 1:      # at or below floor bucket's range
+    # Below the first interior bucket → floor tail
+    if t < (lowers[1] if len(lowers) > 1 else ceil_bucket):
         return floor_bucket
-    if t >= ceil_bucket:           # at or above ceiling bucket
+    # At or above the ceiling bucket → ceiling tail
+    if t >= ceil_bucket:
         return ceil_bucket
-    lower = ((t - 1) // 2) * 2 + 1
-    return lower if lower in lowers else None
+    # Interior: find the bucket [lo, lo+2) that contains t
+    for lo in lowers[1:-1]:
+        if lo <= t < lo + 2:
+            return lo
+    return None
 
 
 def bucket_probability(tmax_corrected_f: float, bucket_lower: int, sigma: float) -> float:

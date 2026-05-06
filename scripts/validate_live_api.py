@@ -26,9 +26,9 @@ from config import HRRR_STATION_SIGMA, HRRR_COLD_BIAS_F, STATION_CITY_NAMES
 # Stations to validate: one desert (tight sigma), one mid-tier, one convective
 TEST_STATIONS = ["KPHX", "KJFK", "KORD", "KLAX", "KDFW"]
 
-PASS = "\033[92m✓\033[0m"
-FAIL = "\033[91m✗\033[0m"
-WARN = "\033[93m⚠\033[0m"
+PASS = "[PASS]"
+FAIL = "[FAIL]"
+WARN = "[WARN]"
 
 
 def check(label: str, condition: bool, detail: str = "") -> bool:
@@ -40,29 +40,29 @@ def check(label: str, condition: bool, detail: str = "") -> bool:
 
 def validate_station(client: KalshiClient, station: str, event_date: date) -> bool:
     city = STATION_CITY_NAMES.get(station, station)
-    print(f"\n{'─'*60}")
+    print(f"\n{'-'*60}")
     print(f"  {station}  {city}  ({event_date})")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
 
     markets = client.get_markets_for_station_date(station, event_date)
     all_ok = True
 
-    # ── Basic return ─────────────────────────────────────────────────
+    # -- Basic return -------------------------------------------------
     ok = check("Markets returned", len(markets) > 0, f"got {len(markets)}")
     all_ok &= ok
     if not ok:
         return False
 
-    # ── Print bucket table ────────────────────────────────────────────
+    # -- Print bucket table --------------------------------------------
     print(f"\n  {'Bucket':<12} {'Ticker':<40} {'Bid':>6} {'Ask':>6} {'Vol':>6} {'Open'}")
-    print(f"  {'─'*12} {'─'*40} {'─'*6} {'─'*6} {'─'*6} {'─'*4}")
+    print(f"  {'-'*12} {'-'*40} {'-'*6} {'-'*6} {'-'*6} {'-'*4}")
     for m in markets:
         status = "yes" if m.is_open else "no"
         print(f"  {m.bucket_label:<12} {m.market_id:<40} {m.yes_bid:>6.3f} {m.yes_ask:>6.3f} {m.volume:>6} {status}")
 
     print()
 
-    # ── Per-field assertions ─────────────────────────────────────────
+    # -- Per-field assertions -----------------------------------------
     for m in markets:
         label = f"bucket {m.bucket_lower}"
 
@@ -98,7 +98,7 @@ def validate_station(client: KalshiClient, station: str, event_date: date) -> bo
                    f"got {m.station!r}")
         all_ok &= ok
 
-    # ── Market coverage ──────────────────────────────────────────────
+    # -- Market coverage ----------------------------------------------
     open_markets = [m for m in markets if m.is_open]
     ok = check("At least one open market", len(open_markets) > 0,
                f"{len(open_markets)}/{len(markets)} open")
@@ -110,7 +110,7 @@ def validate_station(client: KalshiClient, station: str, event_date: date) -> bo
                f"sum={price_sum:.3f}")
     all_ok &= ok
 
-    # ── tmax_to_bucket mapping ────────────────────────────────────────
+    # -- tmax_to_bucket mapping ----------------------------------------
     print(f"\n  tmax_to_bucket mapping:")
     lowers = sorted(m.bucket_lower for m in markets)
     floor_b = lowers[0]
@@ -120,18 +120,18 @@ def validate_station(client: KalshiClient, station: str, event_date: date) -> bo
                   ceil_b - 1, ceil_b, ceil_b + 5]
     for t in test_temps:
         result = tmax_to_bucket(float(t), markets)
-        ok = check(f"  tmax={t}°F → bucket {result}",
+        ok = check(f"  tmax={t}F -> bucket {result}",
                    result is not None,
                    "(None = unmapped!)")
         all_ok &= ok
 
-    # ── bucket_probability with station sigma ─────────────────────────
+    # -- bucket_probability with station sigma -------------------------
     sigma = HRRR_STATION_SIGMA.get(station, 3.0)
     # Simulate a HRRR corrected TMAX near the middle bucket
     mid_bucket = lowers[len(lowers) // 2]
     tmax_test  = float(mid_bucket + 1)  # center of middle bucket
     p = bucket_probability(tmax_test, mid_bucket, sigma)
-    ok = check(f"bucket_probability(tmax={tmax_test}, bucket={mid_bucket}, σ={sigma})",
+    ok = check(f"bucket_probability(tmax={tmax_test}, bucket={mid_bucket}, sigma={sigma})",
                0.0 < p < 1.0,
                f"p={p:.4f}")
     all_ok &= ok
@@ -165,7 +165,7 @@ def main() -> None:
 
     print(f"\n{'='*60}")
     print("  Summary")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     all_passed = True
     for station, ok in results.items():
         icon = PASS if ok else FAIL
