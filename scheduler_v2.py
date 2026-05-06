@@ -70,10 +70,10 @@ class OpenPositionV2:
     side:         str          # "YES" or "NO"
     event_date:   date
     entry_time:   datetime
-    # Updated each poll cycle
-    current_bid:       float          = 0.0
-    current_ask:       float          = 0.0
-    unrealized_pnl:    float          = 0.0
+    # Updated each poll cycle — None until ExitMonitor first runs
+    current_bid:       float | None   = None
+    current_ask:       float | None   = None
+    unrealized_pnl:    float | None   = None
     current_obs_f:     float | None   = None   # latest METAR temp
     running_max_f:     float | None   = None   # today's high so far (IEM 1-min)
     last_checked:      datetime | None = None

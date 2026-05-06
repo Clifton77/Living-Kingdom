@@ -172,6 +172,7 @@
               <th>Bucket</th>
               <th>Entry</th>
               <th>Bid</th>
+              <th>Ask</th>
               <th>P&amp;L</th>
               <th>Obs °F</th>
               <th>Hi °F</th>
@@ -181,7 +182,7 @@
             </tr>
           </thead>
           <tbody id="positions-body">
-            <tr><td colspan="11" class="empty">No open positions</td></tr>
+            <tr><td colspan="12" class="empty">No open positions</td></tr>
           </tbody>
         </table>
       </div>
@@ -289,7 +290,7 @@ function renderPositions(positions, hrrr) {
   const tbody = document.getElementById('positions-body');
   const ids = Object.keys(positions);
   if (!ids.length) {
-    tbody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">No open positions</td></tr>';
     return;
   }
   tbody.innerHTML = ids.map(mid => {
@@ -298,12 +299,15 @@ function renderPositions(positions, hrrr) {
     const sideTag = `<span class="tag tag-${p.side.toLowerCase()}">${p.side}</span>`;
     const pnlHtml = fmtPnl(p.unrealized_pnl);
     const tmax = hs ? fmtTemp(hs.last_tmax_f) : '—';
+    const bid = p.current_bid != null ? fmt(p.current_bid) : '—';
+    const ask = p.current_ask != null ? fmt(p.current_ask) : '—';
     return `<tr>
       <td>${p.city || p.station}</td>
       <td>${sideTag}</td>
       <td>${p.bucket_label || p.bucket_lower}</td>
       <td>${fmt(p.entry_price)}</td>
-      <td>${fmt(p.current_bid)}</td>
+      <td>${bid}</td>
+      <td>${ask}</td>
       <td>${pnlHtml}</td>
       <td>${fmtTemp(p.current_obs_f)}</td>
       <td>${fmtTemp(p.running_max_f)}</td>
