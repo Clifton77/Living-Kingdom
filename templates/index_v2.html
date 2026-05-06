@@ -430,10 +430,16 @@ function renderHistory(history) {
     } else if (t.type === 'CLOSE') {
       const exit  = fmtDollar(t.exit_price || 0);
       const stake = fmtDollar((t.exit_price || 0) * (t.contracts || 0));
+      const rawReason = (t.reason || '').toLowerCase();
+      let reason = '';
+      if (rawReason.startsWith('stop-loss'))         reason = ' Stop loss activated.';
+      else if (rawReason.includes('hrrr reversal') || rawReason.includes('hrrr reversed')) reason = ' HRRR signal reversed.';
+      else if (rawReason.includes('manual') || rawReason.includes('close all')) reason = ' Manually closed.';
+      else if (t.reason) reason = ' ' + t.reason + '.';
       const pnlStr = t.pnl != null
         ? ` P&L <span class="${t.pnl >= 0 ? 'pos' : 'neg'}">${t.pnl >= 0 ? '+' : ''}${fmtDollar(t.pnl)}</span>.`
         : '';
-      msg = `${city}: Closed ${t.contracts} ${bucket} ${t.side} contracts at ${exit} (${stake} total).${pnlStr}`;
+      msg = `${city}: Closed ${t.contracts} ${bucket} ${t.side} contracts at ${exit} (${stake} total).${reason}${pnlStr}`;
     } else if (t.type === 'SETTLE') {
       const pnlStr = t.pnl != null
         ? ` P&L <span class="${t.pnl >= 0 ? 'pos' : 'neg'}">${t.pnl >= 0 ? '+' : ''}${fmtDollar(t.pnl)}</span>.`
