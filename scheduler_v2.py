@@ -439,8 +439,14 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
             "delta_f":      signal.hrrr_delta_f,
             "edge":         round(signal.edge, 3),
         })
-        _save_positions()
-        get_sheets_logger().log_trade_opened_v2(signal.station, signal)
+        try:
+            _save_positions()
+        except Exception as exc:
+            logger.error("_save_positions failed after open: %s", exc, exc_info=True)
+        try:
+            get_sheets_logger().log_trade_opened_v2(signal.station, signal)
+        except Exception as exc:
+            logger.error("Sheets log failed after open: %s", exc)
     else:
         logger.error("%s: order failed — %s", signal.station, result.error)
     return result.success
@@ -465,7 +471,10 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
             _losses_today += 1
         with _positions_lock:
             _open_positions.pop(pos.market_id, None)
-        _save_positions()
+        try:
+            _save_positions()
+        except Exception as exc:
+            logger.error("_save_positions failed after exit: %s", exc, exc_info=True)
         _trade_history.append({
             "ts":           datetime.now(timezone.utc).isoformat(),
             "type":         "CLOSE",
@@ -482,14 +491,17 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
             "[Exit] Complete: %s  entry=%.2f  exit=%.2f  pnl=$%+.2f  bankroll=$%.2f",
             pos.market_id, pos.entry_price, bid, pnl, _bankroll,
         )
-        get_sheets_logger().log_trade_closed(
-            station=pos.station,
-            market_id=pos.market_id,
-            exit_price=bid,
-            realized_pnl=pnl,
-            exit_reason=reason,
-        )
-        get_sheets_logger().update_dashboard(_build_summary(), mode="DRY RUN" if DRY_RUN else "LIVE")
+        try:
+            get_sheets_logger().log_trade_closed(
+                station=pos.station,
+                market_id=pos.market_id,
+                exit_price=bid,
+                realized_pnl=pnl,
+                exit_reason=reason,
+            )
+            get_sheets_logger().update_dashboard(_build_summary(), mode="DRY RUN" if DRY_RUN else "LIVE")
+        except Exception as exc:
+            logger.error("Sheets log failed after exit: %s", exc)
     else:
         logger.error("[Exit] Failed: %s — %s", pos.market_id, result.error)
     return result.success
@@ -771,15 +783,18 @@ def main() -> None:
     )
 
     while True:
-        now_utc = datetime.now(timezone.utc)
-        event_date = now_utc.date()
-        run_time = now_utc.replace(minute=0, second=0, microsecond=0)
+        try:
+            now_utc = datetime.now(timezone.utc)
+            event_date = now_utc.date()
+            run_time = now_utc.replace(minute=0, second=0, microsecond=0)
 
-        # Only run during operating window
-        if now_utc.hour >= HRRR_START_UTC_HOUR:
-            run_cycle(_engine, client, run_time, event_date)
-        else:
-            logger.info("Before operating window — waiting.")
+            # Only run during operating window
+            if now_utc.hour >= HRRR_START_UTC_HOUR:
+                run_cycle(_engine, client, run_time, event_date)
+            else:
+                logger.info("Before operating window — waiting.")
+        except Exception as exc:
+            logger.error("Unhandled error in main loop — continuing: %s", exc, exc_info=True)
 
         next_run = _next_run_time()
         _sleep_until(next_run)
