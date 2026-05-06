@@ -411,34 +411,30 @@ function renderHistory(history) {
   if (!history.length) { el.innerHTML = '<div class="empty">No trades yet</div>'; return; }
   el.innerHTML = history.slice().reverse().slice(0, 50).map(t => {
     const city = CITY_NAMES[t.station] || t.station;
+    const bucket = `${t.bucket_lower}°`;
 
-    const typeClass = t.type === 'OPEN' ? 'tag-open' : t.type === 'SETTLE' ? 'tag-settle' : 'tag-close';
-    const typeTag  = `<span class="tag ${typeClass}">${t.type}</span>`;
-    const sideTag  = t.side ? `<span class="tag tag-${t.side.toLowerCase()}">${t.side}</span>` : '';
-
-    let pnlHtml = '';
-    if (t.pnl != null) {
-      const cls = t.pnl > 0 ? 'pos' : t.pnl < 0 ? 'neg' : 'neu';
-      pnlHtml = `<span class="hist-pnl ${cls}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>`;
-    }
-
-    let detail = '';
+    let msg = '';
     if (t.type === 'OPEN') {
-      const delta = t.delta_f != null ? ` · Δ${t.delta_f > 0 ? '+' : ''}${t.delta_f}°F` : '';
-      detail = `${t.contracts}× @ ${fmt(t.price)} · edge ${t.edge != null ? (t.edge * 100).toFixed(1) + '¢' : '—'}${delta}`;
+      const price = Math.round((t.price || 0) * 100);
+      msg = `Bought ${t.contracts} ${city} ${t.side} at ${price}¢ (${bucket} bucket)`;
+    } else if (t.type === 'CLOSE') {
+      const entry = Math.round((t.entry_price || 0) * 100);
+      const exit  = Math.round((t.exit_price  || 0) * 100);
+      const pnlStr = t.pnl != null
+        ? ` — <span class="${t.pnl >= 0 ? 'pos' : 'neg'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>`
+        : '';
+      msg = `Closed ${city} ${t.side} ${entry}¢ → ${exit}¢${pnlStr}`;
+    } else if (t.type === 'SETTLE') {
+      const pnlStr = t.pnl != null
+        ? ` — <span class="${t.pnl >= 0 ? 'pos' : 'neg'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>`
+        : '';
+      msg = `${city} ${t.side} settled (${bucket} bucket)${pnlStr}`;
     } else {
-      detail = `${t.contracts}× · ${fmt(t.entry_price)} → ${fmt(t.exit_price)}`;
-      if (t.reason) detail += ` · ${t.reason}`;
+      msg = `${city} — ${t.type}`;
     }
 
-    return `<div class="hist-entry">
-      <div class="hist-top">
-        <span class="log-ts">${t.ts}</span>${typeTag}${sideTag}
-        <span class="hist-city">${city}</span>
-        <span class="hist-bucket">B${t.bucket_lower}</span>
-        ${pnlHtml}
-      </div>
-      <div class="hist-detail">${detail}</div>
+    return `<div class="log-line">
+      <span class="log-ts">${t.ts}</span>${msg}
     </div>`;
   }).join('');
 }
