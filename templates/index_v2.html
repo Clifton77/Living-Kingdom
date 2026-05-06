@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WeatherBot v2</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --border:   #2a2d3a;
+      --text:     #e2e4ee;
+      --muted:    #7a7f99;
+      --green:    #22c55e;
+      --red:      #ef4444;
+      --yellow:   #eab308;
+      --blue:     #3b82f6;
+      --purple:   #a855f7;
+      --teal:     #14b8a6;
+    }
+
+    body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+    /* ── Layout ─────────────────────────────────────── */
+    .topbar {
+      display: flex; align-items: center; gap: 24px;
+      padding: 12px 20px; background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .topbar-title { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: 0.03em; }
+    .mode-badge {
+      padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+    }
+    .mode-DEMO    { background: #1e3a5f; color: #60a5fa; }
+    .mode-LIVE    { background: #1a2e1a; color: var(--green); }
+    .mode-DRY\ RUN{ background: #2a2a1a; color: var(--yellow); }
+
+    .stat { display: flex; flex-direction: column; gap: 2px; min-width: 90px; }
+    .stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .stat-value { font-size: 18px; font-weight: 700; }
+    .pos  { color: var(--green); }
+    .neg  { color: var(--red); }
+    .neu  { color: var(--text); }
+
+    .topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+    .btn {
+      padding: 6px 14px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); cursor: pointer; font-size: 12px;
+      font-family: inherit; transition: background 0.15s;
+    }
+    .btn:hover { background: var(--border); }
+    .btn-danger { border-color: var(--red); color: var(--red); }
+    .btn-danger:hover { background: #2a1a1a; }
+
+    .main { display: grid; grid-template-columns: 1fr 340px; gap: 16px; padding: 16px; }
+    @media (max-width: 900px) { .main { grid-template-columns: 1fr; } }
+
+    .left  { display: flex; flex-direction: column; gap: 16px; }
+    .right { display: flex; flex-direction: column; gap: 16px; }
+
+    /* ── Cards ──────────────────────────────────────── */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; overflow: hidden;
+    }
+    .card-header {
+      padding: 10px 16px; border-bottom: 1px solid var(--border);
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.1em; color: var(--muted); display: flex;
+      align-items: center; justify-content: space-between;
+    }
+    .card-body { padding: 16px; }
+
+    /* ── Tables ─────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; padding: 6px 10px; font-size: 10px; color: var(--muted);
+         text-transform: uppercase; letter-spacing: 0.07em; border-bottom: 1px solid var(--border); }
+    td { padding: 8px 10px; border-bottom: 1px solid #1e2130; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1e2130; }
+
+    .tag {
+      display: inline-block; padding: 2px 7px; border-radius: 3px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    }
+    .tag-yes  { background: #1a3a1a; color: var(--green); }
+    .tag-no   { background: #3a1a1a; color: var(--red); }
+    .tag-open { background: #1a2e3a; color: var(--blue); }
+    .tag-close{ background: #2a2a1a; color: var(--yellow); }
+
+    /* ── Bucket bar chart ───────────────────────────── */
+    .bucket-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+    .bucket-label { width: 80px; font-size: 11px; color: var(--muted); flex-shrink: 0; text-align: right; }
+    .bucket-bar-wrap { flex: 1; background: #13161f; border-radius: 3px; height: 18px; position: relative; overflow: hidden; }
+    .bucket-bar { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+    .bucket-bar-market  { background: #2a4a7f; }
+    .bucket-bar-hrrr    { background: var(--teal); }
+    .bucket-price { width: 44px; font-size: 11px; text-align: right; flex-shrink: 0; }
+    .bucket-row.our-pos .bucket-label { color: var(--text); font-weight: 700; }
+    .bucket-row.our-pos .bucket-bar-market { background: #1a4a2a; }
+
+    /* ── HRRR status grid ───────────────────────────── */
+    .hrrr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+    .hrrr-cell {
+      background: #13161f; border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 10px; display: flex; flex-direction: column; gap: 3px;
+    }
+    .hrrr-city  { font-size: 11px; color: var(--muted); }
+    .hrrr-tmax  { font-size: 17px; font-weight: 700; }
+    .hrrr-run   { font-size: 10px; color: var(--muted); }
+    .hrrr-flags { font-size: 10px; color: var(--yellow); }
+    .hrrr-cell.has-position { border-color: var(--teal); }
+
+    /* ── Alerts / history ───────────────────────────── */
+    .log-line { padding: 5px 0; border-bottom: 1px solid #1e2130; font-size: 11px; color: var(--muted); line-height: 1.5; }
+    .log-line:last-child { border-bottom: none; }
+    .log-ts   { color: #4a5060; margin-right: 6px; }
+
+    /* ── Connection indicator ───────────────────────── */
+    #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+    #conn-dot.live { background: var(--green); }
+    #conn-dot.dead { background: var(--red); }
+
+    .empty { color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center; }
+  </style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <span class="topbar-title">WeatherBot v2</span>
+  <span id="mode-badge" class="mode-badge">—</span>
+
+  <div class="stat">
+    <span class="stat-label">Bankroll</span>
+    <span id="stat-bankroll" class="stat-value neu">—</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Unrealized</span>
+    <span id="stat-unrealized" class="stat-value neu">—</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Open</span>
+    <span id="stat-open" class="stat-value neu">—</span>
+  </div>
+
+  <div class="topbar-right">
+    <span id="conn-dot"></span>
+    <button class="btn btn-danger" onclick="closeAll()">Close All</button>
+  </div>
+</div>
+
+<!-- ── Main grid ─────────────────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Left column -->
+  <div class="left">
+
+    <!-- Open positions -->
+    <div class="card">
+      <div class="card-header">Open Positions</div>
+      <div id="positions-wrap">
+        <table id="positions-table">
+          <thead>
+            <tr>
+              <th>City</th>
+              <th>Side</th>
+              <th>Bucket</th>
+              <th>Entry</th>
+              <th>Bid</th>
+              <th>P&amp;L</th>
+              <th>Obs °F</th>
+              <th>Hi °F</th>
+              <th>HRRR</th>
+              <th>Opened</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="positions-body">
+            <tr><td colspan="11" class="empty">No open positions</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Bucket distribution (one card per station with open position) -->
+    <div id="buckets-section"></div>
+
+    <!-- HRRR status -->
+    <div class="card">
+      <div class="card-header">HRRR Status</div>
+      <div class="card-body">
+        <div id="hrrr-grid" class="hrrr-grid">
+          <div class="empty">Waiting for first HRRR cycle…</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Right column -->
+  <div class="right">
+
+    <!-- Trade history -->
+    <div class="card">
+      <div class="card-header">Trade History</div>
+      <div class="card-body" style="max-height:360px;overflow-y:auto;">
+        <div id="trade-history-list"><div class="empty">No trades yet</div></div>
+      </div>
+    </div>
+
+    <!-- Alerts -->
+    <div class="card">
+      <div class="card-header">Alerts</div>
+      <div class="card-body" style="max-height:260px;overflow-y:auto;">
+        <div id="alerts-list"><div class="empty">No alerts</div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── Initial state injected by server ──────────────────────────────────
+const CITY_NAMES = {{ initial_state.city_names | tojson }};
+applyState({{ initial_state | tojson }});
+
+// ── SSE connection ─────────────────────────────────────────────────────
+let es;
+function connect() {
+  es = new EventSource('/stream');
+  es.addEventListener('full_state', e => applyState(JSON.parse(e.data)));
+  es.addEventListener('position_closed', () => refreshState());
+  es.addEventListener('heartbeat', () => {});
+  es.onopen  = () => setConn(true);
+  es.onerror = () => { setConn(false); setTimeout(connect, 5000); };
+}
+connect();
+
+function setConn(live) {
+  const d = document.getElementById('conn-dot');
+  d.className = live ? 'live' : 'dead';
+}
+
+function refreshState() {
+  fetch('/api/state').then(r => r.json()).then(applyState);
+}
+
+// ── State renderer ─────────────────────────────────────────────────────
+function applyState(s) {
+  if (s.error) return;
+  renderSummary(s.summary);
+  renderPositions(s.positions || {}, s.hrrr_state || {});
+  renderBuckets(s.positions || {}, s.station_snapshots || {}, s.hrrr_state || {});
+  renderHRRR(s.hrrr_state || {}, s.positions || {});
+  renderHistory(s.trade_history || []);
+  renderAlerts(s.alerts || []);
+}
+
+function fmt(n) { return n == null ? '—' : Number(n).toFixed(2); }
+function fmtPnl(n) {
+  if (n == null) return '<span class="neu">—</span>';
+  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+  return `<span class="${cls}">${n > 0 ? '+' : ''}$${Number(n).toFixed(2)}</span>`;
+}
+function fmtTemp(n) { return n == null ? '—' : Number(n).toFixed(1) + '°'; }
+
+// ── Summary bar ────────────────────────────────────────────────────────
+function renderSummary(s) {
+  const mode = s.mode || '—';
+  const badge = document.getElementById('mode-badge');
+  badge.textContent = mode;
+  badge.className = 'mode-badge mode-' + mode;
+
+  document.getElementById('stat-bankroll').textContent  = '$' + fmt(s.bankroll);
+  const u = s.total_unrealized || 0;
+  const uel = document.getElementById('stat-unrealized');
+  uel.textContent = (u >= 0 ? '+' : '') + '$' + Math.abs(u).toFixed(2);
+  uel.className = 'stat-value ' + (u > 0 ? 'pos' : u < 0 ? 'neg' : 'neu');
+  document.getElementById('stat-open').textContent = s.open_positions || 0;
+}
+
+// ── Positions table ────────────────────────────────────────────────────
+function renderPositions(positions, hrrr) {
+  const tbody = document.getElementById('positions-body');
+  const ids = Object.keys(positions);
+  if (!ids.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">No open positions</td></tr>';
+    return;
+  }
+  tbody.innerHTML = ids.map(mid => {
+    const p = positions[mid];
+    const hs = hrrr[p.station];
+    const sideTag = `<span class="tag tag-${p.side.toLowerCase()}">${p.side}</span>`;
+    const pnlHtml = fmtPnl(p.unrealized_pnl);
+    const tmax = hs ? fmtTemp(hs.last_tmax_f) : '—';
+    return `<tr>
+      <td>${p.city || p.station}</td>
+      <td>${sideTag}</td>
+      <td>${p.bucket_label || p.bucket_lower}</td>
+      <td>${fmt(p.entry_price)}</td>
+      <td>${fmt(p.current_bid)}</td>
+      <td>${pnlHtml}</td>
+      <td>${fmtTemp(p.current_obs_f)}</td>
+      <td>${fmtTemp(p.running_max_f)}</td>
+      <td>${tmax}</td>
+      <td style="color:var(--muted)">${p.elapsed || '—'}</td>
+      <td><button class="btn btn-danger" style="padding:3px 8px;font-size:11px"
+           onclick="closeOne('${mid}')">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Bucket distribution ────────────────────────────────────────────────
+function renderBuckets(positions, snapshots, hrrr) {
+  const sec = document.getElementById('buckets-section');
+
+  // Collect stations with open positions
+  const stationPositions = {};
+  for (const p of Object.values(positions)) {
+    if (!stationPositions[p.station]) stationPositions[p.station] = [];
+    stationPositions[p.station].push(p);
+  }
+
+  const stationsToShow = Object.keys(stationPositions);
+  if (!stationsToShow.length) { sec.innerHTML = ''; return; }
+
+  sec.innerHTML = stationsToShow.map(station => {
+    const markets = snapshots[station] || [];
+    const hs = hrrr[station];
+    const hrrr_tmax = hs ? hs.last_tmax_f : null;
+    const myPositions = stationPositions[station] || [];
+    const myBuckets = new Set(myPositions.map(p => p.bucket_lower));
+
+    const rows = markets.map(m => {
+      const pct = Math.round((m.yes_ask || 0) * 100);
+      const isOurs = myBuckets.has(m.bucket_lower);
+      const label = m.bucket_label || `${m.bucket_lower}–${m.bucket_lower + 2}°F`;
+
+      // HRRR probability bar width (Gaussian approximation for display)
+      let hrrrWidth = 0;
+      if (hrrr_tmax != null) {
+        const dist = Math.abs(hrrr_tmax - (m.bucket_lower + 1));
+        hrrrWidth = Math.max(0, Math.round((1 - dist / 10) * 100));
+      }
+
+      return `<div class="bucket-row${isOurs ? ' our-pos' : ''}">
+        <span class="bucket-label">${label}</span>
+        <div class="bucket-bar-wrap">
+          <div class="bucket-bar bucket-bar-market" style="width:${pct}%"></div>
+        </div>
+        <span class="bucket-price">${pct}¢</span>
+      </div>`;
+    }).join('');
+
+    const city = (CITY_NAMES[station] || station);
+    const runInfo = hs ? ` · HRRR ${hs.last_tmax_f}°F @ ${hs.last_run_time || '—'}` : '';
+
+    return `<div class="card">
+      <div class="card-header">${city} — Bucket Prices${runInfo}</div>
+      <div class="card-body">${rows || '<div class="empty">No market data</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── HRRR status grid ───────────────────────────────────────────────────
+function renderHRRR(hrrr, positions) {
+  const grid = document.getElementById('hrrr-grid');
+  const keys = Object.keys(hrrr);
+  if (!keys.length) { grid.innerHTML = '<div class="empty">Waiting for first HRRR cycle…</div>'; return; }
+
+  const stationsWithPos = new Set(Object.values(positions).map(p => p.station));
+
+  grid.innerHTML = keys.map(station => {
+    const h = hrrr[station];
+    const hasPos = stationsWithPos.has(station);
+    const flags = h.morning_flags && h.morning_flags.length
+      ? `<div class="hrrr-flags">⚑ flag ${h.morning_flags.join(', ')}</div>`
+      : '';
+    return `<div class="hrrr-cell${hasPos ? ' has-position' : ''}">
+      <div class="hrrr-city">${h.city}</div>
+      <div class="hrrr-tmax">${h.last_tmax_f}°F</div>
+      <div class="hrrr-run">${h.last_run_time || '—'}</div>
+      ${flags}
+    </div>`;
+  }).join('');
+}
+
+// ── Trade history ──────────────────────────────────────────────────────
+function renderHistory(history) {
+  const el = document.getElementById('trade-history-list');
+  if (!history.length) { el.innerHTML = '<div class="empty">No trades yet</div>'; return; }
+  el.innerHTML = history.slice(0, 50).map(t => {
+    const city = CITY_NAMES[t.station] || t.station;
+    const tag = t.type === 'OPEN'
+      ? `<span class="tag tag-open">OPEN</span>`
+      : `<span class="tag tag-close">CLOSE</span>`;
+    const side = t.side
+      ? `<span class="tag tag-${(t.side||'').toLowerCase()}">${t.side}</span>`
+      : '';
+    const pnl = t.pnl != null ? ` ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
+    const detail = t.type === 'OPEN'
+      ? `${t.contracts}× @ ${fmt(t.price)}  edge=${t.edge}`
+      : `${t.contracts}× entry=${fmt(t.entry_price)} exit=${fmt(t.exit_price)}${pnl}`;
+    return `<div class="log-line">
+      <span class="log-ts">${t.ts}</span>${tag} ${side}
+      <strong>${city}</strong> B${t.bucket_lower} — ${detail}
+    </div>`;
+  }).join('');
+}
+
+// ── Alerts ─────────────────────────────────────────────────────────────
+function renderAlerts(alerts) {
+  const el = document.getElementById('alerts-list');
+  if (!alerts.length) { el.innerHTML = '<div class="empty">No alerts</div>'; return; }
+  el.innerHTML = alerts.slice(-30).reverse().map(a => {
+    const msg = typeof a === 'string' ? a : (a.message || JSON.stringify(a));
+    const ts  = a.ts || '';
+    return `<div class="log-line"><span class="log-ts">${ts}</span>${msg}</div>`;
+  }).join('');
+}
+
+// ── Actions ────────────────────────────────────────────────────────────
+function closeOne(marketId) {
+  if (!confirm('Close position ' + marketId + '?')) return;
+  fetch('/api/close-position/' + encodeURIComponent(marketId), { method: 'POST' })
+    .then(r => r.json()).then(d => { if (d.ok) refreshState(); else alert('Close failed: ' + d.error); });
+}
+
+function closeAll() {
+  if (!confirm('Close ALL open positions?')) return;
+  fetch('/api/close-all', { method: 'POST' })
+    .then(r => r.json()).then(() => refreshState());
+}
+</script>
+</body>
+</html>

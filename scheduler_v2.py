@@ -75,6 +75,8 @@ class OpenPositionV2:
 _open_positions: dict[str, OpenPositionV2] = {}
 _station_snapshots: dict[str, list[MarketSnapshot]] = {}  # all buckets per station
 _positions_lock = threading.Lock()
+_trade_history: list[dict] = []
+_engine: HRRRSignalEngine | None = None
 
 
 def _station_hrrr_coords(station: str) -> tuple[float, float]:
@@ -128,6 +130,7 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
         side=signal.side.lower(),
     )
     if result.success:
+        now = datetime.now(timezone.utc)
         pos = OpenPositionV2(
             station=signal.station,
             market_id=signal.market_id,
@@ -136,10 +139,22 @@ def _execute_trade(client: KalshiClient, signal: TradeSignal) -> bool:
             entry_price=signal.kalshi_price,
             side=signal.side,
             event_date=signal.event_date,
-            entry_time=datetime.now(timezone.utc),
+            entry_time=now,
         )
         with _positions_lock:
             _open_positions[signal.market_id] = pos
+        _trade_history.append({
+            "ts":           now.strftime("%H:%Mz"),
+            "type":         "OPEN",
+            "station":      signal.station,
+            "side":         signal.side,
+            "bucket_lower": signal.bucket_lower,
+            "contracts":    signal.contracts,
+            "price":        signal.kalshi_price,
+            "signal_type":  signal.signal_type,
+            "delta_f":      signal.hrrr_delta_f,
+            "edge":         round(signal.edge, 3),
+        })
     else:
         logger.error("%s: order failed — %s", signal.station, result.error)
     return result.success
@@ -154,12 +169,24 @@ def _exit_position(client: KalshiClient, pos: OpenPositionV2, bid: float, reason
         pos.market_id, pos.contracts, bid, entry_side=pos.side.lower()
     )
     if result.success:
+        pnl = (bid - pos.entry_price) * pos.contracts
         with _positions_lock:
             _open_positions.pop(pos.market_id, None)
+        _trade_history.append({
+            "ts":           datetime.now(timezone.utc).strftime("%H:%Mz"),
+            "type":         "CLOSE",
+            "station":      pos.station,
+            "side":         pos.side,
+            "bucket_lower": pos.bucket_lower,
+            "contracts":    pos.contracts,
+            "entry_price":  pos.entry_price,
+            "exit_price":   bid,
+            "pnl":          round(pnl, 2),
+            "reason":       reason,
+        })
         logger.info(
             "[Exit] Complete: %s  entry=%.2f  exit=%.2f  pnl=$%+.2f",
-            pos.market_id, pos.entry_price, bid,
-            (bid - pos.entry_price) * pos.contracts,
+            pos.market_id, pos.entry_price, bid, pnl,
         )
     else:
         logger.error("[Exit] Failed: %s — %s", pos.market_id, result.error)
@@ -366,9 +393,10 @@ def _sleep_until(target: datetime) -> None:
 
 
 def main() -> None:
-    client = KalshiClient()
-    engine = HRRRSignalEngine(bankroll=STARTING_BANKROLL)
-    monitor = ExitMonitor(client, engine)
+    global _engine
+    client  = KalshiClient()
+    _engine = HRRRSignalEngine(bankroll=STARTING_BANKROLL)
+    monitor = ExitMonitor(client, _engine)
     monitor.start()
     logger.info("scheduler_v2 started — dry_run=%s", DRY_RUN)
 
@@ -379,7 +407,7 @@ def main() -> None:
 
         # Only run during operating window
         if now_utc.hour >= HRRR_START_UTC_HOUR:
-            run_cycle(engine, client, run_time, event_date)
+            run_cycle(_engine, client, run_time, event_date)
         else:
             logger.info("Before operating window — waiting.")
 
