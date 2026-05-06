@@ -2198,41 +2198,47 @@ def tier_settlement_sweep():
                     len(positions_to_check), label, sweep_date)
 
         settlements = kalshi.get_settled_markets(sweep_date)
-        if not settlements:
-            logger.info("[Settlement] No settlements from Kalshi for %s yet", sweep_date)
-            continue
 
         for market_id, pos in positions_to_check.items():
-            if market_id in settlements:
-                settlement_value = settlements[market_id]
-                close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
-                realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
-                sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
-                alert_settlement_detected(pos.station, market_id, realized)
-                any_closed = True
+            settlement_value = settlements.get(market_id)
 
-                bucket_hit = settlement_value >= 0.95
-                with _latest_signals_lock:
-                    prior_sig = _latest_signals.get(pos.station)
-                if prior_sig:
-                    sheets.log_model_accuracy(
-                        station=pos.station,
-                        event_date=sweep_date,
-                        cluster_id=prior_sig.cluster_id,
-                        season=prior_sig.season,
-                        forecast_raw=prior_sig.forecast_raw,
-                        forecast_adjusted=prior_sig.forecast_adjusted,
-                        bias_mean=prior_sig.bias_mean,
-                        bias_std=prior_sig.bias_std,
-                        n_obs=prior_sig.n_obs,
-                        observed_high=None,
-                        bucket_hit=bucket_hit,
-                    )
+            # Feed lag fallback: check the market record directly when not in feed
+            if settlement_value is None:
+                settlement_value = kalshi.get_market_result(market_id)
+                if settlement_value is not None:
+                    logger.info("[Settlement] %s not in feed — confirmed via /markets endpoint",
+                                market_id)
 
-                logger.info("[Settlement] %s settled | value=%.2f | P/L $%+.4f",
-                            market_id, settlement_value, realized)
-            else:
-                logger.info("[Settlement] %s not yet in Kalshi feed — leaving open", market_id)
+            if settlement_value is None:
+                logger.info("[Settlement] %s not yet finalized — leaving open", market_id)
+                continue
+
+            close_reason = f"Settlement sweep — LCD verified at ${settlement_value:.2f}"
+            realized = rm.close_position(market_id, exit_price=settlement_value, reason=close_reason)
+            sheets.log_trade_closed(pos.station, market_id, settlement_value, realized, close_reason)
+            alert_settlement_detected(pos.station, market_id, realized)
+            any_closed = True
+
+            bucket_hit = settlement_value >= 0.95
+            with _latest_signals_lock:
+                prior_sig = _latest_signals.get(pos.station)
+            if prior_sig:
+                sheets.log_model_accuracy(
+                    station=pos.station,
+                    event_date=sweep_date,
+                    cluster_id=prior_sig.cluster_id,
+                    season=prior_sig.season,
+                    forecast_raw=prior_sig.forecast_raw,
+                    forecast_adjusted=prior_sig.forecast_adjusted,
+                    bias_mean=prior_sig.bias_mean,
+                    bias_std=prior_sig.bias_std,
+                    n_obs=prior_sig.n_obs,
+                    observed_high=None,
+                    bucket_hit=bucket_hit,
+                )
+
+            logger.info("[Settlement] %s settled | value=%.2f | P/L $%+.4f",
+                        market_id, settlement_value, realized)
 
     if any_closed:
         summary = rm.summary()

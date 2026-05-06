@@ -801,12 +801,17 @@ class KalshiClient:
 
         Used during the morning settlement sweep to auto-close positions
         that resolved overnight without explicit bot action.
+
+        Strategy:
+          1. Query /portfolio/settlements feed (covers positions with non-zero revenue).
+          2. Fall back to per-market /markets/{id} lookup for any open position on
+             that date not already found in the feed (catches losing positions and
+             feed lag cases).
         """
         try:
-            # Fetch settled positions from portfolio history
             data = self._get(
                 "/portfolio/settlements",
-                params={"limit": 100},
+                params={"limit": 250},
             )
             settlements = data.get("settlements", [])
 
@@ -814,16 +819,22 @@ class KalshiClient:
             event_str = event_date.strftime("%y%b%d").upper() if hasattr(event_date, "strftime") else str(event_date)
 
             for s in settlements:
-                ticker = s.get("market_ticker", "")
+                # Kalshi returns 'ticker' (not 'market_ticker') in the settlements feed
+                ticker = s.get("ticker", s.get("market_ticker", ""))
                 if event_str in ticker:
-                    # Settlement value: revenue / (contracts * 100) → fraction
                     revenue   = s.get("revenue", 0)
-                    contracts = s.get("contracts_count", 1)
-                    value     = (revenue / 100.0 / contracts) if contracts > 0 else 0.0
+                    # yes_count_fp / no_count_fp are fractional strings; sum them
+                    try:
+                        yes_ct = float(s.get("yes_count_fp", 0) or 0)
+                        no_ct  = float(s.get("no_count_fp",  0) or 0)
+                        contracts = max(1, round(yes_ct + no_ct))
+                    except (TypeError, ValueError):
+                        contracts = int(s.get("contracts_count", 1) or 1)
+                    value = (revenue / 100.0 / contracts) if contracts > 0 else 0.0
                     result[ticker] = round(value, 4)
 
             logger.info(
-                "get_settled_markets %s: found %d settlements",
+                "get_settled_markets %s: found %d in feed",
                 event_date, len(result),
             )
             return result
@@ -831,6 +842,33 @@ class KalshiClient:
         except Exception as exc:
             logger.error("get_settled_markets failed: %s", exc)
             return {}
+
+    def get_market_result(self, market_id: str) -> float | None:
+        """
+        Check a single market's settlement result via the /markets endpoint.
+
+        Returns 1.0 if NO won, 0.0 if YES won, None if not yet finalized.
+        This is the reliable fallback when the /portfolio/settlements feed lags.
+        """
+        try:
+            market = self.get_market(market_id)
+            if market is None:
+                return None
+            status = market.get("status", "")
+            result = market.get("result", market.get("market_result", None))
+            if status in ("finalized", "settled") and result is not None:
+                if result == "no":
+                    return 1.0
+                if result == "yes":
+                    return 0.0
+                try:
+                    return float(result)
+                except (TypeError, ValueError):
+                    return None
+            return None
+        except Exception as exc:
+            logger.warning("get_market_result %s failed: %s", market_id, exc)
+            return None
 
     # ── Market discovery ──────────────────────────────────────────────────
 

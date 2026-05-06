@@ -14,7 +14,7 @@ Key facts:
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 import numpy as np
@@ -101,7 +101,5 @@ def get_run_times_since(since_utc: datetime, current_utc: datetime) -> list[date
     h = since_utc.replace(minute=0, second=0, microsecond=0)
     while h <= current_utc:
         runs.append(h)
-        h = h.replace(hour=(h.hour + 1) % 24)
-        if h.hour == 0:
-            h = h.replace(day=h.day + 1)
+        h += timedelta(hours=1)
     return runs

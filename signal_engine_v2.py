@@ -81,6 +81,7 @@ class StationState:
     last_tmax_f: Optional[float] = None
     last_run_time: Optional[datetime] = None
     morning_flags: dict[int, float] = field(default_factory=dict)  # bucket_lower → price at flag time
+    traded: set[tuple[date, int, str]] = field(default_factory=set)  # (event_date, bucket_lower, side)
 
 
 # ---------------------------------------------------------------------------
@@ -178,11 +179,15 @@ class HRRRSignalEngine:
             signal_type: str, side: str, bucket_lo: int, market: MarketSnapshot,
             p: float, price: float, delta: float,
         ) -> Optional[TradeSignal]:
+            pos_key = (event_date, bucket_lo, side)
+            if pos_key in state.traded:
+                return None
             edge = p - price
             stake = compute_stake(p, price, self.bankroll)
             if stake < MIN_STAKE:
                 return None
             contracts = max(1, round(stake / price))
+            state.traded.add(pos_key)
             return TradeSignal(
                 station=station,
                 event_date=event_date,
@@ -211,18 +216,19 @@ class HRRRSignalEngine:
 
         # ── Check morning flags against current HRRR ─────────────────────
         for bucket_lo in list(state.morning_flags):
+            market = _find_market(bucket_lo)
+            if not market or not market.is_open:
+                del state.morning_flags[bucket_lo]
+                continue
             distance = abs(snapshot.tmax_corrected_f - (bucket_lo + 1))
             if distance >= HRRR_MATERIAL_MOVE_F:
-                market = _find_market(bucket_lo)
-                if market and market.is_open:
-                    no_ask = 1.0 - market.yes_bid   # price to buy NO
-                    p_no = 1.0 - bucket_probability(snapshot.tmax_corrected_f, bucket_lo, sigma)
-                    sig = _make_signal("no_morning", "NO", bucket_lo, market, p_no, no_ask, 0.0)
-                    if sig:
-                        signals.append(sig)
+                no_ask = 1.0 - market.yes_bid
+                p_no = 1.0 - bucket_probability(snapshot.tmax_corrected_f, bucket_lo, sigma)
+                sig = _make_signal("no_morning", "NO", bucket_lo, market, p_no, no_ask, 0.0)
+                if sig:
+                    signals.append(sig)
                 del state.morning_flags[bucket_lo]
-            else:
-                del state.morning_flags[bucket_lo]
+            # else: HRRR still pointing at bucket — keep flag for next cycle
 
         # ── HRRR divergence: compare to previous run ──────────────────────
         if state.last_tmax_f is not None:
