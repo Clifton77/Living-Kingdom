@@ -108,10 +108,11 @@
       background: #13161f; border: 1px solid var(--border); border-radius: 6px;
       padding: 8px 10px; display: flex; flex-direction: column; gap: 3px;
     }
-    .hrrr-city  { font-size: 11px; color: var(--muted); }
-    .hrrr-tmax  { font-size: 17px; font-weight: 700; }
-    .hrrr-run   { font-size: 10px; color: var(--muted); }
-    .hrrr-flags { font-size: 10px; color: var(--yellow); }
+    .hrrr-city     { font-size: 11px; color: var(--muted); }
+    .hrrr-tmax     { font-size: 17px; font-weight: 700; }
+    .hrrr-sublabel { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; margin-top: -1px; }
+    .hrrr-run      { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .hrrr-flags    { font-size: 10px; color: var(--yellow); }
     .hrrr-cell.has-position { border-color: var(--teal); }
 
     /* ── Alerts / history ───────────────────────────── */
@@ -383,7 +384,8 @@ function renderHRRR(hrrr, positions) {
     return `<div class="hrrr-cell${hasPos ? ' has-position' : ''}">
       <div class="hrrr-city">${h.city}</div>
       <div class="hrrr-tmax">${h.last_tmax_f}°F</div>
-      <div class="hrrr-run">${h.last_run_time || '—'}</div>
+      <div class="hrrr-sublabel">fcst high</div>
+      <div class="hrrr-run">run ${h.last_run_time || '—'}</div>
       ${flags}
     </div>`;
   }).join('');
