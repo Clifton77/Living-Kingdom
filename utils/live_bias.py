@@ -184,10 +184,14 @@ def compute_live_bias_batch(
     start_hour = max(0, run_hour - MAX_BACK_H)
 
     # ── Lead per station ──────────────────────────────────────────────────────
+    # For stations whose peak crosses midnight UTC (e.g. KSEA peaks at 00z next
+    # day), peak_utc < run_hour gives a negative raw lead.  Add 24 to get the
+    # true hours remaining in today's trading window.
     lead_by: dict[str, int] = {}
     for s in stations:
-        lead = peaks_utc.get(s, 0) - run_hour
-        if lead > 0:
+        raw = peaks_utc.get(s, 0) - run_hour
+        lead = raw if raw > 0 else raw + 24
+        if 0 < lead <= 23:
             lead_by[s] = lead
 
     if not lead_by:
