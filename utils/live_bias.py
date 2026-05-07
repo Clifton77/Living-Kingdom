@@ -48,8 +48,8 @@ from config import HRRR_COLD_BIAS_F, KALSHI_SETTLEMENT_STATION
 logger = logging.getLogger(__name__)
 
 IEM_1MIN_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py"
-MIN_SAMPLES  = 3   # pairs needed before applying live calibration
-MAX_BACK_H   = 8   # look back at most this many prior runs from current run hour
+MIN_SAMPLES  = 3    # pairs needed before applying live calibration
+MAX_BACK_H   = 13   # look back up to 13h so 00z runs are reachable from any 12z+ cycle
 
 
 def _iem_code(icao: str) -> str:
@@ -181,7 +181,7 @@ def compute_live_bias_batch(
       None    — fewer than MIN_SAMPLES pairs; use config.HRRR_COLD_BIAS_F fallback
     """
     run_hour   = current_run_time.hour
-    start_hour = max(12, run_hour - MAX_BACK_H)
+    start_hour = max(0, run_hour - MAX_BACK_H)
 
     # ── Lead per station ──────────────────────────────────────────────────────
     lead_by: dict[str, int] = {}
