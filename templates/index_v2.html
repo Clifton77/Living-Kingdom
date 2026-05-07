@@ -246,11 +246,13 @@ function connect() {
   es = new EventSource('/stream');
   es.addEventListener('full_state', e => applyState(JSON.parse(e.data)));
   es.addEventListener('position_closed', () => refreshState());
+  es.addEventListener('state_refresh', () => refreshState());
   es.addEventListener('heartbeat', () => {});
   es.onopen  = () => setConn(true);
   es.onerror = () => { setConn(false); setTimeout(connect, 5000); };
 }
 connect();
+setInterval(refreshState, 30000);
 
 function setConn(live) {
   const d = document.getElementById('conn-dot');

@@ -42,6 +42,7 @@ from config import (
 from kalshi_client import KalshiClient, MarketSnapshot
 from signal_engine_v2 import HRRRSignalEngine, TradeSignal
 from utils.asos_live import get_best_obs_temp, get_running_max
+from utils.events import push_event
 from utils.hrrr_fetcher import fetch_station_tmax
 from utils.peak_hours import get_peak_hour
 from utils.sheets import get_sheets_logger
@@ -701,6 +702,8 @@ class ExitMonitor:
                     self._check(market_id, pos, markets, obs_temp, running_max)
                 except Exception as exc:
                     logger.warning("[ExitMonitor] Error checking %s: %s", market_id, exc)
+
+        push_event("state_refresh", {})
 
     def _loop(self) -> None:
         # Immediate first poll so newly opened positions show obs right away.
