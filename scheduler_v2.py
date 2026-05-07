@@ -593,8 +593,12 @@ def run_cycle(
         with _positions_lock:
             _station_snapshots[station] = markets
 
-        snapshot = engine.build_snapshot(station, run_time, raw_tmax,
-                                         bias_f=live_biases.get(station))
+        bias_f = live_biases.get(station)
+        if bias_f is None:
+            logger.info("%s: skipping — insufficient calibration pairs (<3)", station)
+            continue
+
+        snapshot = engine.build_snapshot(station, run_time, raw_tmax, bias_f=bias_f)
         signals = engine.update(
             station=station,
             snapshot=snapshot,
