@@ -15,7 +15,6 @@ Loop:
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -44,14 +43,11 @@ from signal_engine_v2 import HRRRSignalEngine, TradeSignal
 from utils.asos_live import get_best_obs_temp, get_running_max
 from utils.events import push_event
 from utils.hrrr_fetcher import fetch_station_tmax
+from utils.logging_config import setup_logging
 from utils.peak_hours import get_peak_hour
 from utils.sheets import get_sheets_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
-logger = logging.getLogger("scheduler_v2")
+logger = setup_logging("scheduler_v2")
 
 ET = pytz.timezone("America/New_York")
 MORNING_SCAN_ET_HOUR   = 8
@@ -731,11 +727,14 @@ class ExitMonitor:
         market = next((m for m in markets if m.market_id == market_id), None)
 
         if market is None or not market.is_open:
+            _marked = False
             with _positions_lock:
                 if market_id in _open_positions and not _open_positions[market_id].pending_settlement:
                     _open_positions[market_id].pending_settlement = True
-                    _save_positions()
-                    logger.info("[ExitMonitor] %s market closed — marked pending settlement", market_id)
+                    _marked = True
+            if _marked:
+                _save_positions()
+                logger.info("[ExitMonitor] %s market closed — marked pending settlement", market_id)
             return
 
         current_bid = market.yes_bid if pos.side == "YES" else (1.0 - market.yes_ask)
