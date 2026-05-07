@@ -300,10 +300,21 @@ class HRRRSignalEngine:
 
         return signals
 
-    def build_snapshot(self, station: str, run_time: datetime, tmax_raw_f: float) -> HRRRSnapshot:
-        """Build a HRRRSnapshot from a raw HRRR TMAX value."""
+    def build_snapshot(
+        self,
+        station: str,
+        run_time: datetime,
+        tmax_raw_f: float,
+        bias_f: float | None = None,
+    ) -> HRRRSnapshot:
+        """
+        Build a HRRRSnapshot from a raw HRRR TMAX value.
+        bias_f: live calibration correction (°F) to add.  Falls back to the
+                fixed HRRR_COLD_BIAS_F constant when None.
+        """
         from config import HRRR_COLD_BIAS_F
-        corrected = tmax_raw_f + HRRR_COLD_BIAS_F
+        correction = bias_f if bias_f is not None else HRRR_COLD_BIAS_F
+        corrected  = tmax_raw_f + correction
         sigma = HRRR_STATION_SIGMA.get(station, 3.0)
         # Rough bucket from corrected temp — actual bucket mapped later against live markets
         t = round(corrected)

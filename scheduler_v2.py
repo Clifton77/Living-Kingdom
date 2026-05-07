@@ -43,6 +43,7 @@ from signal_engine_v2 import HRRRSignalEngine, TradeSignal
 from utils.asos_live import get_best_obs_temp, get_running_max
 from utils.events import push_event
 from utils.hrrr_fetcher import fetch_station_tmax
+from utils.live_bias import compute_live_bias_batch
 from utils.logging_config import setup_logging
 from utils.peak_hours import get_peak_hour
 from utils.sheets import get_sheets_logger
@@ -544,7 +545,17 @@ def run_cycle(
 
     # Build coord + peak maps for active stations
     coords = {s: _station_hrrr_coords(s) for s in active}
-    peaks = {s: _peak_utc(s, event_date) for s in active}
+    peaks  = {s: _peak_utc(s, event_date) for s in active}
+
+    # Compute live bias calibration for all stations before the main loop.
+    # Uses prior-run HRRR forecasts (already cached) vs. observed temps at the
+    # same lead time.  Falls back to HRRR_COLD_BIAS_F per station when there
+    # are fewer than 3 lead-matched pairs available.
+    try:
+        live_biases = compute_live_bias_batch(active, run_time, peaks, coords, event_date)
+    except Exception as exc:
+        logger.warning("compute_live_bias_batch failed: %s — using fixed bias", exc)
+        live_biases = {s: None for s in active}
 
     # Fetch HRRR — retry every 5 min for up to 25 min while current run posts,
     # then fall back to the previous hour's run as a last resort.
@@ -582,7 +593,8 @@ def run_cycle(
         with _positions_lock:
             _station_snapshots[station] = markets
 
-        snapshot = engine.build_snapshot(station, run_time, raw_tmax)
+        snapshot = engine.build_snapshot(station, run_time, raw_tmax,
+                                         bias_f=live_biases.get(station))
         signals = engine.update(
             station=station,
             snapshot=snapshot,
