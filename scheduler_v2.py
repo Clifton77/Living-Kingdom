@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pytz
 
 from config import (
@@ -40,7 +41,7 @@ from config import (
 )
 from kalshi_client import KalshiClient, MarketSnapshot
 from signal_engine_v2 import HRRRSignalEngine, TradeSignal
-from utils.asos_live import get_best_obs_temp, get_running_max
+from utils.asos_live import get_best_obs_temp, get_obs_context, get_running_max
 from utils.events import push_event
 from utils.hrrr_fetcher import fetch_station_tmax
 from utils.live_bias import compute_live_bias_batch
@@ -85,6 +86,10 @@ _station_snapshots: dict[str, list[MarketSnapshot]] = {}  # all buckets per stat
 _positions_lock = threading.Lock()
 _trade_history: list[dict] = []
 _engine: HRRRSignalEngine | None = None
+
+# TMAX history for intra-day sigma estimation — reset each calendar day
+_tmax_history: dict[str, list[float]] = {}   # station → today's raw TMAX values
+_history_date: str = ""                       # date string of current history batch
 
 # Running P&L counters — updated by _record_settlement()
 _bankroll:   float = STARTING_BANKROLL
@@ -527,9 +532,16 @@ def run_cycle(
     event_date: date,
 ) -> None:
     """One HRRR cycle: fetch, signal, trade."""
+    global _history_date
     now_utc = datetime.now(timezone.utc)
     now_et = now_utc.astimezone(ET)
     morning_scan = _is_morning_scan(now_et)
+
+    # Reset intra-day TMAX history on date rollover
+    date_str = event_date.isoformat()
+    if _history_date != date_str:
+        _tmax_history.clear()
+        _history_date = date_str
 
     active = _active_stations(event_date, now_utc)
     if not active:
@@ -587,6 +599,13 @@ def run_cycle(
             logger.warning("%s: HRRR fetch returned None", station)
             continue
 
+        # Accumulate today's HRRR values — used to compute live sigma
+        _tmax_history.setdefault(station, []).append(raw_tmax)
+        today_vals = _tmax_history[station]
+        sigma_live: float | None = (
+            round(float(np.std(today_vals)), 3) if len(today_vals) >= 3 else None
+        )
+
         markets = _get_markets(client, station, event_date)
         if not markets:
             continue
@@ -598,7 +617,15 @@ def run_cycle(
             logger.info("%s: skipping — insufficient calibration pairs (<3)", station)
             continue
 
-        snapshot = engine.build_snapshot(station, run_time, raw_tmax, bias_f=bias_f)
+        # Lead hours to peak — used for lead-dependent sigma scaling
+        peak_utc_h = peaks[station]
+        raw_lead   = peak_utc_h - run_time.hour
+        lead_h: int = raw_lead if raw_lead > 0 else raw_lead + 24
+
+        snapshot = engine.build_snapshot(
+            station, run_time, raw_tmax,
+            bias_f=bias_f, lead_h=lead_h, sigma_live=sigma_live,
+        )
         signals = engine.update(
             station=station,
             snapshot=snapshot,
@@ -607,36 +634,60 @@ def run_cycle(
             is_morning_scan=morning_scan,
         )
 
-        # Fetch running max once per station — used to guard all signals below.
+        # Fetch obs context once per station — provides running_max, current temp,
+        # and short-term trend for signal guards below.
         try:
-            running_max = get_running_max(station, event_date)
+            obs_ctx     = get_obs_context(station, event_date)
+            running_max = obs_ctx["running_max_f"]
+            current_obs = obs_ctx["current_temp_f"]
+            trend       = obs_ctx["trend_f_per_min"]
         except Exception as exc:
-            logger.warning("%s: running_max fetch failed in run_cycle — %s", station, exc)
+            logger.warning("%s: obs context fetch failed in run_cycle — %s", station, exc)
             running_max = None
+            current_obs = None
+            trend       = None
 
         for sig in signals:
             if running_max is not None:
-                # YES on any bucket: skip if temp already exceeded that bucket's upper bound.
-                # Covers interior buckets ("86 to 87") and lower-tail ("85 or below").
+                # YES: skip if temp already ran past the target bucket
                 if sig.side == "YES" and running_max > sig.bucket_lower + 2:
                     logger.info(
                         "%s: skipping YES B%d — running_max %.1f°F already past bucket",
                         station, sig.bucket_lower, running_max,
                     )
                     continue
-                # NO on any bucket: skip if temp is already inside or past that bucket.
+                # NO: skip if temp already inside or past that bucket
                 if sig.side == "NO" and running_max >= sig.bucket_lower:
                     logger.info(
                         "%s: skipping NO B%d — running_max %.1f°F already in/past bucket",
                         station, sig.bucket_lower, running_max,
                     )
                     continue
+
+            # Obs trend guard on YES signals: HRRR calls for a large rise above
+            # current obs, but temp is already cooling — high probability HRRR
+            # is wrong.  Block if expected rise > 2σ AND trend < −0.05°F/min.
+            if (
+                sig.side == "YES"
+                and current_obs is not None
+                and trend is not None
+            ):
+                expected_rise = snapshot.tmax_corrected_f - current_obs
+                if expected_rise > 2 * snapshot.sigma and trend < -0.05:
+                    logger.info(
+                        "%s: skipping YES B%d — obs cooling (%.3f°F/min) "
+                        "while HRRR needs +%.1f°F rise (2σ=%.1f°F)",
+                        station, sig.bucket_lower, trend,
+                        expected_rise, 2 * snapshot.sigma,
+                    )
+                    continue
+
             _execute_trade(client, sig)
 
         logger.debug(
-            "%s: HRRR=%.1fF corrected=%.1fF bucket=%d signals=%d",
+            "%s: HRRR=%.1fF corrected=%.1fF bucket=%d sigma=%.2f lead=%dh signals=%d",
             station, raw_tmax, snapshot.tmax_corrected_f,
-            snapshot.peak_bucket_lower, len(signals),
+            snapshot.peak_bucket_lower, snapshot.sigma, lead_h, len(signals),
         )
 
     # Persist HRRR baselines after every cycle so restart can skip the dead

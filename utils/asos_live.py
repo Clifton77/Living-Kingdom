@@ -23,6 +23,7 @@ from datetime import date, datetime, timezone
 from io import StringIO
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -119,6 +120,52 @@ def get_running_max(station: str, event_date: date) -> float | None:
     running_max = float(df["tmpf"].max())
     logger.debug("%s: running max = %.1f°F (%d 1-min obs)", station, running_max, len(df))
     return running_max
+
+
+def get_obs_context(
+    station: str,
+    event_date: date,
+    trend_window_minutes: int = 20,
+) -> dict:
+    """
+    Single IEM fetch returning running max, current temp, and short-term trend.
+
+    Returns dict with keys:
+        running_max_f    : today's highest temp (°F), None if unavailable
+        current_temp_f   : most recent observed temp (°F), None if unavailable
+        trend_f_per_min  : linear trend over last trend_window_minutes of 1-min
+                           data (positive = warming, negative = cooling).
+                           None if fewer than 3 minutes of data.
+
+    Falls back to METAR for current_temp_f when 1-min data is unavailable.
+    """
+    df = fetch_1min_temps(station, event_date)
+
+    result: dict = {"running_max_f": None, "current_temp_f": None, "trend_f_per_min": None}
+
+    if df is not None and not df.empty:
+        result["running_max_f"]  = float(df["tmpf"].max())
+        result["current_temp_f"] = float(df["tmpf"].iloc[-1])
+
+        now_local = df["valid_local"].max()
+        cutoff    = now_local - pd.Timedelta(minutes=trend_window_minutes)
+        recent    = df[df["valid_local"] >= cutoff].copy()
+        if len(recent) >= 3:
+            x = (recent["valid_local"] - recent["valid_local"].min()).dt.total_seconds() / 60.0
+            slope, _ = np.polyfit(x.values, recent["tmpf"].values, 1)
+            result["trend_f_per_min"] = round(float(slope), 4)
+    else:
+        # 1-min unavailable — fall back to METAR for current temp
+        result["current_temp_f"] = get_best_obs_temp(station)
+
+    logger.debug(
+        "%s obs context: max=%.1f  cur=%.1f  trend=%s°F/min",
+        station,
+        result["running_max_f"]  or float("nan"),
+        result["current_temp_f"] or float("nan"),
+        f"{result['trend_f_per_min']:+.4f}" if result["trend_f_per_min"] is not None else "N/A",
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -306,17 +306,31 @@ class HRRRSignalEngine:
         run_time: datetime,
         tmax_raw_f: float,
         bias_f: float | None = None,
+        lead_h: int | None = None,
+        sigma_live: float | None = None,
     ) -> HRRRSnapshot:
         """
         Build a HRRRSnapshot from a raw HRRR TMAX value.
-        bias_f: live calibration correction (°F) to add.  Falls back to the
-                fixed HRRR_COLD_BIAS_F constant when None.
+
+        bias_f     : live calibration correction (°F). Falls back to HRRR_COLD_BIAS_F.
+        lead_h     : hours remaining to peak. Scales sigma up for longer leads via
+                     sqrt(lead_h / 6) so a 12h lead is ~40% wider than a 6h lead.
+        sigma_live : std of today's HRRR TMAX values for this station. Used as a
+                     sigma floor so probability estimates widen automatically on
+                     convective days when runs are disagreeing.
         """
+        import math
         from config import HRRR_COLD_BIAS_F
         correction = bias_f if bias_f is not None else HRRR_COLD_BIAS_F
         corrected  = tmax_raw_f + correction
-        sigma = HRRR_STATION_SIGMA.get(station, 3.0)
-        # Rough bucket from corrected temp — actual bucket mapped later against live markets
+        sigma_base = HRRR_STATION_SIGMA.get(station, 3.0)
+        # Lead-dependent scaling: longer lead → wider uncertainty
+        if lead_h is not None and lead_h > 0:
+            sigma_lead = max(1.0, sigma_base * math.sqrt(lead_h / 6.0))
+        else:
+            sigma_lead = sigma_base
+        # Live sigma floor: auto-widens on days when HRRR runs disagree
+        sigma_eff = max(sigma_lead, sigma_live) if sigma_live is not None else sigma_lead
         t = round(corrected)
         lower = ((t - 1) // 2) * 2 + 1
         return HRRRSnapshot(
@@ -325,5 +339,5 @@ class HRRRSignalEngine:
             tmax_raw_f=tmax_raw_f,
             tmax_corrected_f=corrected,
             peak_bucket_lower=lower,
-            sigma=sigma,
+            sigma=sigma_eff,
         )

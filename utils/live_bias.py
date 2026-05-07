@@ -245,7 +245,10 @@ def compute_live_bias_batch(
         return {s: None for s in stations}
 
     # ── Fetch HRRR: one GRIB open per unique (run_hour, fxx) ─────────────────
-    errors_by: dict[str, list[float]] = {s: [] for s in stations}
+    # Each pair is (weight, error).  Recent valid times (small age) get higher
+    # weight via exp(-0.15 * age) so today's last few pairs dominate the mean.
+    import math as _math
+    weighted_by: dict[str, list[tuple[float, float]]] = {s: [] for s in stations}
 
     for (prior_h, fxx), station_list in sorted(needed.items()):
         prior_run_dt = current_run_time.replace(
@@ -261,17 +264,19 @@ def compute_live_bias_batch(
             if obs_f is None:
                 continue
             err = obs_f - fcst_f
-            errors_by[s].append(err)
+            age = max(0, run_hour - valid_h)
+            w   = _math.exp(-0.15 * age)
+            weighted_by[s].append((w, err))
             logger.debug(
-                "[LiveBias] %s  %dz→%dz fxx=%d  fcst=%.1f°F  obs=%.1f°F  err=%+.1f°F",
-                s, prior_h, valid_h, fxx, fcst_f, obs_f, err,
+                "[LiveBias] %s  %dz→%dz fxx=%d  fcst=%.1f°F  obs=%.1f°F  err=%+.1f°F  w=%.3f",
+                s, prior_h, valid_h, fxx, fcst_f, obs_f, err, w,
             )
 
     # ── Summarise ─────────────────────────────────────────────────────────────
     result: dict[str, Optional[float]] = {}
     for s in stations:
-        errs = errors_by[s]
-        n    = len(errs)
+        pairs = weighted_by[s]
+        n     = len(pairs)
         if n < MIN_SAMPLES:
             logger.info(
                 "[LiveBias] %s: %d/%d pairs — fallback to fixed %+.1f°F",
@@ -279,7 +284,8 @@ def compute_live_bias_batch(
             )
             result[s] = None
         else:
-            bias = round(sum(errs) / n, 2)
+            total_w = sum(w for w, _ in pairs)
+            bias    = round(sum(w * e for w, e in pairs) / total_w, 2)
             logger.info(
                 "[LiveBias] %s: bias=%+.2f°F  n=%d  fixed_was=%+.1f°F",
                 s, bias, n, HRRR_COLD_BIAS_F,
