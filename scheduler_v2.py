@@ -26,6 +26,7 @@ import pytz
 
 from config import (
     DRY_RUN,
+    ENTRY_CUTOFF_PRE_PEAK_HOURS,
     HRRR_COLD_BIAS_F,
     HRRR_MATERIAL_MOVE_F,
     HRRR_START_UTC_HOUR,
@@ -378,11 +379,17 @@ def _peak_utc(station: str, event_date: date) -> int:
 
 
 def _active_stations(event_date: date, now_utc: datetime) -> list[str]:
-    """Stations where peak hour hasn't passed yet."""
+    """Stations where the entry cutoff hasn't been reached yet.
+    Stops new entries ENTRY_CUTOFF_PRE_PEAK_HOURS before peak so we never
+    trade into a market that is effectively already decided."""
     active = []
     for s in STATIONS:
         peak = _peak_utc(s, event_date)
-        if now_utc.hour < peak:
+        peak_dt = now_utc.replace(hour=peak, minute=0, second=0, microsecond=0)
+        if peak_dt <= now_utc:
+            peak_dt += timedelta(days=1)
+        cutoff_dt = peak_dt - timedelta(hours=ENTRY_CUTOFF_PRE_PEAK_HOURS)
+        if now_utc < cutoff_dt:
             active.append(s)
     return active
 
@@ -586,7 +593,30 @@ def run_cycle(
             is_morning_scan=morning_scan,
         )
 
+        # Fetch running max once per station — used to guard all signals below.
+        try:
+            running_max = get_running_max(station, event_date)
+        except Exception as exc:
+            logger.warning("%s: running_max fetch failed in run_cycle — %s", station, exc)
+            running_max = None
+
         for sig in signals:
+            if running_max is not None:
+                # YES on any bucket: skip if temp already exceeded that bucket's upper bound.
+                # Covers interior buckets ("86 to 87") and lower-tail ("85 or below").
+                if sig.side == "YES" and running_max > sig.bucket_lower + 2:
+                    logger.info(
+                        "%s: skipping YES B%d — running_max %.1f°F already past bucket",
+                        station, sig.bucket_lower, running_max,
+                    )
+                    continue
+                # NO on any bucket: skip if temp is already inside or past that bucket.
+                if sig.side == "NO" and running_max >= sig.bucket_lower:
+                    logger.info(
+                        "%s: skipping NO B%d — running_max %.1f°F already in/past bucket",
+                        station, sig.bucket_lower, running_max,
+                    )
+                    continue
             _execute_trade(client, sig)
 
         logger.debug(
