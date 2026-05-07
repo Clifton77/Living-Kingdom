@@ -47,7 +47,7 @@ from config import HRRR_COLD_BIAS_F, KALSHI_SETTLEMENT_STATION
 
 logger = logging.getLogger(__name__)
 
-IEM_1MIN_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py"
+IEM_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 MIN_SAMPLES  = 3    # pairs needed before applying live calibration
 MAX_BACK_H   = 13   # look back up to 13h so 00z runs are reachable from any 12z+ cycle
 
@@ -59,37 +59,51 @@ def _iem_code(icao: str) -> str:
 
 def fetch_hourly_obs_utc(station: str, event_date: date) -> dict[int, float]:
     """
-    Fetch IEM 1-min ASOS data in UTC for event_date.
-    Returns {utc_hour: temp_f} — one obs per hour, closest to top-of-hour.
-    Uses the Kalshi settlement station so it matches the HRRR grid point location.
-    Returns {} on any failure.
+    Fetch ASOS observations in UTC for event_date and return one representative
+    temperature per UTC hour (obs closest to top-of-hour).
+
+    Uses the IEM ASOS request API (standard METARs, ~hourly at :53).
+    Uses the Kalshi settlement station so the location matches the HRRR grid point.
+    Returns {} on any failure or when no data is available.
     """
     settlement = KALSHI_SETTLEMENT_STATION.get(station, station)
     iem_code   = _iem_code(settlement)
 
     params = {
         "station": iem_code,
-        "vars":    "tmpf",
-        "year1":   event_date.year,  "month1": event_date.month,  "day1": event_date.day,
-        "year2":   event_date.year,  "month2": event_date.month,  "day2": event_date.day,
+        "data":    "tmpf",
         "tz":      "UTC",
+        "year1":   event_date.year,  "month1": event_date.month,  "day1": event_date.day,
+        "hour1":   0,                "minute1": 0,
+        "year2":   event_date.year,  "month2": event_date.month,  "day2": event_date.day,
+        "hour2":   23,               "minute2": 59,
         "format":  "onlycomma",
         "latlon":  "no",
-        "missing": "M",
         "direct":  "no",
     }
 
     try:
-        resp = requests.get(IEM_1MIN_URL, params=params, timeout=30)
-        resp.raise_for_status()
+        import time as _time
+        for attempt in range(3):
+            resp = requests.get(IEM_ASOS_URL, params=params, timeout=30)
+            if resp.status_code == 429:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                logger.debug("%s: IEM 429 — retry %d in %ds", station, attempt + 1, wait)
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            logger.warning("%s: IEM 429 after 3 retries", station)
+            return {}
         text = resp.text.strip()
         if not text or "station" not in text.lower():
-            logger.debug("%s (%s): empty IEM 1-min response", station, iem_code)
+            logger.debug("%s (%s): empty ASOS response", station, iem_code)
             return {}
 
         df = pd.read_csv(StringIO(text), na_values=["M", ""], low_memory=False)
         if "valid" not in df.columns or "tmpf" not in df.columns:
-            logger.debug("%s: unexpected IEM columns: %s", station, df.columns.tolist())
+            logger.debug("%s: unexpected ASOS columns: %s", station, df.columns.tolist())
             return {}
 
         df["valid_utc"] = pd.to_datetime(df["valid"], errors="coerce")
@@ -99,6 +113,9 @@ def fetch_hourly_obs_utc(station: str, event_date: date) -> dict[int, float]:
             return {}
 
         # Per UTC hour: pick the obs closest to :00
+        # Standard METARs arrive at :53 — 7 min before the next hour top.
+        # mins_from_top measures distance from the start of the hour the obs
+        # falls in; :53 reads as 53 min and is assigned to that same hour.
         df["mins_from_top"] = df["valid_utc"].dt.minute + df["valid_utc"].dt.second / 60.0
         hourly: dict[int, float] = {}
         for hour, grp in df.groupby(df["valid_utc"].dt.hour):
@@ -198,10 +215,12 @@ def compute_live_bias_batch(
         logger.info("[LiveBias] All stations at or past peak — no calibration needed")
         return {s: None for s in stations}
 
-    # ── Hourly obs: one HTTP request per station ──────────────────────────────
+    # ── Hourly obs: one HTTP request per station, throttled to avoid 429s ───────
+    import time as _time
     obs_by: dict[str, dict[int, float]] = {}
     for s in lead_by:
         obs_by[s] = fetch_hourly_obs_utc(s, event_date)
+        _time.sleep(0.4)
 
     # ── Map (prior_run_hour, fxx) → stations that need it ────────────────────
     # A station needs (H, lead_h) when:
