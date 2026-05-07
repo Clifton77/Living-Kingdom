@@ -27,6 +27,7 @@ from scipy.stats import norm
 
 from config import (
     HRRR_COLD_BIAS_F,
+    HRRR_MARKET_MAX_DISTANCE_F,
     HRRR_MATERIAL_MOVE_F,
     HRRR_STATION_SIGMA,
     KELLY_FRAC,
@@ -253,28 +254,45 @@ class HRRRSignalEngine:
             else:
                 delta = snapshot.tmax_corrected_f - state.last_tmax_f
 
-            if abs(delta) >= HRRR_MATERIAL_MOVE_F:
-                new_bucket = tmax_to_bucket(snapshot.tmax_corrected_f, markets)
-                old_bucket = tmax_to_bucket(state.last_tmax_f, markets)
+                if abs(delta) >= HRRR_MATERIAL_MOVE_F:
+                    # Gate: HRRR must be within 4°F of Kalshi's peak-priced bucket.
+                    # Blocks divergence trades when HRRR is drifting in the wrong space.
+                    open_markets = [m for m in markets if m.is_open]
+                    peak_market = max(open_markets, key=lambda m: m.yes_ask) if open_markets else None
+                    if peak_market is not None:
+                        peak_center = peak_market.bucket_lower + 1
+                        hrrr_market_distance = abs(snapshot.tmax_corrected_f - peak_center)
+                        if hrrr_market_distance > HRRR_MARKET_MAX_DISTANCE_F:
+                            logger.info(
+                                "%s divergence blocked: HRRR %.1f°F is %.1f°F from Kalshi peak B%d (limit %.1f°F)",
+                                station, snapshot.tmax_corrected_f, hrrr_market_distance,
+                                peak_market.bucket_lower, HRRR_MARKET_MAX_DISTANCE_F,
+                            )
+                            state.last_tmax_f = snapshot.tmax_corrected_f
+                            state.last_run_time = snapshot.run_time
+                            return signals
 
-                if new_bucket is not None:
-                    market = _find_market(new_bucket)
-                    if market and market.is_open:
-                        p_yes = bucket_probability(snapshot.tmax_corrected_f, new_bucket, sigma)
-                        sig = _make_signal("yes_divergence", "YES", new_bucket, market,
-                                           p_yes, market.yes_ask, delta)
-                        if sig:
-                            signals.append(sig)
+                    new_bucket = tmax_to_bucket(snapshot.tmax_corrected_f, markets)
+                    old_bucket = tmax_to_bucket(state.last_tmax_f, markets)
 
-                if old_bucket is not None and old_bucket != new_bucket:
-                    market = _find_market(old_bucket)
-                    if market and market.is_open:
-                        no_ask = 1.0 - market.yes_bid
-                        p_no = 1.0 - bucket_probability(snapshot.tmax_corrected_f, old_bucket, sigma)
-                        sig = _make_signal("no_divergence", "NO", old_bucket, market,
-                                           p_no, no_ask, delta)
-                        if sig:
-                            signals.append(sig)
+                    if new_bucket is not None:
+                        market = _find_market(new_bucket)
+                        if market and market.is_open:
+                            p_yes = bucket_probability(snapshot.tmax_corrected_f, new_bucket, sigma)
+                            sig = _make_signal("yes_divergence", "YES", new_bucket, market,
+                                               p_yes, market.yes_ask, delta)
+                            if sig:
+                                signals.append(sig)
+
+                    if old_bucket is not None and old_bucket != new_bucket:
+                        market = _find_market(old_bucket)
+                        if market and market.is_open:
+                            no_ask = 1.0 - market.yes_bid
+                            p_no = 1.0 - bucket_probability(snapshot.tmax_corrected_f, old_bucket, sigma)
+                            sig = _make_signal("no_divergence", "NO", old_bucket, market,
+                                               p_no, no_ask, delta)
+                            if sig:
+                                signals.append(sig)
 
         # ── Update state ──────────────────────────────────────────────────
         state.last_tmax_f = snapshot.tmax_corrected_f

@@ -626,6 +626,7 @@ LOW_PRICE_STOP_THRESHOLD = 0.08   # skip price stop if entry_price <= this
 # HRRR signal thresholds
 HRRR_MATERIAL_MOVE_F          = 2.0   # minimum run-to-run delta to trigger signal (°F)
 HRRR_COLD_BIAS_F              = 1.7   # apply before bucket mapping (HRRR runs cold)
+HRRR_MARKET_MAX_DISTANCE_F    = 4.0   # max distance from Kalshi peak bucket — blocks divergence trades when HRRR is in wrong space
 MORNING_OVERCONFIDENCE_THRESH = 0.35  # flag buckets priced >= 35% at morning scan
 HRRR_START_UTC_HOUR           = 12    # 12z run — first useful same-day run
 HRRR_START_UTC_MINUTE         = 30    # available ~30 min after run time
