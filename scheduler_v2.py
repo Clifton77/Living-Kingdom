@@ -60,6 +60,7 @@ EXIT_POLL_INTERVAL         = 300   # seconds between exit checks (normal)
 EXIT_NEAR_HOUR_INTERVAL    = 60    # seconds during :47–:05 window (ASOS posts ~:53–:58)
 EXIT_NEAR_HOUR_START_MIN   = 47    # minute-of-hour where fast polling begins
 EXIT_NEAR_HOUR_END_MIN     = 5     # minute-of-hour where fast polling ends
+OBS_REFRESH_INTERVAL       = 90    # seconds between lightweight obs-only refreshes
 
 
 @dataclass
@@ -791,6 +792,62 @@ def _sleep_until(target: datetime) -> None:
         time.sleep(delta)
 
 
+class ObsRefresh:
+    """
+    Lightweight background thread that updates obs temp and running_max every
+    OBS_REFRESH_INTERVAL seconds without fetching markets or running exit logic.
+    Keeps the dashboard current between full ExitMonitor poll cycles.
+    """
+
+    def __init__(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="obs-refresh"
+        )
+
+    def start(self) -> None:
+        logger.info("ObsRefresh started — interval %ds", OBS_REFRESH_INTERVAL)
+        self._thread.start()
+
+    def _refresh(self) -> None:
+        with _positions_lock:
+            if not _open_positions:
+                return
+            snapshot = dict(_open_positions)
+
+        by_station: dict[str, list[tuple[str, OpenPositionV2]]] = {}
+        for mid, pos in snapshot.items():
+            by_station.setdefault(pos.station, []).append((mid, pos))
+
+        updated = False
+        for station, entries in by_station.items():
+            event_date = entries[0][1].event_date
+            try:
+                obs_temp    = get_best_obs_temp(station)
+                running_max = get_running_max(station, event_date)
+            except Exception as exc:
+                logger.debug("[ObsRefresh] %s: obs fetch failed — %s", station, exc)
+                continue
+
+            with _positions_lock:
+                for mid, _ in entries:
+                    if mid in _open_positions:
+                        _open_positions[mid].current_obs_f  = obs_temp
+                        _open_positions[mid].running_max_f  = running_max
+                        _open_positions[mid].last_checked   = datetime.now(timezone.utc)
+            updated = True
+
+        if updated:
+            push_event("state_refresh", {})
+
+    def _loop(self) -> None:
+        while True:
+            time.sleep(OBS_REFRESH_INTERVAL)
+            try:
+                self._refresh()
+            except Exception as exc:
+                logger.warning("[ObsRefresh] error: %s", exc)
+
+
 def main() -> None:
     global _engine
     client  = KalshiClient()
@@ -806,6 +863,9 @@ def main() -> None:
 
     monitor = ExitMonitor(client, _engine)
     monitor.start()
+
+    obs_refresh = ObsRefresh()
+    obs_refresh.start()
 
     sweep = SettlementSweep(client)
     sweep.start()
