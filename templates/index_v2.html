@@ -150,6 +150,14 @@
     <span id="stat-bankroll" class="stat-value neu">—</span>
   </div>
   <div class="stat">
+    <span class="stat-label">Daily P/L</span>
+    <span id="stat-daily-pnl" class="stat-value neu">—</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Total P/L</span>
+    <span id="stat-total-pnl" class="stat-value neu">—</span>
+  </div>
+  <div class="stat">
     <span class="stat-label">Unrealized</span>
     <span id="stat-unrealized" class="stat-value neu">—</span>
   </div>
@@ -180,6 +188,8 @@
               <th>City</th>
               <th>Side</th>
               <th>Bucket</th>
+              <th>Cts</th>
+              <th>Stake</th>
               <th>Entry</th>
               <th>Bid</th>
               <th>Ask</th>
@@ -192,7 +202,7 @@
             </tr>
           </thead>
           <tbody id="positions-body">
-            <tr><td colspan="12" class="empty">No open positions</td></tr>
+            <tr><td colspan="14" class="empty">No open positions</td></tr>
           </tbody>
         </table>
       </div>
@@ -290,10 +300,22 @@ function renderSummary(s) {
   badge.className = 'mode-badge mode-' + mode;
 
   document.getElementById('stat-bankroll').textContent  = '$' + fmt(s.bankroll);
+
   const u = s.total_unrealized || 0;
   const uel = document.getElementById('stat-unrealized');
   uel.textContent = (u >= 0 ? '+' : '') + '$' + Math.abs(u).toFixed(2);
   uel.className = 'stat-value ' + (u > 0 ? 'pos' : u < 0 ? 'neg' : 'neu');
+
+  const dp = s.daily_pnl || 0;
+  const dpel = document.getElementById('stat-daily-pnl');
+  dpel.textContent = (dp >= 0 ? '+' : '') + '$' + Math.abs(dp).toFixed(2);
+  dpel.className = 'stat-value ' + (dp > 0 ? 'pos' : dp < 0 ? 'neg' : 'neu');
+
+  const tp = s.total_pnl || 0;
+  const tpel = document.getElementById('stat-total-pnl');
+  tpel.textContent = (tp >= 0 ? '+' : '') + '$' + Math.abs(tp).toFixed(2);
+  tpel.className = 'stat-value ' + (tp > 0 ? 'pos' : tp < 0 ? 'neg' : 'neu');
+
   document.getElementById('stat-open').textContent = s.open_positions || 0;
 }
 
@@ -313,10 +335,15 @@ function renderPositions(positions, hrrr) {
     const tmax = hs ? fmtTemp(hs.last_tmax_f) : '—';
     const bid = p.current_bid != null ? fmt(p.current_bid) : '—';
     const ask = p.current_ask != null ? fmt(p.current_ask) : '—';
+    const cts = p.contracts != null ? p.contracts : '—';
+    const stake = (p.contracts != null && p.entry_price != null)
+      ? '$' + (p.contracts * p.entry_price).toFixed(2) : '—';
     return `<tr>
       <td>${p.city || p.station}</td>
       <td>${sideTag}</td>
       <td>${p.bucket_label || p.bucket_lower}</td>
+      <td>${cts}</td>
+      <td>${stake}</td>
       <td>${fmt(p.entry_price)}</td>
       <td>${bid}</td>
       <td>${ask}</td>

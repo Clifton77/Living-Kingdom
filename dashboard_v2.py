@@ -148,9 +148,12 @@ def _get_full_state() -> dict:
             }
 
     # ── Summary ───────────────────────────────────────────────────────────
+    daily_pnl = round(getattr(sched, "_daily_pnl", 0.0), 2)
     summary = {
         "open_positions":    len(positions_out),
         "total_unrealized":  round(total_unrealized, 2),
+        "daily_pnl":         daily_pnl,
+        "total_pnl":         round(daily_pnl + total_unrealized, 2),
         "bankroll":          cfg.STARTING_BANKROLL,
         "mode":              (
             "DEMO" if cfg.USE_DEMO
