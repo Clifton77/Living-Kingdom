@@ -214,8 +214,9 @@ END_DATE   = (_date.today() - _timedelta(days=1)).isoformat()  # yesterday, upda
 # Data paths
 # ---------------------------------------------------------------------------
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, "data")
-RAW_DIR    = os.path.join(DATA_DIR, "raw")
+DATA_DIR        = os.path.join(BASE_DIR, "data")
+RAW_DIR         = os.path.join(DATA_DIR, "raw")
+HERBIE_CACHE_DIR = os.path.join(DATA_DIR, "herbie_cache")
 LOGS_DIR   = os.path.join(BASE_DIR, "logs")
 
 OBS_PARQUET      = os.path.join(DATA_DIR, "obs_daily.parquet")

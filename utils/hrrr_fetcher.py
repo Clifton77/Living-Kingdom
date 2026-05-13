@@ -21,6 +21,10 @@ import numpy as np
 
 warnings.filterwarnings("ignore")
 
+import os
+from config import HERBIE_CACHE_DIR
+os.makedirs(HERBIE_CACHE_DIR, exist_ok=True)
+
 
 def _kelvin_to_f(k: float) -> float:
     return (k - 273.15) * 9 / 5 + 32
@@ -76,8 +80,9 @@ def fetch_station_tmax(
                 product="sfc",
                 fxx=fxx,
                 verbose=False,
+                save_dir=HERBIE_CACHE_DIR,
             )
-            ds = H.xarray("TMP:2 m above ground", remove_grib=True)
+            ds = H.xarray("TMP:2 m above ground", remove_grib=False)
 
             for station, (lat, lon) in station_coords.items():
                 peak_utc = peak_utc_by_station.get(station, 0)

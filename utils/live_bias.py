@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from config import HRRR_COLD_BIAS_F, KALSHI_SETTLEMENT_STATION
+from config import HERBIE_CACHE_DIR, HRRR_COLD_BIAS_F, KALSHI_SETTLEMENT_STATION
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +152,9 @@ def _fetch_hrrr_points(
         H = Herbie(
             run_time.strftime("%Y-%m-%d %H:%M"),
             model="hrrr", product="sfc", fxx=fxx, verbose=False,
+            save_dir=HERBIE_CACHE_DIR,
         )
-        ds    = H.xarray("TMP:2 m above ground", remove_grib=True)
+        ds    = H.xarray("TMP:2 m above ground", remove_grib=False)
         lats  = ds.latitude.values
         lons  = ds.longitude.values
 
